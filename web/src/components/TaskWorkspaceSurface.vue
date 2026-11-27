@@ -1213,7 +1213,7 @@ async function submitDelegate() {
   // task is left drawn over or behind the conversation.
   if (outcome.chat_id) {
     resetDelegate()
-    await landOnChat(outcome.chat_id, true)
+    await landOnChat(outcome.chat_id)
     return
   }
   closeDelegate()
@@ -1230,41 +1230,58 @@ async function submitDelegate() {
  * stepped back over its own entry, so the chat is one push on top of where the
  * user was and Back returns there, never to a half-closed sheet or editor.
  *
- * `fresh` is a chat the engine has just created, which this browser's chat list
- * may not hold yet; the deep-link entry asks the engine about it first.
+ * The deep-link entry is used for every landing: it asks the engine about a chat
+ * this browser's list may not hold yet (one just created, or one opened from
+ * another device) and then falls through to `switchChat`.
  */
-async function landOnChat(chatId: string, fresh = false): Promise<void> {
+async function landOnChat(chatId: string): Promise<void> {
   if (detailOpen.value) {
     await closeDetail()
+    // A refused close (blank title, failed save) keeps the editor on screen: the
+    // user stays with it and its sentence rather than being navigated away.
     if (detailOpen.value) return
   }
   // The sheet was the last thing an overlay drew. Without this the host would
   // keep a mounted, invisible surface after the chat opened.
   if (overlay.value) finishOverlayClose()
   if (!chatId) return
-  if (fresh) await projectStore.openChatFromDeepLink(chatId)
-  else await projectStore.switchChat(chatId)
-  await focusChatComposer()
+  await projectStore.openChatFromDeepLink(chatId)
+  if (projectStore.activeChatId !== chatId) {
+    projectStore.pushToast({
+      chat_id: '',
+      title: 'Chat not opened',
+      body: 'The agent is working in its own chat. Find it in the sidebar.',
+      variant: 'info',
+    })
+    return
+  }
+  await keepFocus()
 }
 
 /**
- * Put focus in the arrived chat's composer, once it is drawn.
+ * Keep focus out of `<body>` once the chat is drawn, without choosing for the chat.
  *
- * The control that held focus (a card, the sheet's button) is gone by now, which
- * would drop a keyboard user to `<body>`. Focus moves only while it is still on
- * nothing: a user who has already clicked or tabbed somewhere keeps it.
+ * The arriving pane's own mount policy (ChatPanel `focusComposerOnOpen`) decides
+ * whether the composer takes focus: not on a phone, where it would raise the
+ * keyboard, and not over a question card, a pending approval or an open MCP
+ * drawer. When that left focus on nothing (the control that held it is gone), it
+ * moves to the pane's composer group, a landmark that is not a text field. The
+ * search is inside the main chat pane, never the document's first composer, which
+ * can belong to the beside pane.
  */
-async function focusChatComposer(): Promise<void> {
-  for (let attempt = 0; attempt < 30; attempt++) {
-    const active = document.activeElement
-    if (active && active !== document.body && active.isConnected) return
-    const composer = document.querySelector<HTMLTextAreaElement>('textarea.chat-input')
-    if (composer && !composer.disabled) {
-      composer.focus()
-      return
-    }
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 50))
+async function keepFocus(): Promise<void> {
+  let pane: Element | null = null
+  for (let attempt = 0; attempt < 30 && !pane; attempt++) {
+    pane = [...document.querySelectorAll('.chat-panel')].find((el) => !el.closest('.chat-split-side')) ?? null
+    if (!pane) await new Promise<void>((resolve) => window.setTimeout(resolve, 50))
   }
+  if (!pane) return
+  // Let the pane's own post-mount focus run first.
+  await nextTick()
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 100))
+  const active = document.activeElement
+  if (active && active !== document.body && active.isConnected) return
+  pane.querySelector<HTMLElement>('.composer-bar')?.focus({ preventScroll: true })
 }
 
 /** One lifecycle gesture on a card's attempt. */

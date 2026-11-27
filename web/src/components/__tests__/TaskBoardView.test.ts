@@ -3112,7 +3112,7 @@ describe('TaskBoardView', () => {
   it('the editor\'s Open chat goes to the chat, not to a preview under the editor', async () => {
     const wrapper = await mountWithBody([liveTask({ attempt_state: 'needs_you' })])
     const switchChat = vi.fn()
-    useProjectStore().switchChat = switchChat
+    useProjectStore().openChatFromDeepLink = switchChat
     await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
     await flushPromises()
     await nextTick()

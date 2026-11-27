@@ -12,6 +12,21 @@ import { COMPOSER, boot, isolate } from '../support/app'
 const TASK_ID = '0123456789abcdef0123456789abcdef'
 const DELEGATED_CHAT = 'alpha-chat-2'
 
+/**
+ * Focus after landing. Wide panes take the composer through ChatPanel's own
+ * policy; on a phone it must not (the keyboard would rise), so focus sits on the
+ * composer group, a landmark that is not a text field. Never on <body>.
+ */
+async function expectFocusLanded(page: Page, phone: boolean): Promise<void> {
+  if (phone) {
+    await expect(page.getByRole('group', { name: 'Message composer' })).toBeFocused()
+    await expect(page.locator(COMPOSER)).not.toBeFocused()
+  } else {
+    await expect(page.locator(COMPOSER)).toBeFocused()
+  }
+  await expect(page.locator('body')).not.toBeFocused()
+}
+
 /** Answer the delegate POST as the engine does: a running attempt in an existing chat. */
 async function answerDelegation(page: Page): Promise<void> {
   await page.route('**/api/tasks/*/delegate', async route => {
@@ -57,7 +72,7 @@ for (const viewport of [{ width: 1280, height: 900, phone: false }, { width: 390
       await expect(page).toHaveURL(new RegExp(`/chat/${DELEGATED_CHAT}$`))
       await expect(page.locator('.task-delegate-sheet')).toHaveCount(0)
       await expect(page.locator('.task-detail-sheet')).toHaveCount(0)
-      await expect(page.locator(COMPOSER)).toBeFocused()
+      await expectFocusLanded(page, viewport.phone)
       await page.screenshot({ path: testInfo.outputPath(`overlay-landed-${viewport.width}.png` ) })
 
       // Back is the chat the link was clicked in, with nothing of the task over it.
@@ -81,7 +96,7 @@ for (const viewport of [{ width: 1280, height: 900, phone: false }, { width: 390
       await expect(page).toHaveURL(new RegExp(`/chat/${DELEGATED_CHAT}$`))
       await expect(page.locator('.task-delegate-sheet')).toHaveCount(0)
       await expect(page.locator('.task-detail-sheet')).toHaveCount(0)
-      await expect(page.locator(COMPOSER)).toBeFocused()
+      await expectFocusLanded(page, viewport.phone)
       await page.screenshot({ path: testInfo.outputPath(`page-landed-${viewport.width}.png`) })
 
       await page.goBack()

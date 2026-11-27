@@ -51,14 +51,21 @@ function readInstructions(content: string, from: number): string {
 
 export function parseTaskHandover(content: string | null | undefined): TaskHandover | null {
   if (!content) return null
-  const open = content.indexOf(TASK_FENCE_OPEN)
+  // Both task tags stand on their own line, as the engine writes them, so a
+  // `Title:` that mentions the tag cannot shift where the description starts.
+  const text = `\n${content}`
+  const openTag = `\n${TASK_FENCE_OPEN}\n`
+  const open = text.indexOf(openTag)
   if (open < 0) return null
-  const close = content.indexOf(TASK_FENCE_CLOSE, open + TASK_FENCE_OPEN.length)
+  const bodyStart = open + openTag.length
+  const closeTag = `\n${TASK_FENCE_CLOSE}`
+  // The empty-description case has its close tag right after the open line's newline.
+  const close = text.indexOf(closeTag, bodyStart - 1)
   if (close < 0) return null
-  const description = content.slice(open + TASK_FENCE_OPEN.length, close).trim()
+  const description = text.slice(bodyStart, Math.max(close, bodyStart)).trim()
   // Only the header above the fence names the record; a `Title:` line inside
   // the description is the user's prose.
-  const titleLine = content
+  const titleLine = text
     .slice(0, open)
     .split('\n')
     .find((line) => line.startsWith('Title: '))
@@ -66,6 +73,6 @@ export function parseTaskHandover(content: string | null | undefined): TaskHando
   return {
     title,
     description,
-    instructions: readInstructions(content, close + TASK_FENCE_CLOSE.length),
+    instructions: readInstructions(text, close + closeTag.length),
   }
 }

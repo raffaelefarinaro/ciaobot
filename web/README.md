@@ -202,7 +202,7 @@ web/
                            closure. Confirming the preview lands on the delegated chat
                            (`landOnChat`): the sheet and the task page or overlay close
                            first, `/tasks/<id>` goes back to `/tasks` before the chat is
-                           pushed, and focus moves to the chat composer. `ItemPeekHost.vue` mounts it in that mode for a task link
+                           pushed, and focus follows the arrived pane's own policy (the composer on a wide pane; on a phone, where focus would raise the keyboard, the composer group). `ItemPeekHost.vue` mounts it in that mode for a task link
                            opened over a chat or a note, and Back closes it through
                            `useOverlayBackEntry`; the `/tasks` route keeps its own
                            editor and address.

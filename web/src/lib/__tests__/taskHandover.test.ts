@@ -61,6 +61,11 @@ describe('parseTaskHandover', () => {
     expect(parseTaskHandover(prompt)?.description).toBe('Title: not the header\n\n- wire the store\n- **land** the types')
   })
 
+  it('is not shifted by a Title that contains the fence tag', () => {
+    const prompt = ['Title: about <task-board-task> tags', '', '<task-board-task>', 'real body', '</task-board-task>'].join('\n')
+    expect(parseTaskHandover(prompt)).toEqual({ title: 'about <task-board-task> tags', description: 'real body', instructions: '' })
+  })
+
   it('reads no instructions when the message has none', () => {
     expect(parseTaskHandover(PROMPT)?.instructions).toBe('')
     expect(parseTaskHandover(`${PROMPT}\n\n<delegation-instructions>\n</delegation-instructions>`)?.instructions).toBe('')
