@@ -206,3 +206,115 @@ async def test_acp_history_numbers_user_rows_by_engine_turn_when_journal_lacks_e
     replies = {row["content"]: row for row in rows if row["role"] == "assistant"}
     assert replies["three"]["duration_ms"] == 3000
     assert replies["four"]["duration_ms"] == 4000
+
+
+
+def _durable_turns(prompts: list[str], errors: tuple[int, ...] = ()) -> list[dict]:
+    rows: list[dict] = []
+    for turn, prompt in enumerate(prompts):
+        rows.append({"role": "user", "content": prompt, "sent_at": f"sent-{turn}"})
+        reply: dict = {"role": "assistant", "content": f"reply-{turn}", "usage": {"tok": str(turn)}}
+        if turn in errors:
+            reply["is_error"] = True
+        rows.append(reply)
+    return rows
+
+
+def _counted_chat(acp_chat, monkeypatch, durable_prompts, count, errors=()):
+    pcm, chat, config = acp_chat
+    chat.user_turn_count = count
+    chat.user_turn_timings = {
+        str(turn): {"sent_at": f"s{turn}", "completed_at": f"c{turn}", "duration_ms": 1000 * (turn + 1)}
+        for turn in range(count)
+    }
+    durable = _durable_turns(durable_prompts, errors)
+    monkeypatch.setattr(pcm._transcripts, "current_messages", lambda _ctx, _provider: list(durable))
+    return pcm, chat, config, _journal(config, "sess-1")
+
+
+def _replayed(journal: SessionJournal, turns: int) -> None:
+    """Turns as a load replay rebuilt them: their replies, without their prompts."""
+    for turn in range(turns):
+        journal.event({"type": "text_delta", "text": f"reply-{turn}"})
+        journal.event({"type": "result", "text": "", "is_error": False})
+
+
+def _live_turn(journal: SessionJournal, prompt: str, turn: int, *, done: bool = True) -> None:
+    journal.user(prompt)
+    journal.event({"type": "text_delta", "text": f"reply-{turn}"})
+    if done:
+        journal.event({"type": "result", "text": "", "is_error": False})
+
+
+def _user_turns(rows: list[dict]) -> list[tuple[str, Any]]:
+    return [(row["content"], row.get("turn_index")) for row in rows if row["role"] == "user"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("done", [True, False], ids=["finished", "running"])
+async def test_rebuilt_journal_start_matches_a_repeated_prompt_from_the_end(
+    acp_chat, monkeypatch, done
+) -> None:
+    """Turn 1 and turn 6 are both 'continue'. Matching from the start paired the live prompt
+    with turn 1, so it took turn 1's index, usage and duration."""
+    prompts = ["a", "continue", "b", "c", "d", "e", "continue"]
+    durable = prompts if done else prompts[:-1]
+    pcm, chat, config, journal = _counted_chat(acp_chat, monkeypatch, durable, 7)
+    _replayed(journal, 6)
+    _live_turn(journal, "continue", 6, done=done)
+
+    rows = await _assemble_chat_messages(pcm, config, chat)
+
+    assert _user_turns(rows) == [("continue", 6)]
+    if done:
+        reply = [row for row in rows if row["role"] == "assistant"][-1]
+        assert reply["content"] == "reply-6"
+        assert reply["duration_ms"] == 7000
+        assert reply["usage"] == {"tok": "6"}
+
+
+@pytest.mark.asyncio
+async def test_rebuilt_journal_start_without_a_durable_transcript_takes_the_last_turns(
+    acp_chat, monkeypatch
+) -> None:
+    pcm, chat, config, journal = _counted_chat(acp_chat, monkeypatch, [], 4)
+    _replayed(journal, 2)
+    _live_turn(journal, "q", 2)
+    _live_turn(journal, "r", 3)
+
+    rows = await _assemble_chat_messages(pcm, config, chat)
+
+    assert _user_turns(rows) == [("q", 2), ("r", 3)]
+
+
+@pytest.mark.asyncio
+async def test_rebuilt_journal_start_keeps_a_failed_send_the_journal_never_got(
+    acp_chat, monkeypatch
+) -> None:
+    pcm, chat, config, journal = _counted_chat(
+        acp_chat, monkeypatch, ["p0", "p1", "p2", "p3"], 4, errors=(1,)
+    )
+    _replayed(journal, 1)
+    _live_turn(journal, "p2", 2)
+    _live_turn(journal, "p3", 3)
+
+    rows = await _assemble_chat_messages(pcm, config, chat)
+
+    assert _user_turns(rows) == [("p1", 1), ("p2", 2), ("p3", 3)]
+
+
+@pytest.mark.asyncio
+async def test_full_journal_with_repeated_prompts_pairs_each_turn_with_its_own(
+    acp_chat, monkeypatch
+) -> None:
+    prompts = ["continue", "continue", "x", "continue", "yes", "yes"]
+    pcm, chat, config, journal = _counted_chat(acp_chat, monkeypatch, prompts, 6)
+    for turn, prompt in enumerate(prompts):
+        _live_turn(journal, prompt, turn)
+
+    rows = await _assemble_chat_messages(pcm, config, chat)
+
+    assert _user_turns(rows) == [(prompt, turn) for turn, prompt in enumerate(prompts)]
+    replies = [row for row in rows if row["role"] == "assistant"]
+    assert [row["usage"]["tok"] for row in replies] == [str(turn) for turn in range(6)]
+    assert [row["duration_ms"] for row in replies] == [1000 * (turn + 1) for turn in range(6)]
