@@ -1,13 +1,13 @@
 /*
- * The Automations overview's section language: a plain heading over hairline
+ * The Automations pages' section language: a plain heading over hairline
  * rows — title and one muted sub-line on the left, a time or state on the right.
  * The automation rows themselves are `ListRow.vue`, the row Home's chat list
  * uses; `.ov-item` here keeps the webhook rows (plain, non-link rows with their
  * own controls) in the same shape, and lets a section put its rule above the
  * first row.
  *
- * `SchedulePanel.vue` and `WebhookTriggers.vue` both render `.ov-section`
- * groups and each pulls this in with `<style scoped src="./overviewSections.css">`,
+ * The Automations pages (`AutomationSchedulesPage.vue`, `AutomationLoopsPage.vue`)
+ * and `WebhookTriggers.vue` render `.ov-section` groups and each pulls this in with `<style scoped src="./overviewSections.css">`,
  * so each component compiles the same rules against its own scope id. A parent's
  * scoped rules never reach a child's subtree, so the webhook section would come
  * out unstyled if it were left to inherit.
@@ -28,6 +28,12 @@
   letter-spacing: -0.02em;
 }
 .ov-section--alert .ov-head h2 { color: var(--warning); }
+/* A heading with its one-line explanation under it, and optionally the
+   section's one primary action at the right. */
+.ov-head--stacked { flex-direction: column; align-items: stretch; gap: 2px; }
+.ov-head--stacked .ov-intro { margin: 0; }
+.ov-head--action { flex-direction: row; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.ov-head-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ov-run-all { margin-left: auto; }
 .ov-hint { color: var(--fg3); font-size: var(--text-sm); }
 .ov-intro { margin: -4px 0 var(--space-2); color: var(--fg3); font-size: var(--text-sm); }

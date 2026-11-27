@@ -31,6 +31,23 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
+def test_handover_note_names_the_provider_alone_for_the_cli_default(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("handover", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="default", provider="claude")
+    pcm._save()
+
+    updated = pcm.handover_chat(
+        chat.chat_id, provider="opencode", model="openai/gpt-5.6",
+        messages=[{"role": "user", "content": "Carry on"}],
+    )
+
+    assert updated is not None
+    note = updated.handover_messages[-1]["content"]
+    assert note == "Handed over from Claude Code to OpenCode / openai/gpt-5.6."
+    assert "default" not in note.lower()
+
+
 def test_handover_chat_switches_model_and_persists_messages(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("handover", workspace="personal")
@@ -60,7 +77,7 @@ def test_handover_chat_switches_model_and_persists_messages(tmp_path: Path) -> N
     assert updated.handover_context_pending is True
     assert updated.handover_messages[0]["content"] == "Build the handover feature"
     assert updated.handover_messages[-1]["role"] == "system"
-    assert "Handed over from Claude / opus to Claude / haiku" in updated.handover_messages[-1]["content"]
+    assert "Handed over from Claude Code / opus to Claude Code / haiku" in updated.handover_messages[-1]["content"]
 
     persisted = json.loads((tmp_path / ".runtime" / "web_projects.json").read_text(encoding="utf-8"))
     saved = persisted["chats"][chat.chat_id]
@@ -96,7 +113,7 @@ def test_handover_chat_switches_between_claude_and_opencode(tmp_path: Path) -> N
     assert updated.model == "anthropic/claude-sonnet-4-6"
     assert updated.thinking_level == ""
     assert updated.session_id == ""
-    assert "Claude / opus to OpenCode / anthropic/claude-sonnet-4-6" in updated.handover_messages[-1]["content"]
+    assert "Claude Code / opus to OpenCode / anthropic/claude-sonnet-4-6" in updated.handover_messages[-1]["content"]
 
 
 def test_handover_messages_are_injected_into_next_prompt_once(tmp_path: Path) -> None:

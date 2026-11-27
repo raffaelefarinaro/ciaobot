@@ -660,7 +660,7 @@ describe('SchedulePanel property cards', () => {
   })
 })
 
-describe('SchedulePanel overview', () => {
+describe('SchedulePanel Automations pages', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
@@ -669,105 +669,171 @@ describe('SchedulePanel overview', () => {
     while (mounted.length) mounted.pop()?.unmount()
   })
 
-  async function mountOverview(schedules: Schedule[]): Promise<VueWrapper> {
+  async function mountPage(schedules: Schedule[], path = '/schedules', opts: { loaded?: boolean } = {}) {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
         { path: '/', component: Stub },
         { path: '/chat/:chatId?', component: Stub },
         { path: '/schedules/:scheduleId?', component: Stub },
+        { path: '/automations/loops', component: Stub },
+        { path: '/automations/webhooks', component: Stub },
       ],
     })
-    await router.push('/schedules')
+    await router.push(path)
     await router.isReady()
     const store = useTaskStore()
     store.schedules = schedules
-    store.schedulesLoaded = true
+    store.schedulesLoaded = opts.loaded ?? true
     store.scheduleLoadError = ''
     store.fetchSchedules = vi.fn(async () => {})
     store.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
     useProjectStore().activeWorkspace = 'work'
     // The webhook section reads its own store on mount. Seeded as already read so
     // this file never reaches the network for it: the section's five load states
-    // are pinned in `WebhookTriggers.test.ts`, and what is asserted here is that
-    // this pane draws the section at all.
+    // are pinned in `WebhookTriggers.test.ts`.
     const webhooks = useWebhookStore()
     webhooks.loadedWorkspace = 'work'
     webhooks.triggers = []
     const { default: SchedulePanel } = await import('../SchedulePanel.vue')
     const wrapper = mount(SchedulePanel, {
+      attachTo: document.body,
       global: { plugins: [router], stubs: { ModelSelector: Stub, PaneHeader: false } },
     })
     await flushPromises()
     mounted.push(wrapper)
-    return wrapper
+    return { wrapper, router }
   }
 
-  it('gives chat loops their own section, out of next up and paused', async () => {
+  const rowTitles = (section: ReturnType<VueWrapper['get']>) =>
+    section.findAll('.automation-row .list-row-title').map(t => t.text())
+
+  it('lists system routines first, then the user\'s by next run with one-offs among them and paused ones last; loops elsewhere', async () => {
     useProjectStore().chats = [{ chat_id: 'chat-a', title: 'Build chat' }] as never
-    const wrapper = await mountOverview([
-      makeSchedule({ schedule_id: 'a', title: 'Morning brief' }),
+    const { wrapper } = await mountPage([
+      makeSchedule({ schedule_id: 'late', title: 'Late brief', next_run: '2026-08-15T10:00:00Z' }),
+      makeSchedule({ schedule_id: 'old', title: 'Old sweep', enabled: false, next_run: null }),
+      makeSchedule({ schedule_id: 'care', title: 'Workspace care', scope: 'system' }),
+      makeSchedule({ schedule_id: 'once', title: 'Call the bank', frequency: 'once', run_at_date: '2026-08-15', next_run: '2026-08-15T08:00:00Z' }),
+      makeSchedule({ schedule_id: 'soon', title: 'Morning brief', next_run: '2026-08-15T07:00:00Z' }),
       loopSchedule({ schedule_id: 'l' }),
-      makeSchedule({ schedule_id: 'b', title: 'Old sweep', enabled: false, next_run: null }),
     ])
-    const section = wrapper.get('[aria-labelledby="ov-loops-title"]')
-    expect(section.text()).toContain('Watch the build')
-    expect(section.text()).toContain('in Build chat · every 5 min · 7 runs left')
-    expect(wrapper.get('[aria-labelledby="ov-next-title"]').text()).not.toContain('Watch the build')
-    expect(wrapper.get('[aria-labelledby="ov-paused-title"]').text()).not.toContain('Watch the build')
-    expect(wrapper.get('[aria-labelledby="ov-next-title"]').text()).toContain('Morning brief')
+    const sections = wrapper.findAll('section.ov-section').map(s => s.attributes('aria-labelledby'))
+    expect(sections).toEqual(['ov-system-title', 'ov-routines-title'])
+    expect(wrapper.get('#ov-system-title').text()).toBe('System routines')
+    const system = wrapper.get('[aria-labelledby="ov-system-title"]')
+    expect(system.text()).toContain("Ciaobot's own upkeep. They run on their own and never need you.")
+    expect(rowTitles(system)).toEqual(['Workspace care'])
+    const yours = wrapper.get('[aria-labelledby="ov-routines-title"]')
+    expect(rowTitles(yours)).toEqual(['Morning brief', 'Call the bank', 'Late brief', 'Old sweep'])
+    const rows = yours.findAll('.automation-row')
+    expect(rows[1].get('.automation-tag').text()).toBe('once')
+    expect(rows[3].classes()).toContain('automation-row--paused')
+    expect(rows[3].get('.list-row-end').text()).toBe('paused')
+    expect(rows[0].attributes('href')).toBe('/schedules/soon')
+    // No loop on this page, and none of the old overview's sections or counts.
+    expect(wrapper.text()).not.toContain('Watch the build')
+    expect(wrapper.text()).not.toContain('In this workspace')
+    expect(wrapper.text()).not.toContain('Next up')
   })
 
-  it('splits next up, paused and system routines, and counts them in the rail', async () => {
-    const wrapper = await mountOverview([
-      makeSchedule({ schedule_id: 'a', title: 'Morning brief' }),
-      makeSchedule({ schedule_id: 'b', title: 'Old sweep', enabled: false, next_run: null }),
-      makeSchedule({ schedule_id: 'c', title: 'Workspace care', scope: 'system' }),
-      makeSchedule({ schedule_id: 'd', title: 'Flaky one', last_status: 'error' }),
+  it('marks a missed routine on its row and keeps a short Missed notice with Run all', async () => {
+    const { wrapper } = await mountPage([
+      makeSchedule({ schedule_id: 'm', title: 'Morning brief', missed: true, last_expected_run: '2026-08-14T07:00:00Z' }),
+      makeSchedule({ schedule_id: 'ok', title: 'Quiet one', last_status: 'ok', last_dispatched_at: '2026-08-14T06:00:00Z' }),
     ])
-    const section = (id: string) => wrapper.get(`[aria-labelledby="${id}"]`)
-    expect(section('ov-next-title').text()).toContain('Morning brief')
-    expect(section('ov-next-title').text()).not.toContain('Workspace care')
-    expect(section('ov-paused-title').text()).toContain('Old sweep')
-    expect(section('ov-system-title').text()).toContain('Workspace care')
-
-    const rail = wrapper.get('.page-rail')
-    const kv = rail.findAll('.rail-kv').map(row => row.text())
-    expect(kv).toContain('Active3')
-    expect(kv).toContain('Paused1')
-    expect(rail.text()).toContain('Needs a look')
-    expect(rail.text()).toContain('Flaky one')
+    const notice = wrapper.get('[aria-labelledby="ov-missed-title"]')
+    expect(notice.text()).toContain('Morning brief did not run when it was due.')
+    expect(notice.get('button').text()).toBe('Run all')
+    const row = wrapper.findAll('.automation-row').find(r => r.text().includes('Morning brief'))!
+    expect(row.find('.activity-glyph--alert').exists()).toBe(true)
+    expect(row.get('.automation-state-word').text()).toBe('missed')
+    expect(row.get('.automation-state .sr-only').text()).toBe('Missed a run.')
+    const quiet = wrapper.findAll('.automation-row').find(r => r.text().includes('Quiet one'))!
+    expect(quiet.find('.care-glyph--done').exists()).toBe(true)
+    expect(quiet.find('.automation-state-word').exists()).toBe(false)
   })
 
-  it('shows next runs in the browser zone, not the automation\'s UTC clock', async () => {
+  it('shows a run in progress as the working glyph, and a failed run as the alert and a word', async () => {
+    const { wrapper } = await mountPage([
+      makeSchedule({ schedule_id: 'r', title: 'Running one', last_status: 'running', last_dispatched_at: '2026-08-14T06:00:00Z', last_run_chat_id: 'chat-run' }),
+      makeSchedule({ schedule_id: 'e', title: 'Flaky one', last_status: 'error', last_dispatched_at: '2026-08-14T05:00:00Z' }),
+    ])
+    const row = (title: string) => wrapper.findAll('.automation-row').find(r => r.text().includes(title))!
+    expect(row('Running one').find('.activity-glyph--working').exists()).toBe(true)
+    expect(row('Running one').get('.automation-state').attributes('title')).toBe('Running now')
+    expect(row('Flaky one').find('.activity-glyph--alert').exists()).toBe(true)
+    expect(row('Flaky one').get('.automation-state-word').text()).toBe('failed')
+  })
+
+  it('shows a routine whose chat was deleted as paused and "chat deleted", above the plain paused ones', async () => {
+    const { wrapper } = await mountPage([
+      makeSchedule({ schedule_id: 'p', title: 'Old sweep', enabled: false, next_run: null }),
+      makeSchedule({ schedule_id: 'o', title: 'Orphaned brief', enabled: false, next_run: null, last_status: 'missing-chat', last_dispatched_at: '2026-08-14T06:00:00Z' }),
+      makeSchedule({ schedule_id: 'q', title: 'Asks first', last_status: 'skipped', last_dispatched_at: '2026-08-14T06:00:00Z' }),
+    ])
+    const yours = wrapper.get('[aria-labelledby="ov-routines-title"]')
+    expect(rowTitles(yours)).toEqual(['Asks first', 'Orphaned brief', 'Old sweep'])
+    const orphan = yours.findAll('.automation-row')[1]
+    expect(orphan.get('.automation-tag').text()).toBe('paused')
+    expect(orphan.find('.activity-glyph--alert').exists()).toBe(true)
+    expect(orphan.get('.automation-state-word').text()).toBe('chat deleted')
+    // A plain paused row is the tag alone.
+    expect(yours.findAll('.automation-row')[2].get('.list-row-end').text()).toBe('paused')
+    // A run that stopped on a question is not an alert here (its chat says so).
+    expect(yours.findAll('.automation-row')[0].find('.activity-glyph--alert').exists()).toBe(false)
+  })
+
+  it('says a loop whose next run has passed is due', async () => {
+    const { wrapper } = await mountPage([loopSchedule({ schedule_id: 'l', next_run: '2020-01-01T00:00:00Z' })], '/automations/loops')
+    expect(wrapper.get('.automation-row .list-row-end').text()).toContain('next run due')
+  })
+
+  it('docks Recent runs on the right: newest first, five at most, each opening its chat', async () => {
+    const runs = Array.from({ length: 6 }, (_, i) => makeSchedule({
+      schedule_id: `s${i}`,
+      title: `Routine ${i}`,
+      last_dispatched_at: `2026-08-1${i}T08:00:00Z`,
+      last_run_chat_id: `chat-${i}`,
+    }))
+    const { wrapper } = await mountPage(runs)
+    const rail = wrapper.get('.page-rail .docked-window')
+    expect(rail.get('.docked-window-head h2').text()).toBe('Recent runs')
+    const links = rail.findAll('a.docked-row')
+    expect(links.map(l => l.get('.docked-row-title').text())).toEqual(['Routine 5', 'Routine 4', 'Routine 3', 'Routine 2', 'Routine 1'])
+    expect(links[0].attributes('href')).toBe('/chat/chat-5')
+  })
+
+  it('shows the last run in the browser zone, not the automation\'s UTC clock', async () => {
     // Pinned so the expected clock is the same on every machine: 00:01 UTC on a
     // Saturday is 09:01 in Tokyo, which has no DST.
     const previousTz = process.env.TZ
     process.env.TZ = 'Asia/Tokyo'
     try {
-      const wrapper = await mountOverview([
+      const { wrapper } = await mountPage([
         makeSchedule({
           schedule_id: 'utc',
           title: 'Early sweep',
           timezone_name: 'UTC',
           daily_time_utc: '00:01',
-          next_run: '2026-12-05T00:01:00Z',
+          last_dispatched_at: '2026-12-05T00:01:00Z',
+          next_run: '2026-12-06T00:01:00Z',
         }),
       ])
-      const row = wrapper.get('.ov-item .list-row-end').text()
-      expect(row).toContain('Sat 09:01')
-      expect(row).not.toContain('00:01')
+      const end = wrapper.get('.automation-row .list-row-end').text()
+      expect(end).toContain('Sat 09:01')
+      expect(end).not.toContain('00:01')
     } finally {
       if (previousTz === undefined) delete process.env.TZ
       else process.env.TZ = previousTz
     }
   })
 
-  it('states the cadence in browser time, matching the next-run time', async () => {
+  it('states the cadence in browser time, and where it runs', async () => {
     const previousTz = process.env.TZ
     process.env.TZ = 'Europe/Rome'
     try {
-      const wrapper = await mountOverview([
+      const { wrapper } = await mountPage([
         makeSchedule({
           schedule_id: 'utc',
           title: 'Early sweep',
@@ -778,55 +844,75 @@ describe('SchedulePanel overview', () => {
           next_run: '2026-12-05T00:01:00Z',
         }),
       ])
-      const row = wrapper.get('.ov-item')
-      expect(row.get('.list-row-sub').text()).toContain('Every day at 01:01')
-      expect(row.get('.list-row-sub').text()).not.toContain('00:01')
-      expect(row.get('.list-row-end').text()).toContain('Sat 01:01')
+      const sub = wrapper.get('.automation-row .list-row-sub').text()
+      expect(sub).toContain('Every day at 01:01')
+      expect(sub).not.toContain('00:01')
+      expect(sub).toContain('new chat in General')
     } finally {
       if (previousTz === undefined) delete process.env.TZ
       else process.env.TZ = previousTz
     }
   })
 
-  it('sends a "check the chat" row to the run chat, and other rows to the automation', async () => {
-    const wrapper = await mountOverview([
-      makeSchedule({ schedule_id: 'q', title: 'Asks first', last_status: 'skipped', last_run_chat_id: 'chat-q' }),
-      makeSchedule({ schedule_id: 'e', title: 'Flaky one', last_status: 'error', last_run_chat_id: 'chat-e' }),
+  it('teaches with an empty state and asks ChatLayout for the form from New routine', async () => {
+    const { wrapper } = await mountPage([
+      makeSchedule({ schedule_id: 'care', title: 'Workspace care', scope: 'system' }),
     ])
-    const rows = wrapper.get('.page-rail').findAll('a.rail-item')
-    const row = (title: string) => rows.find(r => r.text().includes(title))!
-    expect(row('Asks first').attributes('href')).toBe('/chat/chat-q')
-    expect(row('Asks first').text()).toContain('needs you — check the chat')
-    expect(row('Flaky one').attributes('href')).toBe('/schedules/e')
+    const yours = wrapper.get('[aria-labelledby="ov-routines-title"]')
+    expect(yours.text()).toContain('No routines yet')
+    await yours.get('button.automations-new').trigger('click')
+    expect(wrapper.emitted('new')).toHaveLength(1)
   })
 
-  it('keeps a retrying run out of Needs a look', async () => {
-    const wrapper = await mountOverview([
-      makeSchedule({ schedule_id: 'r', title: 'Morning brief', last_status: 'retrying' }),
-    ])
-    const rows = wrapper.get('.page-rail').findAll('a.rail-item')
-    expect(rows.some(r => r.text().includes('Morning brief'))).toBe(false)
-  })
-
-  it('draws the webhook section under the overview', async () => {
-    const wrapper = await mountOverview([
+  it('draws the Loops page with each loop\'s chat, cadence, end and next run, and teaches when empty', async () => {
+    useProjectStore().chats = [{ chat_id: 'chat-a', title: 'Build chat' }] as never
+    const { wrapper } = await mountPage([
       makeSchedule({ schedule_id: 'a', title: 'Morning brief' }),
-    ])
-    const webhooks = wrapper.get('[aria-labelledby="wh-section-title"]')
-    expect(webhooks.text()).toContain('Webhook triggers')
-    expect(webhooks.text()).toContain('New trigger')
+      loopSchedule({ schedule_id: 'l', next_run: new Date(Date.now() + 2.5 * 60_000).toISOString() }),
+    ], '/automations/loops')
+    const section = wrapper.get('[aria-labelledby="ov-loops-title"]')
+    expect(section.text()).toContain('A loop runs inside one chat and ends on its own.')
+    expect(rowTitles(section)).toEqual(['Watch the build'])
+    const row = section.get('.automation-row')
+    expect(row.get('.list-row-sub').text()).toMatch(/^In “Build chat” · every 5 min · ends /)
+    expect(row.get('.list-row-end').text()).toContain('next in 2m')
+    expect(wrapper.text()).not.toContain('Morning brief')
+
+    const empty = await mountPage([makeSchedule({ schedule_id: 'a' })], '/automations/loops')
+    expect(empty.wrapper.text()).toContain('No loops running')
   })
 
-  it('draws the webhook section on the empty state, where a first-run workspace lands', async () => {
-    // With no routines the panel drew a bare "No automations yet" note instead,
-    // and the section went with the overview branch above it: the first run of a
-    // workspace had no way to create a trigger at all. A trigger needs no routine
-    // to exist first.
-    const wrapper = await mountOverview([])
-    expect(wrapper.text()).toContain('No automations yet')
-
+  it('draws the Webhooks page without waiting on the automation list', async () => {
+    const { wrapper } = await mountPage([], '/automations/webhooks', { loaded: false })
     const webhooks = wrapper.get('[aria-labelledby="wh-section-title"]')
-    expect(webhooks.text()).toContain('Webhook triggers')
+    expect(webhooks.get('h2').text()).toBe('Webhooks')
     expect(webhooks.text()).toContain('New trigger')
+    expect(wrapper.find('[aria-label="Loading automations"]').exists()).toBe(false)
+  })
+
+  it('starts each page with the three-segment switcher, the current one marked', async () => {
+    const { wrapper } = await mountPage([], '/automations/loops')
+    const links = wrapper.findAll('.automations-switcher a')
+    expect(links.map(l => l.text())).toEqual(['Schedules', 'Loops', 'Webhooks'])
+    expect(links.map(l => l.attributes('href'))).toEqual(['/schedules', '/automations/loops', '/automations/webhooks'])
+    expect(links.map(l => l.attributes('aria-current') ?? '')).toEqual(['', 'page', ''])
+  })
+
+  it('moves focus to the new page\'s heading on a page change, but leaves it on a switcher segment', async () => {
+    const { wrapper, router } = await mountPage([makeSchedule({ schedule_id: 'a' })])
+    await router.push('/automations/loops')
+    await flushPromises()
+    expect(document.activeElement?.id).toBe('ov-loops-title')
+
+    wrapper.get<HTMLAnchorElement>('.automations-switcher a[href="/schedules"]').element.focus()
+    await router.push('/schedules')
+    await flushPromises()
+    expect(document.activeElement?.getAttribute('href')).toBe('/schedules')
+  })
+
+  it('shows row skeletons, not cards, while the list first loads, with the switcher', async () => {
+    const { wrapper } = await mountPage([], '/schedules', { loaded: false })
+    expect(wrapper.find('.skeleton--rows').exists()).toBe(true)
+    expect(wrapper.find('.automations-switcher').exists()).toBe(true)
   })
 })

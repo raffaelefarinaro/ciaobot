@@ -7,7 +7,7 @@
     class="guide-budget"
     :class="{ 'guide-budget--over': guideOverCap }"
     title="Always loaded"
-    title-id="guide-budget-title"
+    id="guide-budget-title"
   >
     <template v-if="guideLoading" #head>
       <span class="guide-budget-muted">loading…</span>

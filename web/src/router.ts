@@ -31,10 +31,24 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
-    // The Schedules page grew into "Automations" (schedules + loops); keep
-    // the /schedules paths as canonical and alias /automations onto them.
+    // The Automations destination: Schedules keeps /schedules (and an open
+    // automation /schedules/:scheduleId); Loops and Webhooks are their own
+    // pages under /automations/, where no schedule id can collide with them
+    // (lib/automationsNav.ts). Bare /automations lands on Schedules.
     path: '/automations',
     redirect: '/schedules',
+  },
+  {
+    path: '/automations/loops',
+    name: 'automations-loops',
+    component: () => import('./components/ChatLayout.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/automations/webhooks',
+    name: 'automations-webhooks',
+    component: () => import('./components/ChatLayout.vue'),
+    meta: { requiresAuth: true },
   },
   {
     path: '/schedules',

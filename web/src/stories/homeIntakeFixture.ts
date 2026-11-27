@@ -25,10 +25,10 @@ function commandsRoute(workspace: string): FixtureRoute {
   }
 }
 
-function modelsRoute(variant: ModelsVariant): FixtureRoute {
+function modelsRoute(variant: ModelsVariant, workspace = intakeWorkspace): FixtureRoute {
   return {
     method: 'GET',
-    path: `/api/models?workspace=${intakeWorkspace}`,
+    path: `/api/models?workspace=${workspace}`,
     respond: (): Response | Promise<never> => {
       if (variant === 'loading') return held()
       if (variant === 'failed') return json({ error: 'Synthetic models unavailable' }, 503)
@@ -48,12 +48,14 @@ function createChatRoute(): FixtureRoute {
   return { method: 'POST', path: `/api/projects/${intakeProjectId}/chats`, respond: () => held() }
 }
 
-/** Exact declared reads: the slash-command loader per workspace, and the model list for the active one. */
+/** Exact declared reads: the slash-command loader per workspace, and the model list per workspace
+ * (Home reads the active workspace's catalog on mount and after every switch, for its chip). */
 export function intakeRoutes(options: { models?: ModelsVariant, starting?: boolean } = {}): FixtureRoute[] {
   return [
     commandsRoute(intakeWorkspace),
     commandsRoute(intakeEmptyWorkspace),
     modelsRoute(options.models ?? 'loaded'),
+    modelsRoute('loaded', intakeEmptyWorkspace),
     ...(options.starting ? [createChatRoute()] : []),
   ]
 }

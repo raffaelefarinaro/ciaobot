@@ -490,12 +490,12 @@ describe('ModelSelector', () => {
     await flushPromises()
     const search = wrapper.get<HTMLInputElement>('.model-selector__search')
     expect(document.activeElement).toBe(search.element)
-    expect(scrollIntoView).toHaveBeenCalled()
     await search.setValue('glm')
     await flushPromises()
     expect(wrapper.findAll('.model-selector__item')).toHaveLength(1)
     expect(document.activeElement).toBe(search.element)
-    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    // The list scrolls itself; nothing asks the page to scroll.
+    expect(scrollIntoView).not.toHaveBeenCalled()
     wrapper.unmount()
     if (descriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', descriptor)
     else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
@@ -606,5 +606,159 @@ describe('ModelSelector model names', () => {
     expect(wrapper.emitted('select')).toEqual([['openai/gpt-5.6-luna', 'opencode']])
     expect(fetchSpy).not.toHaveBeenCalled()
     fetchSpy.mockRestore()
+  })
+})
+
+describe('ModelSelector list keyboard and selection', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  async function openSelector(props: Record<string, unknown> = {}) {
+    const wrapper = mountSelector(props)
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    return wrapper
+  }
+
+  it('keeps filtering when a character is typed on a highlighted row', async () => {
+    const wrapper = await openSelector()
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+    await search.trigger('keydown', { key: 'ArrowDown' })
+    const first = wrapper.get<HTMLButtonElement>('.model-selector__item')
+    expect(document.activeElement).toBe(first.element)
+    await first.trigger('keydown', { key: 'g' })
+    await flushPromises()
+    expect(search.element.value).toBe('g')
+    expect(document.activeElement).toBe(search.element)
+    expect(wrapper.findAll('.model-selector__item').map(item => item.attributes('data-model'))).toEqual(['glm-5.2:cloud'])
+  })
+
+  it('takes Backspace on a row back to the search field', async () => {
+    const wrapper = await openSelector()
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+    await search.setValue('son')
+    await search.trigger('keydown', { key: 'ArrowDown' })
+    const row = wrapper.get<HTMLButtonElement>('.model-selector__item')
+    expect(document.activeElement).toBe(row.element)
+    await row.trigger('keydown', { key: 'Backspace' })
+    await flushPromises()
+    expect(search.element.value).toBe('so')
+    expect(document.activeElement).toBe(search.element)
+  })
+
+  it('leaves modified keys alone on a row', async () => {
+    const wrapper = await openSelector()
+    await wrapper.get('.model-selector__search').trigger('keydown', { key: 'ArrowDown' })
+    const row = wrapper.get<HTMLButtonElement>('.model-selector__item').element
+    const event = new KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true, cancelable: true })
+    row.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(row)
+  })
+
+  it('jumps to the first and last enabled rows with Home and End', async () => {
+    const wrapper = await openSelector({
+      sections: [
+        ...SECTIONS,
+        { key: 'remote', label: 'Remote', models: ['offline-model'], disabled: true, hint: 'Sign in first' },
+      ],
+    })
+    await wrapper.get('.model-selector__search').trigger('keydown', { key: 'ArrowDown' })
+    const rows = wrapper.findAll<HTMLButtonElement>('.model-selector__item')
+    await rows[0].trigger('keydown', { key: 'End' })
+    expect((document.activeElement as HTMLElement).dataset.model).toBe('llama3.1:latest')
+    await wrapper.get('[data-model="llama3.1:latest"]').trigger('keydown', { key: 'Home' })
+    expect((document.activeElement as HTMLElement).dataset.model).toBe('haiku')
+  })
+
+  it('wraps Up from the first row to the last enabled row, skipping a disabled provider', async () => {
+    const wrapper = await openSelector({
+      sections: [
+        ...SECTIONS,
+        { key: 'remote', label: 'Remote', models: ['offline-model'], disabled: true },
+      ],
+    })
+    await wrapper.get('.model-selector__search').trigger('keydown', { key: 'ArrowDown' })
+    await wrapper.get('[data-model="haiku"]').trigger('keydown', { key: 'ArrowUp' })
+    expect((document.activeElement as HTMLElement).dataset.model).toBe('llama3.1:latest')
+  })
+
+  it('scrolls the current model into view in the list only, never the page', async () => {
+    const pageScrolls: string[] = []
+    const original = HTMLElement.prototype.scrollIntoView
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) { pageScrolls.push(this.dataset.model || '') }
+    // A 200px list holding 600px of rows; the current row sits at 450-490.
+    const height = vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(function (this: Element) {
+      return this.classList.contains('model-selector__list') ? 600 : 0
+    })
+    const client = vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (this: Element) {
+      return this.classList.contains('model-selector__list') ? 200 : 0
+    })
+    const setTop = vi.spyOn(Element.prototype, 'scrollTop', 'set')
+    // jsdom applies no stylesheet; the list is the scroller, as its CSS says.
+    const realStyle = window.getComputedStyle.bind(window)
+    const style = vi.spyOn(window, 'getComputedStyle').mockImplementation((el, pseudo) => (
+      (el as Element).classList?.contains('model-selector__list')
+        ? ({ ...realStyle(el, pseudo), overflowY: 'auto' } as CSSStyleDeclaration)
+        : realStyle(el, pseudo)
+    ))
+    const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      if (this.classList.contains('model-selector__list')) return { top: 100, bottom: 300 } as DOMRect
+      if (this.getAttribute('data-model') === 'llama3.1:latest') return { top: 450, bottom: 490 } as DOMRect
+      return { top: 0, bottom: 0 } as DOMRect
+    })
+    try {
+      await openSelector({ modelValue: 'llama3.1:latest' })
+      await flushPromises()
+      // 490 - 300: just enough to bring the row's bottom into the list.
+      expect(setTop).toHaveBeenCalledWith(190)
+      expect(pageScrolls).toEqual([])
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original
+      height.mockRestore()
+      client.mockRestore()
+      setTop.mockRestore()
+      style.mockRestore()
+      rect.mockRestore()
+    }
+  })
+
+  it('marks the current model with a drawn check and aria-selected, not a text glyph', async () => {
+    const wrapper = await openSelector({ modelValue: 'sonnet' })
+    const current = wrapper.get('[data-model="sonnet"]')
+    expect(current.attributes('aria-selected')).toBe('true')
+    expect(current.find('.model-selector__tick svg').exists()).toBe(true)
+    expect(wrapper.get('[data-model="opus"]').find('.model-selector__tick svg').exists()).toBe(false)
+    expect(wrapper.get('.model-selector__popover').text()).not.toMatch(/[✓▾×]/)
+  })
+})
+
+describe('ModelSelector aliases', () => {
+  afterEach(() => { document.body.innerHTML = '' })
+
+  it('names and highlights a stored alias by the row it stands for, never the raw value', async () => {
+    const wrapper = mount(ModelSelector, {
+      attachTo: document.body,
+      props: {
+        modelValue: 'default',
+        sections: [{
+          key: 'anthropic', label: 'Claude Code', models: ['opus', 'sonnet'],
+          modelLabels: { opus: 'Opus 4.5', sonnet: 'Sonnet 4.5' }, modelAliases: { default: 'opus' },
+        }],
+      },
+    })
+    const trigger = wrapper.get('.model-selector__trigger')
+    expect(trigger.text()).toContain('Opus 4.5')
+    expect(trigger.text()).not.toMatch(/default/i)
+    await trigger.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-model="opus"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-model="sonnet"]').attributes('aria-selected')).toBe('false')
+    wrapper.unmount()
   })
 })

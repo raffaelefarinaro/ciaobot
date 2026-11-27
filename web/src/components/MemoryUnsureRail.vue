@@ -1,5 +1,5 @@
 <template>
-  <DockedWindow class="unsure-rail" title="How this works" title-id="unsure-rail-title">
+  <DockedWindow class="unsure-rail" title="How this works" id="unsure-rail-title">
     <div class="unsure-rail-counts" role="group" aria-label="Unsure list">
       <div class="unsure-rail-kv">
         <span>Waiting for you</span>

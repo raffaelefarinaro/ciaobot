@@ -246,7 +246,8 @@ export const SCHEDULES = [
 ]
 
 // Two more healthy routines in alpha, so the open automation's title rail has
-// neighbours: the sidebar (and the rail) order is Daily, Weekly, Inbox sweep.
+// neighbours. The Schedules page (and the rail) sorts by next run, so their
+// next runs keep the order Daily, Weekly, Inbox sweep.
 SCHEDULES.push(
   {
     ...SCHEDULES[0],
@@ -269,7 +270,7 @@ SCHEDULES.push(
     prompt: 'Sweep the inbox.',
     frequency: 'interval',
     interval_minutes: 30,
-    next_run: '2026-09-24T10:30:00Z',
+    next_run: '2026-09-28T10:30:00Z',
   },
 )
 

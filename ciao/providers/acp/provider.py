@@ -101,9 +101,23 @@ def invalidate_acp_catalog(agent_id: str) -> None:
         _catalog_cache.pop(key, None)
 
 
-def _option_items(options: list[dict[str, Any]], config_id: str) -> list[tuple[str, str]]:
-    """``(value, label)`` for every value of one config option, grouped or flat, first wins."""
-    items: list[tuple[str, str]] = []
+_DESCRIPTION_MAX = 80
+
+
+def _short_description(description: object) -> str:
+    """The adapter's note on one entry, untrusted: the part before " · ", capped.
+
+    Claude Code's adapter writes a model's name there, sometimes followed by a
+    price ("Sonnet 4.5 · $3/$15 per Mtok"); the PWA reads only the name.
+    """
+    if not isinstance(description, str):
+        return ""
+    return description.split(" · ", 1)[0].strip()[:_DESCRIPTION_MAX].strip()
+
+
+def _option_items(options: list[dict[str, Any]], config_id: str) -> list[tuple[str, str, str]]:
+    """``(value, label, description)`` for every value of one config option, grouped or flat, first wins."""
+    items: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for option in options:
         if option.get("id") != config_id:
@@ -120,21 +134,34 @@ def _option_items(options: list[dict[str, Any]], config_id: str) -> list[tuple[s
                     continue
                 seen.add(value)
                 name = entry.get("name")
-                items.append((value, name if isinstance(name, str) and name else value))
+                description = entry.get("description")
+                items.append((
+                    value,
+                    name if isinstance(name, str) and name else value,
+                    _short_description(description),
+                ))
         break
     return items
 
 
 def _catalog_rows(spec: AgentSpec, options: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One row per model: ``{"model", "label", "variants"}``; variants are the thinking levels."""
+    """One row per model: ``{"model", "label", "variants"}``; variants are the thinking levels.
+
+    A row also carries the agent's ``description`` when it gives one. Claude
+    Code's ``default`` entry describes the concrete model it runs ("Opus 4.5"),
+    which is how the PWA names it instead of showing the word "Default".
+    """
     variants = (
-        [value for value, _label in _option_items(options, spec.thought_config_id)]
+        [value for value, _label, _description in _option_items(options, spec.thought_config_id)]
         if spec.thought_config_id else []
     )
-    return [
-        {"model": value, "label": label, "variants": list(variants)}
-        for value, label in _option_items(options, spec.model_config_id)
-    ]
+    rows: list[dict[str, Any]] = []
+    for value, label, description in _option_items(options, spec.model_config_id):
+        row: dict[str, Any] = {"model": value, "label": label, "variants": list(variants)}
+        if description:
+            row["description"] = description
+        rows.append(row)
+    return rows
 
 
 @dataclass(slots=True)

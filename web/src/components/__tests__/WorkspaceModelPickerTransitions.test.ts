@@ -19,7 +19,7 @@ import { askPrompt, pendingPrompt } from '../../lib/prompt'
 import type { ProviderDescriptor } from '../../lib/types'
 
 // The registry row /api/models serves for the Claude catalog.
-const PROVIDERS = [{ id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} }] as ProviderDescriptor[]
+const PROVIDERS = [{ id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude Code', capabilities: {} }] as ProviderDescriptor[]
 
 vi.mock('../../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
@@ -181,7 +181,7 @@ it('keeps the Home model draft and open picker when a guarded workspace switch i
   expect(projects.activeWorkspace).toBe('personal')
   expect(tasks.modelTransition).toBe(transition)
   expect(vi.mocked(api.get).mock.calls.filter(([url]) => url.startsWith('/api/models'))).toHaveLength(reads)
-  expect(wrapper.get('.home-intake-model-trigger').text()).toContain('chosen-model')
+  expect(wrapper.get('.home-intake-model-trigger').text()).toContain('Chosen Model')
   expect(wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').element.value).toBe('Keep this draft')
   expect(wrapper.find('.model-selector__popover').exists()).toBe(true)
   wrapper.unmount()
@@ -218,9 +218,12 @@ it('announces Home model failures outside the closed picker and retries', async 
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
-  let attempts = 0
+  // Home may read the catalog when it mounts (its chip names the default's
+  // model) and reads it when the chip opens with none loaded: every read
+  // fails until Retry.
+  let retried = false
   vi.mocked(api.get).mockImplementation(async (url) => {
-    if (url.startsWith('/api/models') && attempts++ === 0) throw new Error('server token: secret-model-key')
+    if (url.startsWith('/api/models') && !retried) throw new Error('server token: secret-model-key')
     return { models: [], default: '', providers: PROVIDERS, provider_models: { claude: [] } }
   })
   const wrapper = mount(HomeIntake)
@@ -230,10 +233,11 @@ it('announces Home model failures outside the closed picker and retries', async 
   expect(wrapper.text()).not.toContain('secret-model-key')
   expect(useTaskStore().modelError).not.toContain('secret-model-key')
   const retry = wrapper.get('[aria-label="Retry new chat models"]')
+  retried = true
   await retry.trigger('click')
   await flushPromises()
   expect(wrapper.find('[role="alert"]').exists()).toBe(false)
-  expect(wrapper.get('[role="status"]').text()).toContain('No models listed; availability is unknown')
+  expect(wrapper.get('[role="status"][aria-label="New chat models"]').text()).toContain('No models listed; availability is unknown')
   wrapper.unmount()
 })
 
@@ -1109,9 +1113,10 @@ it('closes task delegation on switching and opens the new workspace task with it
   await first.get('.task-delegate-model').trigger('click')
   await flushPromises()
   expect(first.text()).toContain('Personal Model')
-  expect(first.text()).toContain('Your workspace default')
+  // No row is named "default": the workspace default is the current model.
+  expect(first.text()).not.toMatch(/\bdefault\b/i)
   await first.get('[role="option"][data-model="personal-model"]').trigger('click')
-  expect(first.get('.task-delegate-model').text()).toContain('personal-model')
+  expect(first.get('.task-delegate-model').text()).toContain('Personal Model')
   await first.get('.task-delegate-model').trigger('click')
   await flushPromises()
   const old = first.getComponent(ModelSelector)
@@ -1160,8 +1165,6 @@ it('closes task delegation on switching and opens the new workspace task with it
   expect(second.find('.model-selector__popover').exists()).toBe(false)
   expect(document.activeElement).toBe(second.get('.task-delegate-model').element)
   expect(second.find('#task-delegate-title').exists()).toBe(true)
-  await second.get('.task-delegate-model').trigger('click')
-  await second.get('[role="option"][data-model="__workspace-default__"]').trigger('click')
   await second.get('.task-delegate-model').trigger('click')
   await flushPromises()
   const workOption = second.get<HTMLButtonElement>('[role="option"][data-model="work-model"]')

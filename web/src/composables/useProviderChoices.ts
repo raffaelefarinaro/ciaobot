@@ -1,6 +1,6 @@
 import { computed, type Ref } from 'vue'
-import type { ModelSection } from '../lib/modelSections'
-import { modelDisplayName, modelProviderPrefix } from '../lib/modelLabels'
+import { AGENT_DEFAULT_MODEL, defaultEquivalent, modelName, providerShortLabel, type ModelSection } from '../lib/modelSections'
+import { modelProviderPrefix } from '../lib/modelLabels'
 import { modeLabel } from '../lib/permissionModes'
 import type { ModelsResponse, RoutineSettings, RuntimeProvider } from '../lib/types'
 
@@ -63,7 +63,8 @@ export function useProviderChoices(deps: {
     const sections: AliasProviderSection[] = [
       {
         key: 'claude',
-        label: 'Anthropic (via Claude Code)',
+        // The CLI's short name, as every picker heading shows it.
+        label: providerShortLabel(workspaceModels.value, 'claude'),
         // The Anthropic tiers are real model ids, and config._operator_default_model
         // honors a `claude` entry in provider_default_models, so this picker edits
         // the same override every other provider's does.
@@ -78,7 +79,7 @@ export function useProviderChoices(deps: {
       if (descriptor.id === 'claude') continue
       const options = parseModelList((models?.provider_models?.[descriptor.id] || []).join(','))
       if (options.length) {
-        sections.push({ key: descriptor.id, label: descriptor.label, options, configurable: true, available: true })
+        sections.push({ key: descriptor.id, label: descriptor.short_label || descriptor.id, options, configurable: true, available: true })
       }
     }
     return sections
@@ -96,10 +97,15 @@ export function useProviderChoices(deps: {
   // provider namespace each id states. Both come from the shared helpers in
   // lib/modelLabels, so a model reads the same in Settings as it does in the
   // chat and schedule pickers.
-  function modelLabelsFor(models: string[]): Record<string, string> {
+  function modelLabelsFor(models: string[], provider = ''): Record<string, string> {
     const labels: Record<string, string> = {}
-    for (const model of models) labels[model] = modelDisplayName(model)
+    for (const model of models) labels[model] = modelNameFor(provider, model)
     return labels
+  }
+
+  /** A model's readable name; the agent's `default` entry is named by the model it runs. */
+  function modelNameFor(provider: string, model: string): string {
+    return modelName(workspaceModels.value, provider, model) || providerShortLabel(workspaceModels.value, provider)
   }
 
   function modelBadgesFor(models: string[]): Record<string, string[]> {
@@ -123,7 +129,7 @@ export function useProviderChoices(deps: {
       key: provider,
       label: section?.label || provider,
       models,
-      modelLabels: modelLabelsFor(models),
+      modelLabels: modelLabelsFor(models, provider),
       modelBadges: modelBadgesFor(models),
       disabled: !section?.available,
     }
@@ -146,15 +152,31 @@ export function useProviderChoices(deps: {
     return [
       {
         key: 'default',
-        label: 'Default',
+        // No heading: the entry names itself ("Automatic (Opus 4.5)").
+        label: '',
         models: [sentinel],
         modelLabels: { [sentinel]: label(effective) },
         ...(namesResolvedModel && namespace
           ? { modelBadges: { [sentinel]: [namespace] } }
           : {}),
       },
-      aliasSectionEntry(provider),
+      withoutAgentDefault(aliasSectionEntry(provider), provider, sentinel),
     ]
+  }
+
+  // The entry above already stands for the default, so the agent's own
+  // `default` row is not listed a second time. A value stored as `default`
+  // still reads as a model: the concrete row it runs when the catalog has
+  // one, else the entry above.
+  function withoutAgentDefault(section: ModelSection, provider: string, sentinel: string): ModelSection {
+    const labels = { ...(section.modelLabels || {}) }
+    delete labels[AGENT_DEFAULT_MODEL]
+    return {
+      ...section,
+      models: section.models.filter((model) => model !== AGENT_DEFAULT_MODEL),
+      modelLabels: labels,
+      modelAliases: { [AGENT_DEFAULT_MODEL]: defaultEquivalent(workspaceModels.value, provider) || sentinel },
+    }
   }
 
   function providerDefaultModelEffective(provider: AliasProviderKey): string {
@@ -183,6 +205,8 @@ export function useProviderChoices(deps: {
     aliasProviderSections,
     getProviderSection,
     modelLabelsFor,
+    modelNameFor,
+    withoutAgentDefault,
     modelBadgesFor,
     aliasSectionEntry,
     providerSectionsWithDefault,
