@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -12,10 +15,12 @@ from ciao.error_log import (
     QUIET_AT_DEBUG,
     install_asyncio_noise_filter,
     quiet_third_party_debug_loggers,
+    record_time,
     resolve_log_level,
     setup_debug_logging,
     setup_error_logging,
     tail_debug_log,
+    tail_error_records,
 )
 
 
@@ -281,3 +286,74 @@ async def test_ws_handshake_does_not_log_cookie():
     server_text = "\n".join(r.getMessage() for r in records)
     assert "SECRET" not in server_text
     assert "cookie:" not in server_text.lower()
+
+
+# --- the time floor (a takeover handover) -----------------------------------------------------
+
+
+def _write(workspace: Path, text: str) -> None:
+    runtime = workspace / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "server_errors.log").write_text(text, encoding="utf-8")
+
+
+def _local(when: datetime) -> str:
+    return when.astimezone().strftime("%Y-%m-%d %H:%M:%S") + ",500"
+
+
+@pytest.fixture
+def pacific(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Local time far from UTC, so a floor compared in the wrong zone is off by hours."""
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_the_floor_is_compared_in_local_time(tmp_path: Path, pacific: None) -> None:
+    floor = datetime(2026, 11, 27, 12, 0, 0, tzinfo=UTC)
+    _write(tmp_path, (
+        f"{_local(floor - timedelta(minutes=1))} ERROR ciao.a: before\n"
+        f"{_local(floor)} ERROR ciao.a: at\n"
+        f"{_local(floor + timedelta(minutes=1))} ERROR ciao.a: after\n"
+    ))
+
+    kept = tail_error_records(tmp_path, since=floor)
+
+    assert "before" not in kept
+    assert "at" in kept and "after" in kept
+
+
+def test_the_floor_applies_before_the_record_cap(tmp_path: Path) -> None:
+    """Newer records first, then older ones (a clock set back): the cap must not drop the newer."""
+    floor = datetime.now(UTC) - timedelta(hours=1)
+    new = [f"{_local(floor + timedelta(minutes=i + 1))} ERROR ciao.a: new {i}\n" for i in range(2)]
+    old = [f"{_local(floor - timedelta(hours=2, minutes=i))} ERROR ciao.a: old {i}\n" for i in range(3)]
+    _write(tmp_path, "".join(new + old))
+
+    kept = tail_error_records(tmp_path, records=2, since=floor)
+
+    assert kept == "".join(new)
+
+
+def test_undatable_records_never_crash_and_are_left_out_under_a_floor(tmp_path: Path) -> None:
+    floor = datetime.now(UTC) - timedelta(hours=1)
+    fresh = f"{_local(floor + timedelta(minutes=5))} ERROR ciao.a: fresh\n"
+    _write(tmp_path, (
+        "  orphan traceback line without a header\n"
+        "2026-11-27 ERROR ciao.a: date only\n"
+        "2026-13-45 99:99:99,000 ERROR ciao.a: impossible date\n"
+        + fresh
+    ))
+
+    assert tail_error_records(tmp_path, since=floor) == fresh
+    everything = tail_error_records(tmp_path)
+    assert "orphan" in everything and "date only" in everything and "impossible date" in everything
+
+
+def test_record_time_reads_the_handler_stamp() -> None:
+    assert record_time("2026-11-27 13:45:01,123 ERROR ciao.a: x\n") == datetime(2026, 11, 27, 13, 45, 1)
+    assert record_time("2026-11-27 ERROR ciao.a: x\n") is None
+    assert record_time("2026-02-30 10:00:00,000 ERROR ciao.a: x\n") is None
+    assert record_time("garbage") is None

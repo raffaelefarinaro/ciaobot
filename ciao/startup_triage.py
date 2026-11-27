@@ -7,6 +7,11 @@ substitution and the existing clear-after-clean-run behavior apply: the
 error log is reset exactly when its content has been handed to a chat that
 processed it. No errors means no chat and no model call.
 
+Only this install's current engine is triaged: after a takeover of a 1.x
+install by Ciaobot for Mac, the report leaves out every error record and failed
+run from before the handover (see :func:`ciao.debug_report.build_issue_report`),
+so a first launch does not open a chat about an engine that no longer runs.
+
 A cooldown marker prevents a crash-looping server from opening a new
 triage chat on every boot. The prompt has the agent prepare a pre-filled GitHub issue
 URL for Ciaobot's own bugs; the operator submits it.

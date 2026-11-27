@@ -35,7 +35,13 @@ from acp.router import MessageRouter, Route
 from acp.schema import ClientCapabilities
 
 from ciao import __version__
-from ciao.adapter_install import ADAPTERS, AdapterNotReady, launch_argv
+from ciao.adapter_install import (
+    ADAPTERS,
+    LAUNCH_WAIT_S,
+    AdapterInstalling,
+    AdapterNotReady,
+    launch_argv,
+)
 from ciao.os_support.child_env import child_env
 from ciao.os_support.processes import descendant_processes, process_table, signal_processes
 from ciao.providers.acp.spec import AgentSpec
@@ -54,6 +60,8 @@ _WATCH_FAST_INTERVAL = 0.25
 _WATCH_SLOW_INTERVAL = 3.0
 _KILL_SETTLE_TIMEOUT = 3.0
 _EXIT_POLL_INTERVAL = 0.05
+# How often a launch re-checks an adapter whose install is running.
+_INSTALL_POLL_S = 1.0
 # The ACP layer is POSIX-only for now; Windows gets the closest signal Python defines.
 if sys.platform == "win32":
     _SIGKILL = signal.SIGTERM
@@ -93,6 +101,26 @@ class AgentStartError(RuntimeError):
 
 class AgentVersionError(AgentStartError):
     """The agent reports a version below its floor. The message is the gate's fixed refusal text."""
+
+
+async def _adapter_argv(name: str) -> list[str]:
+    """The launch argv of a pinned adapter, waiting up to ``LAUNCH_WAIT_S`` for an install in flight.
+
+    On a first launch, or after an adapter upgrade, the startup install may still be running when a
+    chat or a startup job opens its agent. The launch waits for it instead of failing; an install
+    that fails, or one still running at the cap, raises the adapter's own sentence.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + LAUNCH_WAIT_S
+    while True:
+        try:
+            return await asyncio.to_thread(launch_argv, name)
+        except AdapterInstalling as exc:
+            if loop.time() >= deadline:
+                raise AgentStartError(str(exc)) from exc
+        except AdapterNotReady as exc:
+            raise AgentStartError(str(exc)) from exc
+        await asyncio.sleep(_INSTALL_POLL_S)
 
 
 class _TreeWatch:
@@ -302,10 +330,7 @@ class AcpConnection:
         if spec.binary in ADAPTERS:
             # A pinned adapter runs from the private prefix, under the machine's own node. It
             # never starts while its CLI or node is missing, or the adapter is not the pin.
-            try:
-                argv = await asyncio.to_thread(launch_argv, spec.binary)
-            except AdapterNotReady as exc:
-                raise AgentStartError(str(exc)) from exc
+            argv = await _adapter_argv(spec.binary)
         else:
             binary = resolve_tool(spec.binary)
             if binary is None:

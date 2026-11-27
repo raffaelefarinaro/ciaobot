@@ -18,6 +18,7 @@ import logging
 import logging.handlers
 import re
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -202,11 +203,31 @@ def split_error_records(text: str) -> list[str]:
     return [record for record in records if record.strip()]
 
 
-def tail_error_records(workspace_root: Path, records: int = 200) -> str:
+_RECORD_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+
+def record_time(record: str) -> datetime | None:
+    """The local wall-clock time a record was logged at (``%(asctime)s``), or ``None``."""
+    match = _RECORD_TIME.match(record)
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def tail_error_records(
+    workspace_root: Path, records: int = 200, *, since: datetime | None = None
+) -> str:
     """Return the last *records* error records (not physical lines), or an empty string.
 
     Used by the runtime issue report, so its cap and its count both name the
     same unit: a traceback is one record however many lines it runs to.
+
+    ``since`` (timezone-aware) keeps only records logged at or after it, before the cap is
+    applied. The log stamps local time, so the floor is compared in local time. A record whose
+    time cannot be read cannot be shown to be newer, so it is left out.
     """
     try:
         text = (workspace_root / ".runtime" / ERROR_LOG_NAME).read_text(
@@ -214,7 +235,11 @@ def tail_error_records(workspace_root: Path, records: int = 200) -> str:
         )
     except OSError:
         return ""
-    return "".join(split_error_records(text)[-max(1, records):])
+    kept = split_error_records(text)
+    if since is not None:
+        floor = since.astimezone().replace(tzinfo=None)
+        kept = [r for r in kept if (when := record_time(r)) is not None and when >= floor]
+    return "".join(kept[-max(1, records):])
 
 
 def tail_debug_log(workspace_root: Path, lines: int = 200) -> str:

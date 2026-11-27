@@ -526,3 +526,78 @@ def test_record_cap_is_applied_before_the_count_so_they_agree(tmp_path: Path) ->
     assert report["error_log"].count("ERROR ciao.schedules:") == 200
     assert "run 49\n" not in report["error_log"]
     assert "run 50\n" in report["error_log"]
+
+
+
+# --- a takeover's handover: the old engine's records are not this engine's ----------------------
+
+
+def _local(when: datetime) -> str:
+    """``when`` the way the error log stamps it: local wall-clock time."""
+    return when.astimezone().strftime("%Y-%m-%d %H:%M:%S") + ",123"
+
+
+def _handover_at(monkeypatch, when: datetime | None) -> None:
+    from ciao import mac_takeover
+
+    monkeypatch.setattr(mac_takeover, "handed_over_at", lambda: when)
+
+
+def test_records_and_failures_from_before_a_handover_are_left_out(tmp_path: Path, monkeypatch) -> None:
+    handover = datetime.now(UTC) - timedelta(hours=1)
+    _handover_at(monkeypatch, handover)
+    _write_error_log(tmp_path, (
+        f"{_local(handover - timedelta(minutes=10))} ERROR ciao.old: old engine boom\n"
+        "Traceback (most recent call last):\n  old frame\n"
+        f"{_local(handover + timedelta(minutes=10))} ERROR ciao.new: new engine boom\n"
+    ))
+    job_runs.record_run(JobRun(
+        job="old_job", label="Old job", started_at=_ago(hours=2), ended_at=_ago(hours=2),
+        status="error", error="old engine failure",
+    ))
+    job_runs.record_run(JobRun(
+        job="new_job", label="New job", started_at=_ago(minutes=30), ended_at=_ago(minutes=30),
+        status="error", error="new engine failure",
+    ))
+
+    report = build_issue_report(tmp_path)
+
+    assert report["error_log_records"] == 1
+    assert "new engine boom" in report["error_log"]
+    assert "old engine boom" not in report["error_log"]
+    assert "old frame" not in report["error_log"]
+    assert [f["error"] for f in report["failed_jobs"]] == ["new engine failure"]
+
+
+def test_a_log_from_before_the_handover_alone_is_no_issue(tmp_path: Path, monkeypatch) -> None:
+    handover = datetime.now(UTC) - timedelta(minutes=5)
+    _handover_at(monkeypatch, handover)
+    _write_error_log(tmp_path, "".join(
+        f"{_local(handover - timedelta(hours=1, seconds=i))} ERROR ciao.old: boom {i}\n" for i in range(160)
+    ))
+
+    report = build_issue_report(tmp_path)
+
+    assert report["has_issues"] is False
+    assert report["error_log_records"] == 0
+
+
+def test_without_a_handover_every_record_counts(tmp_path: Path, monkeypatch) -> None:
+    _handover_at(monkeypatch, None)
+    _write_error_log(tmp_path, "2020-01-01 10:00:00,000 ERROR ciao.web: long ago\n")
+
+    assert build_issue_report(tmp_path)["error_log_records"] == 1
+
+
+def test_the_handover_floor_wins_over_an_earlier_or_naive_failures_since(tmp_path: Path, monkeypatch) -> None:
+    handover = datetime.now(UTC) - timedelta(hours=1)
+    _handover_at(monkeypatch, handover)
+    job_runs.record_run(JobRun(
+        job="old_job", label="Old job", started_at=_ago(hours=2), ended_at=_ago(hours=2),
+        status="error", error="old engine failure",
+    ))
+    naive = (datetime.now(UTC) - timedelta(hours=3)).replace(tzinfo=None)
+
+    assert build_issue_report(tmp_path, failures_since=naive)["failed_jobs"] == []
+    later = datetime.now(UTC) - timedelta(minutes=1)
+    assert build_issue_report(tmp_path, failures_since=later)["failed_jobs"] == []
