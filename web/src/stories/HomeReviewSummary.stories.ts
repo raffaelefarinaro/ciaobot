@@ -147,7 +147,7 @@ function careStory(report: CareReport, detail: RegExp, glyph: string, title = 'W
     }),
     play: async ({ canvas, canvasElement }) => {
       await assertFenceQuiet(canvas)
-      const line = await waitFor(() => canvas.getByRole('button', { name: new RegExp(`^${title}\\.`) }))
+      const line = await waitFor(() => canvas.getByRole('button', { name: new RegExp(`^${title}\\b`) }))
       expect(line.textContent).toContain(title)
       expect(line.textContent).toMatch(detail)
       expect(canvasElement.querySelector(`.care-glyph--${glyph}`)).not.toBeNull()

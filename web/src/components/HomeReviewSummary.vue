@@ -229,7 +229,7 @@ function openItem(key: ReviewItem['key']) {
 .home-review-item--care-running .home-review-care-title { color: var(--fg); }
 .home-review-item--care-attention .home-review-care-title { color: var(--warning); }
 .home-review-item--care-error .home-review-care-title { color: var(--error-text); }
-.home-review-item--care-error .home-review-care-title :deep(.care-glyph) { color: var(--error); }
+.home-review-item--care-error .home-review-care-title :deep(.care-glyph) { color: var(--error-text); }
 .home-review-item--care-attention .home-review-detail,
 .home-review-item--care-error .home-review-detail { color: var(--fg); }
 
