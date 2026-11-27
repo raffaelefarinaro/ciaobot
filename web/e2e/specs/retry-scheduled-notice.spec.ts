@@ -89,6 +89,22 @@ for (const size of ['desktop', 'phone'] as const) {
       await page.screenshot({ path: testInfo.outputPath(`${size}-separate-provider-retry.png`) })
     })
 
+    test('a retry carrying the transcript error replaces the plain error card', async ({ page }, testInfo) => {
+      await setupRetry(page, `retry-same-${testInfo.workerIndex}`, 'literal', 'Provider quota limit reached.')
+      await page.route('**/api/chats/alpha-chat-1/messages*', route => route.fulfill({ json: [
+        { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+        { role: 'assistant', content: 'Error: Provider quota limit reached.', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+      ] }))
+      await boot(page, '/chat/alpha-chat-1', COMPOSER)
+      const cards = page.locator('.injected-card')
+      await expect(cards).toHaveCount(1)
+      await expect(cards.first()).toContainText('Provider quota limit reached.')
+      await expect(cards.first().getByRole('button', { name: 'Run scheduled prompt' })).toBeEnabled()
+      await expect(cards.first().getByRole('button', { name: 'Stop trying' })).toBeEnabled()
+      await expect(cards.first().getByRole('button', { name: 'Fix this error' })).toBeVisible()
+      await page.screenshot({ path: testInfo.outputPath(`${size}-one-retry-card.png`) })
+    })
+
     test('literal schedule without identity cannot be run or stopped', async ({ page }, testInfo) => {
       await setupRetry(page, `literal-unverified-${testInfo.workerIndex}`, 'literal', 'manual', false)
       await boot(page, '/chat/alpha-chat-1', COMPOSER)

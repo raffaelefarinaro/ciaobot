@@ -760,23 +760,92 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
-  it('keeps Fix this error beside the retry state while a retry is pending', async () => {
-    const { wrapper, store } = await mountPanel()
-    store.messages['chat-1'] = [
+  describe('one card for a failed turn with a pending retry', () => {
+    const failed = (content: string) => [
       { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
-      { role: 'assistant', content: 'Error: strange failure 42', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+      { role: 'assistant', content, timestamp: '2026-10-11T18:01:01Z', is_error: true },
     ]
-    store.chats[0].retry = {
-      status: 'pending',
-      next_at: '2026-10-11T23:00:00Z',
-      last_error: 'strange failure 42',
-      attempts: 1,
-      interval_seconds: 30,
-    }
-    await flushPromises()
-    expect(wrapper.find('.retry-state-title').exists()).toBe(true)
-    expect(wrapper.findAll('.fix-btn').map(b => b.text())).toEqual(['Fix this error'])
-    wrapper.unmount()
+    const pending = (last_error: string) => ({
+      status: 'pending' as const, next_at: '2026-10-11T23:00:00Z', last_error, attempts: 1, interval_seconds: 3600,
+    })
+
+    it('draws only the retry card when it carries the same message, with the failure time', async () => {
+      const { wrapper, store } = await mountPanel()
+      store.messages['chat-1'] = failed('Error: Provider quota limit reached.') as never
+      store.chats[0].retry = { ...pending('Provider quota limit reached.'), kind: 'quota' }
+      await flushPromises()
+      expect(wrapper.findAll('.injected-card')).toHaveLength(1)
+      const card = wrapper.get('.injected-card--error')
+      expect(card.text()).toContain('Provider quota limit reached.')
+      expect(card.find('.retry-state-title').exists()).toBe(true)
+      expect(card.get('time').attributes('datetime')).toBe('2026-10-11T18:01:01Z')
+      expect(card.findAll('.retry-state-actions .btn-small').map(b => b.text())).toEqual(['Run scheduled prompt', 'Stop trying'])
+      expect(wrapper.find('.error-actions').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('keeps Fix this error as a quiet action on the retry card for an unknown error', async () => {
+      const { wrapper, store } = await mountPanel()
+      store.messages['chat-1'] = failed('Error: strange failure 42') as never
+      store.chats[0].retry = pending('strange failure 42')
+      await flushPromises()
+      expect(wrapper.findAll('.injected-card')).toHaveLength(1)
+      expect(wrapper.findAll('.fix-btn')).toHaveLength(0)
+      const fix = wrapper.get('.retry-state-fix')
+      expect(fix.text()).toBe('Fix this error')
+      const labels = wrapper.findAll('.retry-state-actions button').map(b => b.text())
+      expect(labels).toEqual(['Run scheduled prompt', 'Stop trying', 'Fix this error'])
+      const fixError = vi.spyOn(store, 'fixError').mockResolvedValue(undefined as never)
+      await fix.trigger('click')
+      expect(fixError).toHaveBeenCalledWith({ errorText: 'Error: strange failure 42', context: 'Tidy my memory' })
+      wrapper.unmount()
+    })
+
+    it('offers no Fix action when the error has its own fix', async () => {
+      const { wrapper, store } = await mountPanel()
+      store.messages['chat-1'] = failed('Error: you have reached your weekly usage limit') as never
+      store.chats[0].retry = pending('you have reached your weekly usage limit')
+      await flushPromises()
+      expect(wrapper.findAll('.injected-card')).toHaveLength(1)
+      expect(wrapper.find('.retry-state-fix').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('brings the error card back when the retry is stopped or exhausted', async () => {
+      const { wrapper, store } = await mountPanel()
+      store.messages['chat-1'] = failed('Error: strange failure 42') as never
+      store.chats[0].retry = pending('strange failure 42')
+      await flushPromises()
+      expect(wrapper.findAll('.injected-card')).toHaveLength(1)
+      store.chats[0].retry = undefined
+      await flushPromises()
+      expect(wrapper.findAll('.injected-card')).toHaveLength(1)
+      expect(wrapper.find('.retry-state-title').exists()).toBe(false)
+      expect(wrapper.get('.injected-card--error').text()).toContain('Fix this error')
+      store.chats[0].retry = pending('strange failure 42')
+      await flushPromises()
+      expect(wrapper.find('.retry-state-title').exists()).toBe(true)
+      expect(wrapper.findAll('.injected-card')).toHaveLength(1)
+      store.chats[0].retry = { ...pending('strange failure 42'), status: 'exhausted' as never }
+      await flushPromises()
+      expect(wrapper.find('.retry-state-title').exists()).toBe(false)
+      expect(wrapper.get('.injected-card--error').text()).toContain('Fix this error')
+      wrapper.unmount()
+    })
+
+    it('leaves an older failed row alone once the chat moved on', async () => {
+      const { wrapper, store } = await mountPanel()
+      store.messages['chat-1'] = [
+        ...failed('Error: strange failure 42'),
+        { role: 'user', content: 'Try again', timestamp: '2026-10-11T18:05:00Z' },
+        { role: 'assistant', content: 'Done.', timestamp: '2026-10-11T18:05:30Z' },
+      ] as never
+      store.chats[0].retry = pending('strange failure 42')
+      await flushPromises()
+      expect(wrapper.findAll('.injected-card--error')).toHaveLength(2)
+      expect(wrapper.get('.injected-card--error').text()).toContain('strange failure 42')
+      wrapper.unmount()
+    })
   })
 
   it.each([

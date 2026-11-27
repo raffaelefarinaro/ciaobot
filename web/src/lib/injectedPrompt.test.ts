@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, summarizeInjectedPrompt } from './injectedPrompt'
+import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, sameErrorMessage, summarizeInjectedPrompt } from './injectedPrompt'
 import type { InjectedPrompt } from './injectedPrompt'
+
+describe('sameErrorMessage', () => {
+  it('compares the first line without a leading Error:', () => {
+    expect(sameErrorMessage('Error: Provider quota limit reached.', 'Provider quota limit reached.')).toBe(true)
+    expect(sameErrorMessage('Error: limit\nstack line', 'limit')).toBe(true)
+    expect(sameErrorMessage('Error: connection refused', 'weekly usage limit')).toBe(false)
+    expect(sameErrorMessage('', '')).toBe(false)
+    expect(sameErrorMessage('Error:', 'manual')).toBe(false)
+  })
+})
 
 describe('retryScheduledNotice', () => {
   it.each(['manual', 'mcp', '', '  \n'])('treats %j as a neutral scheduled retry', text => {

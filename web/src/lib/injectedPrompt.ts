@@ -258,9 +258,19 @@ export function retryScheduledNotice(text: string): InjectedPrompt {
 
 const ERROR_HINT_MAX = 200
 
+function errorLine(text: string): string {
+  return text.replace(/^\s*Error:/, '').split('\n').map(l => l.trim()).find(Boolean) ?? ''
+}
+
+/** Whether two error texts say the same thing: the same first line once a leading `Error:` is dropped. */
+export function sameErrorMessage(a: string, b: string): boolean {
+  const line = errorLine(a)
+  return line !== '' && line === errorLine(b)
+}
+
 /** The provider's own message as one line: no leading `Error:`, first non-empty line, clipped. */
 function errorHint(text: string): string {
-  const line = text.replace(/^\s*Error:/, '').split('\n').map(l => l.trim()).find(Boolean) ?? ''
+  const line = errorLine(text)
   return line.length > ERROR_HINT_MAX ? `${line.slice(0, ERROR_HINT_MAX)}…` : line
 }
 

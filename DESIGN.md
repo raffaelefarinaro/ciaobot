@@ -139,6 +139,8 @@ start|status` on this computer, Retry, and automatic reconnect. It is modal
 (focus trapped, shortcuts suppressed), and it lifts without a reload when the
 engine returns.
 
+When a retry is pending for a failed turn and carries that turn's own message, the chat draws one card, the retry card: the failure's label and message, its failure time, the next try and the retry actions. The plain error card is not drawn beside it. It comes back, with its recovery actions, when the retry is stopped or exhausted. An error with no fix of its own keeps *Fix this error* on the retry card as a quiet underlined action after *Stop trying*. A retry whose reason differs from the transcript error, and an older failed row the chat has moved past, keep their own cards.
+
 A chat turn that fails because the provider CLI is signed out keeps its
 automatic retry, and both the retry card and the error notice carry a closed
 **How to sign in again** disclosure: open a terminal, paste the sign-in command

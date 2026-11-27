@@ -338,6 +338,9 @@
         <!-- A failed turn: the compact notice card, never a bubble. Both an
              assistant error and an `Error:` system row land here. The resend
              actions give way once any later item exists; see errorBubbleAction. -->
+        <!-- The failure a pending retry already carries: the retry card below
+             draws it once, with the next try and the actions. -->
+        <template v-else-if="i === retryCoveredIdx" />
         <div
           v-else-if="(item.kind === 'assistant' && item.msg.is_error) || (item.kind === 'system' && isErrorMsg(item.msg.content))"
           class="message-wrap injected-prompt-wrap"
@@ -510,6 +513,7 @@
         <InjectedPromptCard
           :prompt="retryScheduledNotice(chat.retry.last_error || '')"
           raw=""
+          :timestamp="retryCoveredTimestamp"
           :chat-title="chat.title"
           :known-paths="knownFilePaths"
         >
@@ -520,6 +524,8 @@
               :streaming="view.isStreaming"
               :recovery-ready="!!readyRecovery && readyRecovery.chatId === chat.chat_id && readyRecovery.failureId === chat.failure_id && !store.recoveryOutcomeStorageUnavailable && !store.unknownRecoveryOutcomes[chat.chat_id]"
               :chat-id="chat.chat_id"
+              :can-fix="retryCoveredFixable"
+              @fix="openFixChat(retryCoveredIdx)"
               @continue="openRecoveryPicker(null)"
               @try-now="tryRetryNow"
               @stop="stopRetry"
@@ -1488,7 +1494,7 @@ import type { TaskAttemptActionResponse } from '../lib/types'
 import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import InjectedPromptCard from './InjectedPromptCard.vue'
-import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type InjectedPrompt } from '../lib/injectedPrompt'
+import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, sameErrorMessage, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText, type FileMentionTargets } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
 import { AGENT_DEFAULT_MODEL, agentPickLabel, displayedModel, modelName, providerForModelSection, providerShortLabel, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
@@ -4800,6 +4806,33 @@ function hasLaterItem(errorIdx: number): boolean {
 }
 const hasPendingRetry = computed(() => chat.value?.retry?.status === 'pending')
 const retryPending = computed(() => hasPendingRetry.value && !view.isStreaming)
+// The error row a pending retry replaces: the last item of the chat, when it
+// is a failed turn whose message is the retry's own reason. The retry card
+// then carries that failure, so the plain error card is not drawn beside it.
+// A retry whose reason differs from the transcript error (or any later item)
+// leaves both cards, and a stopped or exhausted retry brings the error card back.
+const retryCoveredIdx = computed(() => {
+  const reason = chat.value?.retry?.last_error
+  if (!retryPending.value || !reason) return -1
+  const items = renderItems.value
+  for (let k = items.length - 1; k >= 0; k--) {
+    const it = items[k]
+    if (it.kind === 'trace') continue
+    const failed = (it.kind === 'assistant' && it.msg.is_error) || (it.kind === 'system' && isErrorMsg(it.msg.content))
+    return failed && sameErrorMessage(it.msg.content, reason) ? k : -1
+  }
+  return -1
+})
+const retryCoveredItem = computed(() => {
+  const it = retryCoveredIdx.value >= 0 ? renderItems.value[retryCoveredIdx.value] : undefined
+  return it && 'msg' in it ? it.msg : undefined
+})
+const retryCoveredTimestamp = computed(() => retryCoveredItem.value?.timestamp)
+// An error with no known fix of its own keeps its diagnosis chat on the retry card.
+const retryCoveredFixable = computed(() => {
+  const msg = retryCoveredItem.value
+  return Boolean(msg) && errorQuickAction(msg!.content) === 'fix'
+})
 const readyRecovery = ref<{ chatId: string; failureId: string; rowIndex: number } | null>(null)
 let recoveryReadGeneration = 0
 watch(
