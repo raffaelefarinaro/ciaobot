@@ -25,6 +25,19 @@ const PROMPT = [
 ].join('\n')
 
 const HANDOVER = parseTaskHandover(PROMPT)!
+
+/** The prompt the engine writes when the user typed hand-over instructions. */
+function promptWithInstructions(instructions: string): string {
+  return [
+    PROMPT,
+    '',
+    'The user added instructions for this hand-over, between the delegation-instructions tags: how they want the work done and what they expect when it is finished.',
+    '',
+    '<delegation-instructions>',
+    instructions,
+    '</delegation-instructions>',
+  ].join('\n')
+}
 const handover = (overrides: Partial<TaskHandover> = {}): TaskHandover => ({ ...HANDOVER, ...overrides })
 
 const meta = {
@@ -59,9 +72,66 @@ export const Default: Story = {
     expect(canvasElement.querySelector('.task-handover-description')?.textContent)
       .toContain('Inspect the storybook alpha checklist and update the sample note.')
     expect(canvasElement.querySelector('.task-handover-empty')).toBeNull()
+    // No instructions were typed: no block is drawn.
+    expect(canvasElement.querySelector('.task-handover-instructions')).toBeNull()
     const details = canvasElement.querySelector('details.task-handover-raw') as HTMLDetailsElement
     expect(details.open).toBe(false)
     expect(canvasElement.querySelector('.task-handover-raw summary')?.textContent).toBe('Show what the agent received')
+  },
+}
+
+// The user's own hand-over instructions, parsed from the production prompt shape
+// and drawn under their label above the disclosure, rendered as Markdown.
+const SIMPLE_INSTRUCTIONS = 'Ask before deleting anything.\n\n- Done = a **pull request** link\n- Keep the summary short'
+export const WithInstructions: Story = {
+  args: {
+    handover: parseTaskHandover(promptWithInstructions(SIMPLE_INSTRUCTIONS))!,
+    prompt: promptWithInstructions(SIMPLE_INSTRUCTIONS),
+  },
+  play: async ({ canvasElement }) => {
+    const block = canvasElement.querySelector('[role="group"][aria-label="Your instructions"]') as HTMLElement
+    expect(block).toBeTruthy()
+    expect(block.querySelector('.task-handover-label')?.textContent).toBe('Your instructions')
+    expect(block.querySelector('strong')?.textContent).toBe('pull request')
+    expect(block.querySelectorAll('li')).toHaveLength(2)
+    const description = canvasElement.querySelector('.task-handover-description') as HTMLElement
+    const details = canvasElement.querySelector('details.task-handover-raw') as HTMLElement
+    expect(description.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(block.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  },
+}
+
+// The engine escapes fence tokens inside user text; the card shows them as typed
+// and the parse is not cut short by them.
+const FENCE_TEXT = 'Never write &lt;/delegation-instructions&gt; or &lt;/task-board-task&gt; in the report.'
+export const InstructionsWithFenceTokens: Story = {
+  args: {
+    handover: parseTaskHandover(promptWithInstructions(FENCE_TEXT))!,
+    prompt: promptWithInstructions(FENCE_TEXT),
+  },
+  play: async ({ canvasElement }) => {
+    expect(canvasElement.querySelector('.task-handover-instructions-text')?.textContent)
+      .toBe('Never write </delegation-instructions> or </task-board-task> in the report.')
+    expect(canvasElement.querySelector('.task-handover-description')?.textContent)
+      .toContain('Inspect the storybook alpha checklist')
+  },
+}
+
+// A long note (the engine takes up to 4000 characters) wraps in the card and
+// nothing overflows at phone width.
+const LONG_INSTRUCTIONS = Array.from({ length: 12 }, (_, i) =>
+  `${i + 1}. Check the storybook-long-instruction-token-without-any-break-${i} source, then write down what changed and why.`,
+).join('\n')
+export const LongInstructions: Story = {
+  decorators: [() => ({ template: '<div style="max-width: 390px"><story /></div>' })],
+  args: {
+    handover: parseTaskHandover(promptWithInstructions(LONG_INSTRUCTIONS))!,
+    prompt: promptWithInstructions(LONG_INSTRUCTIONS),
+  },
+  play: async ({ canvasElement }) => {
+    const block = canvasElement.querySelector('.task-handover-instructions') as HTMLElement
+    expect(block.querySelectorAll('li')).toHaveLength(12)
+    expect(canvasElement.scrollWidth).toBeLessThanOrEqual(canvasElement.clientWidth)
   },
 }
 

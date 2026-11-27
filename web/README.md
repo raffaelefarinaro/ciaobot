@@ -199,7 +199,10 @@ web/
                            screen, with no board chrome and no address change, an awaited
                            `requestClose()`, and a `detail-close` that distinguishes the
                            editor's internal close before the delegation preview from final
-                           closure. `ItemPeekHost.vue` mounts it in that mode for a task link
+                           closure. Confirming the preview lands on the delegated chat
+                           (`landOnChat`): the sheet and the task page or overlay close
+                           first, `/tasks/<id>` goes back to `/tasks` before the chat is
+                           pushed, and focus moves to the chat composer. `ItemPeekHost.vue` mounts it in that mode for a task link
                            opened over a chat or a note, and Back closes it through
                            `useOverlayBackEntry`; the `/tasks` route keeps its own
                            editor and address.

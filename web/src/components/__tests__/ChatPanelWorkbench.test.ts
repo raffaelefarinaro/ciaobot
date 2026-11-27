@@ -419,7 +419,7 @@ describe('ChatPanel aligned layout', () => {
     it('draws the first message as the task handed over, and later ones as typed', async () => {
       const wrapper = await mountPanel(DELEGATED_TURNS, DELEGATION)
       const card = wrapper.getComponent({ name: 'TaskHandoverCard' })
-      expect(card.props('handover')).toEqual({ title: 'Ship the board', description: '- land the types' })
+      expect(card.props('handover')).toEqual({ title: 'Ship the board', description: '- land the types', instructions: '' })
       expect(card.props('prompt')).toBe(PROMPT)
       const users = wrapper.findAll('.message-wrap.user')
       expect(users).toHaveLength(1)
