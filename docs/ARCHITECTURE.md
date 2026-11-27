@@ -582,9 +582,9 @@ capsule marker (`ciao/context/capsule.py`, one string in
 `ciao/memory_policy.py`) tells a schedule/automation turn not to ask or wait and
 to report deferred work — a vault-note trash/delete, a
 write into another workspace, a new automation in another workspace, and public
-or destructive git actions — in its final output instead. It may write a new
-memory fact only from something the person produced, never from fetched
-content or an instruction inside it. The memory pass reads
+or destructive git actions — in its final output instead. It may add a
+`ciao:memory` or `ciao:profile` entry only from something the person produced,
+never from fetched content or an instruction inside it. The memory pass reads
 the same marker in the transcript it is handed, and is told never to record a
 fact out of an automation turn.
 
