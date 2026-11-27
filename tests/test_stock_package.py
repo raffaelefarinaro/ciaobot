@@ -817,7 +817,15 @@ def test_closed_tasks_reads_only_the_persons_words_and_never_touches_a_task() ->
 def test_closed_tasks_is_idempotent_and_verifies_the_uncovered_count() -> None:
     step = _reference("curation-pass-9-closed-tasks.md")
     for phrase in (
-        "Skip a task whose `relative_path` already appears as `source:` on a line of `Unsure.md` or in an undo-log entry `by: care closed-tasks`",
+        # A rejected suggestion (an Unsure line the person deleted) must not come back:
+        # every read is recorded, keyed by the latest completion id.
+        "one line per task this step has read, `<relative_path> | <latest completion id> | <completed_at> | read <YYYY-MM-DD>`",
+        "Skip a task listed in `.care-closed-tasks` with the same latest completion id",
+        "A task completed again has a new completion id and is read again",
+        "append its line to `.care-closed-tasks`, also when it yielded nothing",
+        "whose `relative_path` and `completed_at` are not on a line of `Workspace/.care-closed-tasks`",
+        "`.care-closed-tasks` must have a line for each of the N tasks read, with its latest completion id",
+        "Also skip a task whose `relative_path` already appears as `source:` on a line of `Unsure.md` or in an undo-log entry `by: care closed-tasks`",
         "never add a line that says what an existing line says",
         "Do not re-add a fact the undo log shows was removed by `care second-look`, `care unsure` or a person",
         "re-run the uncovered filter from the due check",
