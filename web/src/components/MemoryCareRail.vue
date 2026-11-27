@@ -150,8 +150,10 @@ onMounted(() => { void tasks.fetchSchedules().catch(() => {}) })
 .care-rail-fact dd { margin: 0; display: flex; flex-direction: column; gap: 2px; color: var(--fg2); line-height: 1.4; }
 .care-rail-state { display: inline-flex; align-items: center; gap: var(--space-2); }
 .care-rail-when { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.care-rail-actions .docked-row-title { color: var(--accent); font-weight: 600; }
+.care-rail-actions .docked-row:not(:disabled):hover .docked-row-title { text-decoration: underline; text-underline-offset: 3px; }
+.care-rail-actions .docked-row:disabled .docked-row-title { color: var(--fg3); }
 .care-rail-actions .docked-row:disabled { color: var(--fg3); cursor: default; }
-.care-rail-actions .docked-row:disabled:hover .docked-row-title { color: inherit; }
 .care-rail-status { margin: 10px 0 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.5; }
 .care-rail-status:empty { display: none; }
 </style>

@@ -195,6 +195,47 @@ test.describe('Workspace care', () => {
   })
 })
 
+test.describe('Memory page chrome', () => {
+  test('care has its Daily care window beside the card, and no explainer bar or back link; the site link is in the sidebar', async ({ page }, testInfo) => {
+    await isolate(page, `care-chrome-${testInfo.workerIndex}`)
+    await page.setViewportSize(DOCKED)
+    await answerCare(page, careReports.complete)
+    await boot(page, '/memory/care', '.mc-summary-title')
+    await expect(page.getByRole('button', { name: 'How memory works' })).toHaveCount(0)
+    await expect(page.locator('.mc-back')).toHaveCount(0)
+    const rail = page.locator('section.care-rail')
+    await expect(rail.getByRole('heading', { name: 'Daily care' })).toBeVisible()
+    for (const label of ['Last run', 'Next run', 'Weekly checks']) await expect(rail.getByText(label, { exact: true })).toBeVisible()
+    const card = (await page.locator('.mc-card').boundingBox())!
+    const window = (await rail.boundingBox())!
+    expect(window.x).toBeGreaterThan(card.x + card.width)
+    for (const name of ['Run care again', 'Open Care-Report.md']) {
+      expect((await rail.getByRole('button', { name }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    }
+    const link = page.getByRole('link', { name: /^How memory works/ })
+    await expect(link).toHaveAttribute('href', 'https://www.raffaelefarinaro.com/ciaobot/memory.html')
+    await expect(link).toHaveAttribute('target', '_blank')
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    await page.screenshot({ path: 'test-results/care-chrome/care-desktop.png' })
+    await page.goto('/memory/unsure')
+    await expect(page.getByRole('heading', { name: 'How this works' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'How memory works' })).toHaveCount(0)
+    await page.screenshot({ path: 'test-results/care-chrome/unsure-desktop.png' })
+  })
+
+  test('on a phone the window drops below the card', async ({ page }, testInfo) => {
+    await isolate(page, `care-chrome-phone-${testInfo.workerIndex}`)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await answerCare(page, careReports.complete)
+    await boot(page, '/memory/care', '.mc-summary-title')
+    const card = (await page.locator('.mc-card').boundingBox())!
+    const window = (await page.locator('section.care-rail').boundingBox())!
+    expect(window.y).toBeGreaterThanOrEqual(card.y + card.height)
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(overflow, JSON.stringify(culprits)).toBeLessThanOrEqual(0)
+  })
+})
+
 test.describe('Workspace care page states, looked at', () => {
   const states = {
     'needs-you': careReports.needsYou,

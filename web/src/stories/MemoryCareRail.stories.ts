@@ -89,7 +89,7 @@ export const DidNotFinish: Story = {
 }
 
 export const Paused: Story = {
-  ...story(careReports.complete, { paused: true }),
+  ...story({ ...careReports.complete, schedule: { ...careReports.complete.schedule!, enabled: false } }, { paused: true }),
   play: async ({ canvas }) => {
     const win = await windowOf(canvas)
     await waitFor(() => expect(win.textContent).toContain('Not scheduled'))
@@ -115,8 +115,8 @@ export const NeverRun: Story = {
 }
 
 export const RunAgain: Story = {
-  // Reads: mount, the press's own re-read, then the run.
-  ...story([careReports.blocked, careReports.blocked, careReports.running], {
+  // Two reads before the press (the page's mount and refresh), one inside it, then the run.
+  ...story([careReports.blocked, careReports.blocked, careReports.blocked, careReports.running], {
     extra: [{ method: 'POST', path: careRunPath, respond: () => json({ schedule_id: `system-memory-curation@${CARE_WORKSPACE}`, status: 'ok' }, 201) }],
   }),
   play: async ({ canvas, userEvent }) => {
