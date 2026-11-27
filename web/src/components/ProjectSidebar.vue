@@ -1011,7 +1011,7 @@ import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { useWorkspaceSchedules } from '../composables/useWorkspaceSchedules'
 import { groupAutomations, lastRunState, nextUpSchedules, relativeOffset, scheduleTitle } from '../lib/scheduleList'
-import { AUTOMATIONS_PAGES, automationsPageFor, type AutomationsPage } from '../lib/automationsNav'
+import { AUTOMATIONS_PAGES, automationsPageFor, automationsPagePath, type AutomationsPage } from '../lib/automationsNav'
 import { useWebhookStore } from '../stores/webhooks'
 import SidebarRow from './SidebarRow.vue'
 import SidebarListSkeleton from './SidebarListSkeleton.vue'
@@ -1396,7 +1396,8 @@ async function selectAutomationWorkspace(workspace: string) {
   if (store.activeWorkspace !== workspace) {
     if ((await store.switchWorkspace(workspace, { transition: false })) === false) return
   }
-  if (props.mode === 'schedules') await router.push('/schedules')
+  // The list page stays; an open automation belonged to the other workspace.
+  if (props.mode === 'schedules') await router.push(automationsPagePath(automationsPage.value))
 }
 
 function missedCountFor(workspace: string): number {

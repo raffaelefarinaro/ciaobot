@@ -17,7 +17,7 @@ test.describe('automations pages, desktop', () => {
 
   test('the sidebar moves between the three pages as real links, the current one marked', async ({ page }) => {
     await boot(page, '/schedules', '.overview-body a.ov-item')
-    const subnav = page.getByRole('navigation', { name: 'Automations' })
+    const subnav = page.getByRole('navigation', { name: 'Automations', exact: true })
     const current = subnav.locator('[aria-current="page"]')
     await expect(current).toHaveAttribute('href', '/schedules')
     // A destination row: the primary nav's 38px on a fine pointer, its accent fill.
@@ -90,7 +90,7 @@ test.describe('automations pages, phone', () => {
   test('the drawer holds the pages and Next up', async ({ page }) => {
     await boot(page, '/schedules', '.automations-switcher')
     await page.getByRole('button', { name: 'Open sidebar' }).click()
-    const subnav = page.getByRole('navigation', { name: 'Automations' })
+    const subnav = page.getByRole('navigation', { name: 'Automations', exact: true })
     await expect(subnav.getByRole('link')).toHaveCount(3)
     for (const link of await subnav.getByRole('link').all()) {
       expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44)

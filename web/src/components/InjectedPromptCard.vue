@@ -154,8 +154,8 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
         <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
         <div class="injected-card-prose" tabindex="0" role="region" aria-label="Loop prompt" v-html="md(prompt.prompt)"></div>
         <!-- A loop's wake is not stamped onto its chat, so the card links the
-             Automations list rather than one entry. -->
-        <p class="injected-card-note"><router-link class="injected-card-link" to="/schedules">Open Automations</router-link></p>
+             Loops page rather than one entry. -->
+        <p class="injected-card-note"><router-link class="injected-card-link" to="/automations/loops">Open Loops</router-link></p>
       </template>
 
       <template v-else-if="prompt.kind === 'webhook'">

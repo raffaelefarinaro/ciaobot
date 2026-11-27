@@ -8,13 +8,13 @@
 - **Every N minutes for a project** is `ciao schedule create --frequency interval --interval-minutes N --project P`: each run opens a fresh chat in that project and the routine has no end. An interval schedule created from an unattended (scheduled) run is refused (`unattended_forbidden`), so an automated run cannot add an unbounded cadence. Interval runs that come due while their chat is still working are skipped and retried shortly after, never queued, and the cadence resumes after a restart rather than replaying what it missed.
 - **When to create one**: the agent creates automations conversationally when the user asks — this is an agent action, not a PWA-only button. Show a concise draft (cadence, next_run, target workspace, target project) and get confirmation before creating, unless the user already explicitly asked to apply it. Call `ciao schedule preview` first to validate. Ask which workspace/project when it isn't obvious from the request. An automation always belongs to one logical workspace and shows under Automations for that workspace.
 - Time-of-day runs that were due while the app was off are caught up on the next launch; each workspace shows how many it missed. A run that dispatched but stopped before it finished (a restart mid-turn, a killed model process) counts as missed too — it is recovered once on the next launch, and stays listed as missed if that recovery fails as well. A run that completed is never repeated. Interval runs are not replayed — their cadence just resumes.
-- System maintenance schedules ship with the app and appear on the Automations page next to the user's own.
+- System maintenance schedules ship with the app and appear on the Automations › Schedules page above the user's own. Chat loops have their own Loops page, and the sidebar's Next up lists the soonest runs.
 
 ## Webhook triggers (the other direction: events in, not times out)
 
 Automations run because a time arrived. A **webhook trigger** runs because
 something outside called a URL: a CI provider, a monitoring agent, a
-home-automation box. Configure them on the Automations page or in chat with
+home-automation box. Configure them on the Automations › Webhooks page or in chat with
 `ciao webhook list|create|update|rotate|delete` (`ciao help webhook` for the flags), and
 the sender's own call is a short `curl` recipe in `PWA_API.md`.
 
