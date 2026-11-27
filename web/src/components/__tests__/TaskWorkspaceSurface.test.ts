@@ -457,6 +457,45 @@ describe('TaskWorkspaceSurface overlay mode', () => {
     wrapper.unmount()
   })
 
+  it('lands on the delegated chat and ends the overlay instead of reopening the editor', async () => {
+    answerWith(BOARD, 'Write the runbook.')
+    apiPost.mockResolvedValue({
+      workspace: 'personal',
+      created: true,
+      chat_id: 'chat-9',
+      attempt: {
+        attempt_id: 'f'.repeat(32), task_id: 'ship', task_revision: NEXT_REVISION, chat_id: 'chat-9',
+        state: 'running', created_at: '', updated_at: '', ended_at: '', detail: '', live: true,
+      },
+      task: { ...task({ chat_id: 'chat-9', assignee: 'agent' }), revision: THIRD_REVISION, body: '' },
+    })
+    const open = vi.spyOn(useProjectStore(), 'openChatFromDeepLink').mockResolvedValue(undefined)
+    const composer = document.createElement('textarea')
+    composer.className = 'chat-input'
+    document.body.appendChild(composer)
+
+    const { wrapper } = mountOverlay()
+    await flushPromises()
+    await nextTick()
+    await editor(wrapper).get('.task-delegate-go').trigger('click')
+    await flushPromises()
+    await nextTick()
+    const preview = wrapper.findAll('.task-sheet').find((sheet) => sheet.find('#task-delegate-title').exists())!
+    await preview.get('.btn-primary').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/delegate', expect.objectContaining({ workspace: 'personal' }))
+    expect(open).toHaveBeenCalledWith('chat-9')
+    // Neither the sheet nor the editor it was opened from comes back.
+    expect(wrapper.find('#task-delegate-title').exists()).toBe(false)
+    expect(editor(wrapper).exists()).toBe(false)
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    // Focus did not fall to <body>: it is in the arrived chat's composer.
+    expect(document.activeElement).toBe(composer)
+    wrapper.unmount()
+  })
+
   it('closes the surface on a workspace switch, without writing the old draft', async () => {
     answerWith(BOARD)
     const { wrapper } = mountOverlay()

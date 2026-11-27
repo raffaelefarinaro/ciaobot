@@ -1190,11 +1190,8 @@ async function submitDelegate() {
   let outcome: TaskAttempt | null = null
   if (delegateMode.value === 'open_chat') {
     delegateBusy.value = false
-    openAttemptChat(task)
     resetDelegate()
-    // The preview was the last thing this overlay drew. Without this the host
-    // would keep a mounted, invisible surface after the chat opened.
-    if (overlay.value) finishOverlayClose()
+    await landOnChat(task.chat_id)
     return
   }
   if (delegateMode.value === 'resume' && task.attempt_id) {
@@ -1211,9 +1208,63 @@ async function submitDelegate() {
   delegateBusy.value = false
   if (!outcome) return
   board.clearError()
-  // The turn is running; the badge now says so, and there is nothing left to
-  // confirm. Closing is the honest end of the gesture.
+  // The turn is running in its own chat, and that chat is where the user goes:
+  // the sheet and the task page they came from both end here, so nothing of the
+  // task is left drawn over or behind the conversation.
+  if (outcome.chat_id) {
+    resetDelegate()
+    await landOnChat(outcome.chat_id, true)
+    return
+  }
   closeDelegate()
+}
+
+/**
+ * End this surface and arrive at a chat, with focus somewhere real.
+ *
+ * The task page, or the overlay over a chat, closes first, through the editor's
+ * own save: a draft that cannot be written keeps the page on screen with its
+ * sentence and the user stays put, as it does for every other close. Closing
+ * before the navigation is what leaves history clean: a board page has already
+ * replaced its `/tasks/<id>` address with `/tasks`, an overlay has already
+ * stepped back over its own entry, so the chat is one push on top of where the
+ * user was and Back returns there, never to a half-closed sheet or editor.
+ *
+ * `fresh` is a chat the engine has just created, which this browser's chat list
+ * may not hold yet; the deep-link entry asks the engine about it first.
+ */
+async function landOnChat(chatId: string, fresh = false): Promise<void> {
+  if (detailOpen.value) {
+    await closeDetail()
+    if (detailOpen.value) return
+  }
+  // The sheet was the last thing an overlay drew. Without this the host would
+  // keep a mounted, invisible surface after the chat opened.
+  if (overlay.value) finishOverlayClose()
+  if (!chatId) return
+  if (fresh) await projectStore.openChatFromDeepLink(chatId)
+  else await projectStore.switchChat(chatId)
+  await focusChatComposer()
+}
+
+/**
+ * Put focus in the arrived chat's composer, once it is drawn.
+ *
+ * The control that held focus (a card, the sheet's button) is gone by now, which
+ * would drop a keyboard user to `<body>`. Focus moves only while it is still on
+ * nothing: a user who has already clicked or tabbed somewhere keeps it.
+ */
+async function focusChatComposer(): Promise<void> {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const active = document.activeElement
+    if (active && active !== document.body && active.isConnected) return
+    const composer = document.querySelector<HTMLTextAreaElement>('textarea.chat-input')
+    if (composer && !composer.disabled) {
+      composer.focus()
+      return
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50))
+  }
 }
 
 /** One lifecycle gesture on a card's attempt. */
@@ -2051,7 +2102,7 @@ function openDetail(task: Task) {
   reviewNote.value = ''
   editingBody.value = false
   detailOpen.value = true
-  if (!overlay.value) syncTaskAddress(task.id)
+  if (!overlay.value) void syncTaskAddress(task.id)
   void loadDescription(task.id)
   if (task.attempt_state) {
     // Re-read on every open: a turn may have reported since the last read.
@@ -2203,7 +2254,7 @@ async function closeDetail(options: { discard?: boolean; internal?: boolean } = 
   if (closed === null) return
   // Only the address of the task that closed: one the user navigated to
   // while this dialog was still open is theirs to keep.
-  if (routeTaskId.value === closed) syncTaskAddress('')
+  if (routeTaskId.value === closed) await syncTaskAddress('')
   if (!overlay.value) return
   // The host decides whether this ends the overlay: a delegation preview
   // follows in its own sheet, so that close is not a final one.
@@ -2235,13 +2286,13 @@ const missingTaskId = ref('')
 /** A route-driven switch is writing the open task before it opens the next. */
 let routeSwitching = false
 
-function syncTaskAddress(taskId: string): void {
+function syncTaskAddress(taskId: string): Promise<unknown> {
   // An overlay is hosted over a screen the user is on; naming its task in that
   // screen's address would navigate the host out from under itself.
-  if (overlay.value) return
-  if (!router || routeTaskId.value === taskId) return
+  if (overlay.value) return Promise.resolve()
+  if (!router || routeTaskId.value === taskId) return Promise.resolve()
   addressInFlight = taskId
-  void router.replace(taskId ? { name: 'task-detail', params: { taskId } } : { name: 'tasks' })
+  return router.replace(taskId ? { name: 'task-detail', params: { taskId } } : { name: 'tasks' })
     .finally(() => { if (addressInFlight === taskId) addressInFlight = null })
 }
 
@@ -2269,7 +2320,7 @@ watch(
       // is only missing once the fresh read has answered.
       if (board.loading) return
       missingTaskId.value = id
-      syncTaskAddress('')
+      void syncTaskAddress('')
       return
     }
     missingTaskId.value = ''
@@ -2290,7 +2341,7 @@ watch(
         routeSwitching = false
       }
       if (!committed) {
-        if (detailOpen.value && detailId.value === kept) syncTaskAddress(kept)
+        if (detailOpen.value && detailId.value === kept) void syncTaskAddress(kept)
         return
       }
       // The address may have moved on while the write was settling. The page
@@ -2540,8 +2591,7 @@ async function delegateFromDetail(task: Task) {
   await closeDetail({ internal: overlay.value && !openChat })
   if (detailOpen.value) return
   if (openChat) {
-    openAttemptChat(task)
-    if (overlay.value) finishOverlayClose()
+    await landOnChat(task.chat_id)
     return
   }
   void openDelegate(task)

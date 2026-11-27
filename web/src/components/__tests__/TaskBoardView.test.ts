@@ -2314,6 +2314,37 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
+  it('closes the sheet and lands on the delegated chat once the turn is running', async () => {
+    apiPost.mockResolvedValue(delegateAnswer())
+    const open = vi.spyOn(useProjectStore(), 'openChatFromDeepLink').mockResolvedValue(undefined)
+    const wrapper = await mountWithBody([plainTask({ project_id: 'p1' })])
+
+    await openPreview(wrapper, 'Draft the runbook')
+    expect(open).not.toHaveBeenCalled()
+    await wrapper.get('.task-sheet .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(open).toHaveBeenCalledWith('chat-9')
+    expect(wrapper.find('#task-delegate-title').exists()).toBe(false)
+    expect(wrapper.find('.task-detail-sheet').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('stays on the sheet, and opens no chat, when the delegation is refused', async () => {
+    apiPost.mockRejectedValue(new Error('conflict'))
+    const open = vi.spyOn(useProjectStore(), 'openChatFromDeepLink').mockResolvedValue(undefined)
+    const wrapper = await mountWithBody([plainTask({ project_id: 'p1' })])
+
+    await openPreview(wrapper, 'Draft the runbook')
+    await wrapper.get('.task-sheet .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(open).not.toHaveBeenCalled()
+    expect(wrapper.find('#task-delegate-title').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('hands over the instructions typed into the sheet with the delegation', async () => {
     apiPost.mockResolvedValue(delegateAnswer())
     const wrapper = await mountWithBody([plainTask({ project_id: 'p1' })])
