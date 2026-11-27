@@ -6,7 +6,7 @@
     <RouterLink v-else class="mc-back" :to="memorySectionPath('map')">
       <span aria-hidden="true">‹</span> Memory
     </RouterLink>
-    <h2 id="mc-title" class="mc-title">{{ proposalPath ? 'Review proposal' : 'Workspace care' }}</h2>
+    <h2 id="mc-title" ref="titleEl" class="mc-title" tabindex="-1">{{ proposalPath ? 'Review proposal' : 'Workspace care' }}</h2>
     <p v-if="!proposalPath" class="mc-lede">What the daily run left for you, and how it went. Read from Workspace/Care-Report.md.</p>
 
     <p v-if="!report && !care.error" class="mc-note">Reading the report…</p>
@@ -51,6 +51,7 @@
                   class="btn-small mc-action"
                   :class="{ 'btn-primary': needAction(item) === 'proposal' }"
                   :aria-label="`${needActionLabel(needAction(item))}: ${item.title}`"
+                  :data-path="item.path"
                   @click="act(item)"
                 >{{ needActionLabel(needAction(item)) }}</button>
                 <button
@@ -65,7 +66,7 @@
           </li>
         </ol>
       </section>
-      <p v-else-if="calm" class="mc-calm">Nothing needs you.</p>
+      <p v-else-if="calmWords" class="mc-calm">{{ calmWords }}</p>
 
       <details
         v-if="report.steps.length"
@@ -145,7 +146,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AppIcon from './AppIcon.vue'
 import CareGlyph from './CareGlyph.vue'
@@ -189,10 +190,18 @@ const glyph = computed(() => (report.value ? careGlyph(careState(report.value)) 
 const summaryTitle = computed(() => (report.value ? careSummaryTitle(report.value) : ''))
 const summaryMeta = computed(() => (report.value ? careSummaryMeta(report.value) : ''))
 const needs = computed(() => (report.value ? openNeeds(report.value) : []))
-/** A finished or stopped run with nothing left for the person says so in one line. */
-const calm = computed(() => {
-  const state = report.value ? careState(report.value) : 'never'
-  return state === 'complete' || state === 'blocked' || state === 'interrupted'
+/**
+ * A finished or stopped run with nothing left for the person says so in one
+ * line. A run that stopped does not claim all is well: its blocked steps, with
+ * their Fix buttons, are open below.
+ */
+const calmWords = computed(() => {
+  switch (report.value ? careState(report.value) : 'never') {
+    case 'complete': return 'Nothing needs you.'
+    case 'blocked': return 'Nothing needs your decision. Some steps did not finish; they are below.'
+    case 'interrupted': return 'Nothing needs your decision. The run stopped early; the steps below show where.'
+    default: return ''
+  }
 })
 const stepsCount = computed(() => (report.value ? stepsCountWords(report.value) : ''))
 const weeklyWords = computed(() => {
@@ -249,6 +258,33 @@ function closeProposal(): void {
   void router.push({ query: {} })
 }
 
+// Focus follows the view: into the review's heading when it opens, and back to
+// the item's Review proposal button when it closes.
+const titleEl = ref<HTMLElement | null>(null)
+watch(proposalPath, async (now, before) => {
+  await nextTick()
+  const back = !now && before
+    ? document.querySelector<HTMLElement>(`.mc-action[data-path="${CSS.escape(before)}"]`)
+    : null
+  ;(back ?? titleEl.value)?.focus()
+})
+
+/** Open a vault file only once the engine serves it; a gone file gets a calm line. */
+async function openChecked(path: string): Promise<void> {
+  try {
+    const resp = await fetch(`/api/workspace-file?exact=1&path=${encodeURIComponent(path)}`, { credentials: 'same-origin' })
+    if (resp.ok) {
+      void fileViewer.open(path)
+      return
+    }
+    status.value = resp.status === 404
+      ? 'That file is not there any more. The next care run updates this list.'
+      : 'That file cannot be opened here.'
+  } catch {
+    status.value = 'That file cannot be opened right now.'
+  }
+}
+
 async function runAgain(): Promise<void> {
   status.value = ''
   const { message } = await care.runAgain()
@@ -278,7 +314,7 @@ async function act(item: CareNeed): Promise<void> {
     else status.value = guide.error || 'This workspace has no guide yet.'
     return
   }
-  if (item.open_path) void fileViewer.open(item.open_path)
+  if (item.open_path) await openChecked(item.open_path)
 }
 
 async function fixNeed(item: CareNeed, index: number): Promise<void> {
@@ -337,6 +373,8 @@ async function fix(step: CareStep): Promise<void> {
 button.mc-back { padding: 0; border: 0; background: none; cursor: pointer; font: inherit; font-size: var(--text-sm); }
 .mc-back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
 .mc-title { margin: 0; font-size: var(--text-lg); }
+.mc-title:focus { outline: none; }
+.mc-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
 .mc-lede, .mc-note { margin: 0; color: var(--fg3); font-size: var(--text-sm); line-height: 1.5; }
 .mc-note--error { color: var(--error-text); }
 

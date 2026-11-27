@@ -43,7 +43,7 @@
       </section>
 
       <footer class="cpr-foot">
-        <template v-if="open">
+        <template v-if="canDecide">
           <p class="cpr-how">{{ howWords }}</p>
           <div class="cpr-actions">
             <button type="button" class="btn-primary btn-small cpr-action" :disabled="busy !== ''" @click="approve">
@@ -55,6 +55,7 @@
             <button type="button" class="cpr-link cpr-file" @click="fileViewer.open(openPath)">Open the file</button>
           </div>
         </template>
+        <p v-else-if="open" class="cpr-how">{{ readOnlyWords }}</p>
         <p v-else class="cpr-how">{{ doneWords }}</p>
         <p class="cpr-status" role="status">{{ status }}</p>
       </footer>
@@ -95,8 +96,15 @@ const REPORT_TAIL = 'Workspace/Care-Report.md'
 const vaultPrefix = computed(() => (props.report.report_path.endsWith(REPORT_TAIL)
   ? props.report.report_path.slice(0, -REPORT_TAIL.length)
   : ''))
-const openPath = computed(() => props.report.needs_you.find(item => item.path === props.path)?.open_path
-  || `${vaultPrefix.value}${props.path}`)
+/** The item as the engine read it: its `proposal_status` comes from a no-symlink, bounded read. */
+const item = computed(() => props.report.needs_you.find(entry => entry.path === props.path) ?? null)
+const openPath = computed(() => item.value?.open_path || `${vaultPrefix.value}${props.path}`)
+/**
+ * Approve and Reject are offered only for a proposal the last care report lists
+ * and the engine itself read as open. A file it could not read safely (a
+ * symlink, say) or one the report does not list can be read here, not decided.
+ */
+const engineOpen = computed(() => item.value?.proposal_status === 'draft' || item.value?.proposal_status === 'ready')
 
 const proposal = ref<Proposal | null>(null)
 const loading = ref(true)
@@ -106,6 +114,10 @@ const busy = ref<'' | 'approve' | 'reject'>('')
 
 const kindWords = computed(() => (proposal.value ? proposalKindWords(proposal.value.kind) : ''))
 const open = computed(() => !!proposal.value && proposalIsOpen(proposal.value.status))
+const canDecide = computed(() => open.value && engineOpen.value)
+const readOnlyWords = computed(() => (item.value
+  ? 'The app could not read this proposal safely, so it is shown here to read only.'
+  : 'This proposal is not in the last care report, so it is shown here to read only.'))
 const howWords = computed(() => (proposal.value?.kind === 'upstream-issue'
   ? 'The issue is written in a chat, with you, and filed only when you say so.'
   : 'The change is made in a chat, with you.'))
@@ -153,7 +165,7 @@ async function load(): Promise<void> {
 watch(() => props.path, () => { void load() }, { immediate: true })
 
 async function approve(): Promise<void> {
-  if (!proposal.value || busy.value) return
+  if (!proposal.value || !canDecide.value || busy.value) return
   busy.value = 'approve'
   status.value = ''
   try {
@@ -170,12 +182,26 @@ async function approve(): Promise<void> {
 }
 
 async function reject(): Promise<void> {
-  if (!proposal.value || busy.value) return
+  if (!proposal.value || !canDecide.value || busy.value) return
   busy.value = 'reject'
   status.value = ''
   try {
-    // Re-read first: the file may have changed since the review opened.
+    // Ask the engine again (its read refuses a symlink) and re-read the file:
+    // either may have changed since the review opened, and a proposal already
+    // applied or rejected is never overwritten.
+    await care.refresh()
     const current = await readFile()
+    const fresh = parseProposal(current)
+    if (!fresh) {
+      proposal.value = null
+      loadError.value = 'The proposal file changed and is no longer in the proposal format, so nothing was written.'
+      return
+    }
+    if (!engineOpen.value || !proposalIsOpen(fresh.status)) {
+      proposal.value = fresh
+      status.value = 'This proposal was already decided or changed, so nothing was written.'
+      return
+    }
     const next = withProposalStatus(current, 'rejected')
     if (next === null) throw new Error('This file is not in the proposal format, so it was left as it is.')
     const resp = await fetch('/api/workspace-file', {

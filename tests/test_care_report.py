@@ -137,6 +137,10 @@ def test_standard_items_read_title_detail_and_path() -> None:
         "/etc/passwd", "~/secrets.md", "../outside.md", "Workspace/../../x.md", "Workspace/./Unsure.md",
         "C:/Users/x.md", "c:x.md", "Workspace\\Unsure.md", "Workspace//Unsure.md", "Workspace/Unsure.md/",
         "Workspace/\x00.md", "Workspace/a\x1b.md", " ", "x" * 300 + ".md",
+        # Hidden files are never a note, and a bidi override reads a path backwards.
+        ".env", ".git/config", "Workspace/.care-drained", "People/Rae\u202egnp.md", "People/Rae\u200b.md",
+        # The `(path: …)` tail cannot carry parentheses, so a path never holds them.
+        "Projects/Atlas (2026).md",
     ],
 )
 def test_an_unsafe_path_is_dropped_not_followed(raw: str) -> None:
@@ -146,7 +150,7 @@ def test_an_unsafe_path_is_dropped_not_followed(raw: str) -> None:
     assert item["title"] == "Look at it."
 
 
-@pytest.mark.parametrize("raw", ["Workspace/Unsure.md", "People/Rae Smith.md", "`AGENTS.md`", "Projects/Atlas 2026.md"])
+@pytest.mark.parametrize("raw", ["Workspace/Unsure.md", "People/Rae Smith.md", "`AGENTS.md`", "Projects/Atlas 2026.md", "People/Zoë Ruiz.md"])
 def test_a_vault_relative_path_is_kept(raw: str) -> None:
     assert care_report.vault_relative_path(raw) == raw.strip("`")
 
@@ -187,6 +191,13 @@ def test_proposal_status_is_empty_when_it_cannot_be_trusted(tmp_path: Path, eith
     assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/missing.md") == ""
     _write_proposal(tmp_path, "odd", "maybe")
     assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/odd.md") == ""
+    # Two status keys, or a BOM before the front matter, make no status: the app reads both the same way.
+    twice = _write_proposal(tmp_path, "twice", "draft")
+    twice.write_text(twice.read_text().replace("status: draft", "status: draft\nstatus: applied"))
+    assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/twice.md") == ""
+    bom = _write_proposal(tmp_path, "bom", "draft")
+    bom.write_text("\ufeff" + bom.read_text())
+    assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/bom.md") == ""
     # Only a proposal path is read: never a file the path merely names.
     _write_proposal(tmp_path, "trim", "applied")
     assert care_report.read_proposal_status(tmp_path, "Workspace/Proposals/../Proposals/trim.md") == ""

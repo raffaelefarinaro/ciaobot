@@ -69,7 +69,7 @@ test.describe('Workspace care', () => {
     await page.goto('/memory/care')
     await expect(page.getByRole('heading', { name: 'Did not finish: 4 of 6 steps' })).toBeVisible()
     // Nothing needs the person, so the steps are open to show what stopped.
-    await expect(page.getByText('Nothing needs you.')).toBeVisible()
+    await expect(page.getByText('Nothing needs your decision. Some steps did not finish; they are below.')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Fix Hygiene with a chat' })).toBeVisible()
   })
 

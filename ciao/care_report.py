@@ -19,6 +19,7 @@ import os
 import re
 import stat as stat_module
 import sys
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -81,11 +82,15 @@ _NOTE_LEAD = re.compile(r"^note:\s*", re.IGNORECASE)
 _CHECKBOX_LEAD = re.compile(r"^\[[ xX!]\]\s+")
 # The end of the first sentence: a stop, then a capital, a digit or a quote.
 _SENTENCE_END = re.compile(r"[.?!](?=\s+[A-Z0-9\"\u201c(])")
-_PATH_SEGMENT = re.compile(r"[A-Za-z0-9 _.,'()&+\-\u00c0-\uffff]+")
+# Path characters: ASCII letters, digits and a few marks, or any non-ASCII
+# letter, mark or digit. No parentheses (the `(path: …)` tail cannot hold them)
+# and no control, format or bidi character (U+202E would make a path read
+# backwards on screen).
+_PATH_ASCII = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _.,'&+-")
 # A proposal file, named as `ciao proposal-check` accepts it.
 _PROPOSAL_PATH = re.compile(r"Workspace/Proposals/[a-z0-9]+(?:-[a-z0-9]+)*\.md")
 _FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n(.*?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
-_PROPOSAL_STATUS = re.compile(r"^status:[ \t]*['\"]?([a-z]+)['\"]?[ \t]*(?:#.*)?\r?$", re.MULTILINE)
+_PROPOSAL_STATUS = re.compile(r"^status[ \t]*:[ \t]*['\"]?([^'\"\r\n#]*?)['\"]?[ \t]*(?:#.*)?\r?$", re.MULTILINE)
 _STATES = {" ": "open", "x": "done", "X": "done", "!": "blocked"}
 # The em dash the prompt writes, and the ASCII stand-ins a model may use instead.
 _EVIDENCE_SEPARATORS = (" \u2014 ", " -- ", " \u2013 ")
@@ -142,9 +147,18 @@ def vault_relative_path(raw: str) -> str:
     if value.startswith(("/", "~")) or "\\" in value or re.match(r"^[A-Za-z]:", value):
         return ""
     for segment in value.split("/"):
-        if segment in ("", ".", "..") or segment != segment.strip() or not _PATH_SEGMENT.fullmatch(segment):
+        # A dot-segment is `.`, `..` or a hidden file (`.env`, `.git`): none is a note.
+        if not segment or segment.startswith(".") or segment != segment.strip():
+            return ""
+        if not all(_path_char(ch) for ch in segment):
             return ""
     return value
+
+
+def _path_char(ch: str) -> bool:
+    if ch in _PATH_ASCII:
+        return True
+    return ord(ch) > 127 and unicodedata.category(ch)[0] in "LMN"
 
 
 def is_proposal_path(path: str) -> bool:
@@ -451,8 +465,9 @@ def read_proposal_status(vault_root: Path, path: str) -> str:
     front = _FRONT_MATTER.match(text)
     if front is None:
         return ""
-    found = _PROPOSAL_STATUS.search(front.group(1))
-    value = found.group(1) if found else ""
+    # Exactly one status key: two would mean the file says two things.
+    found = _PROPOSAL_STATUS.findall(front.group(1))
+    value = found[0] if len(found) == 1 else ""
     return value if value in PROPOSAL_STATUSES else ""
 
 

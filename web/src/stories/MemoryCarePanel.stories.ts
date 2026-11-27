@@ -126,7 +126,7 @@ export const Blocked: Story = {
     expect(canvas.getAllByText('blocked')).toHaveLength(2)
     expect(canvas.getByRole('button', { name: 'Fix Hygiene with a chat' })).toBeTruthy()
     // Nothing needs the person, so the steps are open to show what stopped.
-    expect(canvas.getByText('Nothing needs you.')).toBeTruthy()
+    expect(canvas.getByText('Nothing needs your decision. Some steps did not finish; they are below.')).toBeTruthy()
     expect(canvas.getByText('Hygiene did not finish; it runs again on the next run.')).toBeTruthy()
   },
 }

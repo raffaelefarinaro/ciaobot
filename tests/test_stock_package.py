@@ -953,3 +953,37 @@ def test_the_final_reply_is_short_and_names_the_app_not_the_files() -> None:
     preamble = _reference("step-preamble.md")
     assert "Never ask the person to edit a file by hand" in preamble
     assert "Never hand the person a decision the run should make itself" in preamble
+
+
+def test_a_care_edit_never_makes_a_note_look_freshly_checked() -> None:
+    """A note with no `updated:` is aged by its file date, which any edit refreshes."""
+    preamble = _reference("step-preamble.md")
+    assert "before your first edit to such a note, set `updated:` to the file's current last-modified date (its pre-edit date)" in preamble
+    assert "only the stale step's full re-check sets `updated:` to today" in preamble
+
+
+def test_the_stale_step_keeps_a_ledger_so_it_moves_past_doubtful_notes() -> None:
+    stale = _reference("curation-pass-3-stale-notes.md")
+    assert "`<V>/Workspace/.care-stale-checked`: one line per note this step has checked, `<note path> | <YYYY-MM-DD>`" in stale
+    assert "skipping any with a `.care-stale-checked` line dated in the last 30 days" in stale
+    assert "Record the note in `.care-stale-checked` with today's date, replacing its older line, whatever the outcome" in stale
+    assert "`.care-stale-checked` has a line dated today for each of the N notes checked" in stale
+
+
+def test_hygiene_only_fixes_notes_and_keeps_one_section() -> None:
+    hygiene = _reference("curation-pass-6-hygiene.md")
+    assert "the file sits directly in a category's folder (`People/Rae.md`, not `Projects/X/exports/y.md`) and reads like a note" in hygiene
+    assert "never paste text from a note into a shell command" in hygiene
+    assert "find <V> -name" not in hygiene
+    assert "When the report already has one (a retried run), replace it; there is only ever one" in hygiene
+    assert "Files under `Workspace/` are the run's own paperwork" in hygiene
+
+
+def test_the_example_lists_steps_in_the_prompt_order() -> None:
+    sample = _reference("curation-report-example.md")
+    prompt = _curation_prompt()
+    ids = re.findall(r"^- \[[x!]\] ([a-z-]+):", sample, re.M)
+    weekly = prompt.split("- Weekly, when", 1)[1]
+    order = [s for s in ("unsure", "drain", "second-look", "closed-tasks", "regions", "learnings") if f"- {s}:" in prompt]
+    order += sorted(("stale", "hygiene", "guide-review", "rules"), key=weekly.index)
+    assert ids == [s for s in order if s in ids]

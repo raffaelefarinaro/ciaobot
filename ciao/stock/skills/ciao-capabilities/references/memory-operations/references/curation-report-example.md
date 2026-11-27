@@ -11,8 +11,8 @@ Interrupted last run: guide-review
 - [x] second-look: re-read what the memory passes wrote (2 archived since 2026-11-25) — read 2 passes, checked 9 lines, fixed 1 (merged People/Tom.md into People/Tomas Berg.md; note-retire proposal Workspace/Proposals/retire-tom.md), unsure 0, left 8; verify: proposal-check ok, People/Tomas Berg.md holds the moved lines
 - [x] closed-tasks: learn from tasks finished without a memory pass (3 completed since 2026-11-25) — uncovered 3, read 3 tasks, skipped 0, wrote 1 fact (Projects/Atlas.md), unsure 0, left 2; verify: uncovered 3 = 3 + 0 + 0, Projects/Atlas.md has "- Atlas launch moved to March, decided with Rae"
 - [x] regions: consolidate regions at or above 85% (memory 91%) — memory 91% -> 72%, 3 entries logged in Memory-Consolidations.md; verify: memory.pct 72, profile.pct 40
+- [x] stale: re-check stale notes (4 listed, weekly due) — checked 4 notes, re-checked in full 3 (People/Rae.md, Projects/Atlas.md, People/Ana.md), fixed 1, Unsure 1; verify: none of the 3 re-checked paths still listed, 4 lines dated today in .care-stale-checked
 - [x] hygiene: rebuild the index and fix what is safe (weekly due) — fixed 3 of 3 findings, left 0, proposals 0; verify: INDEX.md rewritten today, 0 of the 3 fixed findings in the re-audit, 3 -> 0
-- [x] stale: re-check stale notes (4 listed, weekly due) — checked 4 notes, re-checked in full 3 (People/Rae.md, Projects/Atlas.md, People/Ana.md), fixed 1, Unsure 1; verify: none of the 3 re-checked paths still listed
 - [!] guide-review: review the AGENTS.md body (weekly due) — blocked: AGENTS.md unreadable
 
 ## Hygiene
