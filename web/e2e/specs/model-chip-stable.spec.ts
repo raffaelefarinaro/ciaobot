@@ -52,6 +52,14 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 1280, height: 900
     })
 
     test('on Home, and again after a workspace switch', async ({ page }) => {
+      // The project chip carries a code mark only for a linked project, which
+      // moves the model chip beside it; this test is about the model chip
+      // alone, so no project is linked.
+      await page.route('**/api/projects', async route => {
+        const response = await route.fetch()
+        const projects = await response.json()
+        await route.fulfill({ response, json: projects.map((p: Record<string, unknown>) => ({ ...p, repo: null, repo_path: '' })) })
+      })
       await boot(page, '/', BOOTED)
       const chip = page.locator('.home-intake-model-trigger')
       await checkChip(page, chip)
