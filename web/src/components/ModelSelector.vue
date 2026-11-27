@@ -348,6 +348,20 @@ function onCloseAutoFocus(event: Event): void {
   }
 }
 
+function onInteractOutside(event: Event): void {
+  // A menu opened from the footer (Permission mode, Thinking) is its own layer.
+  // Choosing in it with a pointer closes and unmounts it within the same
+  // gesture, so Reka's outside check meets a menu item that is already
+  // detached and reads it as outside this popover. A press or focus that
+  // came from a menu, or from anything no longer in the document, is not a
+  // dismissal of the picker.
+  const original = (event as CustomEvent<{ originalEvent?: Event }>).detail?.originalEvent
+  const target = (original?.target ?? event.target) as Node | null
+  if (!target) return
+  const element = target instanceof Element ? target : target.parentElement
+  if (!target.isConnected || element?.closest('[role="menu"]')) event.preventDefault()
+}
+
 function onEscapeKeyDown(event: KeyboardEvent): void {
   if (event.isComposing || event.keyCode === 229) {
     // Reka dismisses its layer unless this window-level event is prevented.
@@ -430,6 +444,7 @@ onMounted(() => {
         @open-auto-focus="onOpenAutoFocus"
         @close-auto-focus="onCloseAutoFocus"
         @escape-key-down="onEscapeKeyDown"
+        @interact-outside="onInteractOutside"
       >
         <div
           class="model-selector__popover"
@@ -479,6 +494,8 @@ onMounted(() => {
               :key="section.key"
               class="model-selector__section"
               :class="{ 'model-selector__section--disabled': section.disabled }"
+              role="group"
+              :aria-label="section.label"
             >
               <div class="model-selector__section-header">
                 <span class="model-selector__section-label">{{ section.label }}</span>
@@ -522,7 +539,7 @@ onMounted(() => {
             </div>
           </div>
 
-          <div v-else class="model-selector__empty">
+          <div v-else class="model-selector__empty" role="status">
             No models match "{{ query }}"
           </div>
 
@@ -610,7 +627,10 @@ onMounted(() => {
   min-height: 0;
   /* The model list is the task: a fixed, roomy width (long opencode ids fit)
      and up to 640px of height where the viewport has it. */
-  width: min(520px, calc(100vw - 24px));
+  /* 100cqw is the chat pane when the picker is in one (ChatLayout makes the
+     pane a container), so a narrow pane beside the sidebar never clips it;
+     with no container it is the viewport. */
+  width: min(520px, calc(100vw - 24px), calc(100cqw - 16px));
   min-width: min(320px, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
   /* Reka reports the room left on the chosen side (flipped above the trigger
@@ -859,27 +879,23 @@ onMounted(() => {
   border-radius: 0 0 var(--radius) var(--radius);
 }
 
-@media (max-height: 600px) {
-  .model-selector__footer {
-    flex: 0 1 auto;
-    scrollbar-gutter: stable;
+/* A short or very narrow screen (a landscape phone, 200% zoom) has no room
+   for two scrollers: the whole popover scrolls as one, list and footer
+   together, instead of squeezing the footer into a strip of its own. */
+@media (max-height: 500px), (max-width: 260px) {
+  .model-selector__popover {
+    overflow-y: auto;
+    overscroll-behavior: contain;
     scrollbar-width: thin;
-    scrollbar-color: var(--fg2) var(--bg3);
+    scrollbar-color: var(--border-strong) transparent;
   }
 
-  .model-selector__footer::-webkit-scrollbar {
-    width: 10px;
-  }
-
-  .model-selector__footer::-webkit-scrollbar-track {
-    background: var(--bg3);
-    border-radius: 999px;
-  }
-
-  .model-selector__footer::-webkit-scrollbar-thumb {
-    background: var(--fg2);
-    border: 2px solid var(--bg3);
-    border-radius: 999px;
+  .model-selector__listbox,
+  .model-selector__list,
+  .model-selector__footer {
+    flex: 0 0 auto;
+    min-height: auto;
+    overflow: visible;
   }
 }
 

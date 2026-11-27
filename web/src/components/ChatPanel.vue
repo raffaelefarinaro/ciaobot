@@ -1183,6 +1183,16 @@
                           {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
                         </button>
                       </div>
+                      <!-- A narrow footer swaps the segments for a menu button, so
+                           six levels never scroll sideways on a phone. -->
+                      <MenuSelect
+                        trigger-class="thinking-levels__menu"
+                        :model-value="thinkingChipLevel"
+                        :options="thinkingMenuOptions"
+                        :disabled="isRecoveryPicker || modeWritePending"
+                        :labelled-by="domId('thinking-levels-label')"
+                        @select="selectThinking"
+                      />
                     </div>
                     <div v-if="!isRecoveryPicker" class="permission-modes">
                       <span :id="domId('permission-mode-label')" class="thinking-levels__label">Permission mode</span>
@@ -1459,6 +1469,7 @@ import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
 import PermissionModeMenu from './PermissionModeMenu.vue'
+import MenuSelect from './MenuSelect.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import ProviderSignInHint from './ProviderSignInHint.vue'
@@ -3291,6 +3302,12 @@ const filteredThinkingLevels = computed(() => {
     : thinkingLevels.value[activeProvider.value] || []
   return levels
 })
+
+// The same levels for the narrow footer's menu button: '' is Auto.
+const thinkingMenuOptions = computed(() => ['', ...filteredThinkingLevels.value].map(level => ({
+  value: level,
+  label: level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto',
+})))
 
 const showThinkingLevels = computed(() => {
   if (!filteredThinkingLevels.value.length) return false
@@ -7887,6 +7904,12 @@ details[open] > .activity-summary::before {
   display: contents;
 }
 
+/* The narrow footer's Thinking control is the menu button; the wide one is
+   the segmented row. Only one is ever rendered visible. */
+.thinking-levels :deep(.thinking-levels__menu) {
+  display: none;
+}
+
 @container (max-width: 420px) {
   .picker-footer-groups {
     grid-template-columns: minmax(0, 1fr);
@@ -7905,6 +7928,14 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
   font-size: var(--text-xs);
   line-height: 1.3;
+}
+
+/* On a short or very narrow screen the note line gives its room to the list;
+   the full rule stays the permission button's description. */
+@media (max-height: 500px), (max-width: 260px) {
+  .permission-modes__note {
+    display: none;
+  }
 }
 
 .thinking-levels__label {
@@ -7931,7 +7962,9 @@ details[open] > .activity-summary::before {
 .thinking-chip {
   display: inline-flex;
   align-items: center;
-  min-height: 30px;
+  /* With the track's padding and border the row is 40px, the model rows'
+     height; 44px segments on touch. */
+  min-height: 34px;
   padding: 0 8px;
   border: 0;
   border-radius: 6px;
@@ -7970,6 +8003,16 @@ details[open] > .activity-summary::before {
 
 @media (pointer: coarse) {
   .thinking-chip { min-height: var(--touch); }
+}
+
+/* After the segmented control's own rules, which it overrides. */
+@container (max-width: 420px) {
+  .thinking-levels__chips {
+    display: none;
+  }
+  .thinking-levels :deep(.thinking-levels__menu) {
+    display: flex;
+  }
 }
 
 /* PaneHeader squares every header .btn-icon to 30px, which crushed this

@@ -540,7 +540,7 @@ test.describe('touch targets', () => {
     const desktopFooterMetrics = await desktopFooter.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
     expect(desktopFooterMetrics.scrollHeight).toBeLessThanOrEqual(desktopFooterMetrics.height)
     await checkPermissionControl()
-    await expect(popup.locator('.permission-mode-trigger__allows')).toBeInViewport()
+    await expect(popup.locator('.permission-mode-trigger .menu-select__detail')).toBeInViewport()
     for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
       await page.setViewportSize(viewport)
       await expect(popup).toBeVisible()
@@ -551,24 +551,27 @@ test.describe('touch targets', () => {
       await expect(list).toBeVisible()
       await expect(footer).toBeVisible()
       await expect(popup.locator('.model-selector__search')).toBeVisible()
-      expect(await listbox.evaluate(el => getComputedStyle(el).overflowY)).toBe('visible')
-      expect(await list.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
-      expect(await footer.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
-      if (viewport.height <= 600) {
-        expect(await footer.evaluate(el => getComputedStyle(el).scrollbarWidth)).toBe('thin')
+      if (viewport.height > 500) {
+        // Room for both: the list is the scroller and the footer is whole.
+        expect(await list.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
+        const footerMetrics = await footer.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
+        expect(footerMetrics.scrollHeight).toBeLessThanOrEqual(footerMetrics.height)
+        await list.evaluate(el => { el.scrollTop = el.scrollHeight })
+        await expect(popup.locator('.model-selector__item').last()).toBeInViewport()
+        expect(await list.evaluate(el => el.scrollTop)).toBeGreaterThan(0)
+      } else {
+        // A short screen: one scroller, the popover, with list and footer in
+        // it; the footer is never a strip of its own.
+        expect(await popup.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
+        expect(await list.evaluate(el => getComputedStyle(el).overflowY)).toBe('visible')
+        expect(await footer.evaluate(el => getComputedStyle(el).overflowY)).toBe('visible')
+        expect(await footer.evaluate(el => el.scrollHeight <= el.clientHeight)).toBe(true)
+        // The note line gives its room to the list; its text is still the
+        // permission button's description.
+        await expect(popup.locator('.permission-modes__note')).toBeHidden()
+        await popup.evaluate(el => { el.scrollTop = el.scrollHeight })
+        await expect(popup.locator('.permission-mode-trigger')).toBeInViewport()
       }
-      const footerScrollBeforeList = await footer.evaluate(el => el.scrollTop)
-      await list.evaluate(el => { el.scrollTop = el.scrollHeight })
-      await expect(popup.locator('.model-selector__item').last()).toBeInViewport()
-      const listScrollAfterList = await list.evaluate(el => el.scrollTop)
-      expect(listScrollAfterList).toBeGreaterThan(0)
-      expect(await footer.evaluate(el => el.scrollTop)).toBe(footerScrollBeforeList)
-      const listScrollBeforeFooter = await list.evaluate(el => el.scrollTop)
-      await footer.evaluate(el => { el.scrollTop = el.scrollHeight })
-      const footerScrollAfterFooter = await footer.evaluate(el => el.scrollTop)
-      const footerMetrics = await footer.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
-      if (footerMetrics.scrollHeight > footerMetrics.height) expect(footerScrollAfterFooter).toBeGreaterThan(0)
-      expect(await list.evaluate(el => el.scrollTop)).toBe(listScrollBeforeFooter)
       await checkPermissionControl()
       await expect(popup).toBeInViewport()
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)

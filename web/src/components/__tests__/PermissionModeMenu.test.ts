@@ -115,7 +115,8 @@ describe('PermissionModeMenu', () => {
 
   it('does not open while disabled', async () => {
     const w = mountMenu({ disabled: true })
-    expect(trigger().disabled).toBe(true)
+    // aria-disabled, not disabled: focus can still come back to the button.
+    expect(trigger().getAttribute('aria-disabled')).toBe('true')
     await press(trigger(), 'Enter')
     trigger().dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
     await flushPromises()

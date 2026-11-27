@@ -48,4 +48,15 @@ describe('composer model popover footer layout', () => {
     expect(ruleBody(selector, '.model-selector__list')).toMatch(/overflow-y:\s*auto/)
     expect(ruleBody(selector, '.model-selector__section-header')).toMatch(/position:\s*sticky/)
   })
+
+  it('swaps the Thinking segments for the menu button on a narrow footer', () => {
+    expect(ruleBody(panel, '.thinking-levels :deep(.thinking-levels__menu)')).toMatch(/display:\s*none/)
+    expect(panel).toMatch(/@container \(max-width: 420px\) \{[^@]*\.thinking-levels__chips \{\s*display:\s*none;\s*\}\s*\.thinking-levels :deep\(\.thinking-levels__menu\) \{\s*display:\s*flex;/)
+  })
+
+  it('scrolls a short screen as one popover, never a footer strip of its own', () => {
+    expect(selector).not.toMatch(/@media \(max-height: 600px\)/)
+    expect(selector).toMatch(/@media \(max-height: 500px\), \(max-width: 260px\) \{\s*\.model-selector__popover \{\s*overflow-y:\s*auto;/)
+    expect(panel).toMatch(/@media \(max-height: 500px\), \(max-width: 260px\) \{\s*\.permission-modes__note \{\s*display:\s*none;/)
+  })
 })

@@ -60,7 +60,12 @@ export const Unknown: Story = {
 }
 export const Disabled: Story = {
   args: { disabled: true },
-  play: async ({ canvas }) => { expect((canvas.getByRole('button', { name: /Permission mode/ }) as HTMLButtonElement).disabled).toBe(true) },
+  play: async ({ canvas, userEvent }) => {
+    const button = canvas.getByRole('button', { name: /Permission mode/ })
+    expect(button.getAttribute('aria-disabled')).toBe('true')
+    await userEvent.click(button)
+    expect(screen.queryAllByRole('menuitemradio')).toHaveLength(0)
+  },
 }
 export const Light: Story = {
   globals: { theme: 'light' },
