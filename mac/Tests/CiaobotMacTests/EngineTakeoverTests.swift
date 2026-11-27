@@ -201,7 +201,8 @@ final class EngineTakeoverTests: XCTestCase {
         windowVisible: Bool = true,
         readyTimeout: TimeInterval = 1,
         confirm: Bool = true,
-        answering: Bool = false
+        answering: Bool = false,
+        hosts: HostListStoring? = nil
     ) -> EngineTakeover {
         let takeover = EngineTakeover(
             runner: runner, supervisor: engine, trash: trash, home: home,
@@ -213,7 +214,8 @@ final class EngineTakeoverTests: XCTestCase {
             windowVisible: { windowVisible },
             readyTimeout: readyTimeout,
             pollInterval: 0.001,
-            probe: { _ in answering }
+            probe: { _ in answering },
+            hosts: hosts
         )
         current = takeover
         return takeover
@@ -301,6 +303,31 @@ final class EngineTakeoverTests: XCTestCase {
     }
 
     // MARK: The move
+
+    func testADoneTakeoverForgetsSavedHostsThatPointAtTheMovedEngine() async throws {
+        let defaults = UserDefaults(suiteName: IsolatedDefaults.makeName("TakeoverHosts"))!
+        let store = UserDefaultsHostListStore(defaults: defaults, lastServer: UserDefaultsLastServerStore(defaults: defaults))
+        for text in ["http://127.0.0.1:8443", "http://localhost:8443", "http://127.0.0.1:9000", "https://mac.tailnet.ts.net:8443"] {
+            store.add(Origin(text)!)
+        }
+        try answerHappyPath(trash: [])
+
+        let outcome = await makeTakeover(hosts: store).runIfNeeded()
+
+        XCTAssertEqual(describe(outcome), "done:0")
+        XCTAssertEqual(store.hosts.map(\.origin), ["http://127.0.0.1:9000", "https://mac.tailnet.ts.net:8443"])
+    }
+
+    func testARefusedTakeoverKeepsTheSavedHosts() async throws {
+        let defaults = UserDefaults(suiteName: IsolatedDefaults.makeName("TakeoverHostsRefused"))!
+        let store = UserDefaultsHostListStore(defaults: defaults, lastServer: UserDefaultsLastServerStore(defaults: defaults))
+        store.add(Origin("http://127.0.0.1:8443")!)
+        runner.answers["plan"] = planJSON(action: "none", reason: "already_app")
+
+        _ = await makeTakeover(hosts: store).runIfNeeded()
+
+        XCTAssertEqual(store.hosts.map(\.origin), ["http://127.0.0.1:8443"])
+    }
 
     func testHappyPathRunsApplyStartFinishTrashThenClose() async throws {
         try answerHappyPath(trash: [candidate(envRoot)])

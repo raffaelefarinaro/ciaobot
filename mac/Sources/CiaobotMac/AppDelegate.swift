@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 @MainActor
 protocol MainWindowPresenting: AnyObject {
@@ -154,6 +155,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let dockBadge: DockBadgeApplying?
     private let systemSettings: SystemSettingsOpening?
     private var menuBar: MenuBarControlling?
+    /// Prunes saved hosts that point at the bundled engine once its ports are known.
+    private var enginePruneSubscription: AnyCancellable?
     private var windowCloseObserver: NSObjectProtocol?
     #if DEBUG
     private var testWindowReporter: TestWindowReporter?
@@ -190,7 +193,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #else
         addressedTestLaunch = false
         #endif
-        let engineParts = Self.makeEngineParts()
+        let hostStore = UserDefaultsHostListStore(defaults: launchDefaults, lastServer: lastServerStore)
+        let engineParts = Self.makeEngineParts(hosts: hostStore)
         self.init(
             session: session,
             presenter: presenter,
@@ -216,7 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             supervisor: engineParts.supervisor,
             takeover: engineParts.takeover,
             lastServer: lastServerStore,
-            hostStore: UserDefaultsHostListStore(defaults: launchDefaults, lastServer: lastServerStore),
+            hostStore: hostStore,
             updateQuit: updateQuit
         )
     }
@@ -305,6 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (the supervisor then reports the fixed unavailable copy). A DEBUG test
     /// launch can point the home and the engine resources somewhere isolated.
     private static func makeEngineParts(
+        hosts: HostListStoring,
         mainWindow: @escaping @MainActor () -> NSWindow? = { MainWindowPresenter.mainWindow(in: NSApp.windows) }
     ) -> (supervisor: EngineSupervisor, takeover: EngineTakeover?) {
         let resourceDirectory: URL?
@@ -353,7 +358,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             trash: FileManagerTrashing(),
             home: engineHome,
             labelOverride: labelOverride,
-            windowVisible: takeoverWindowVisible(mainWindow)
+            windowVisible: takeoverWindowVisible(mainWindow),
+            hosts: hosts
         )
         return (supervisor, takeover)
     }
@@ -487,10 +493,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // saved sign-in, and a remote host without one is never contacted.
             // The fleet and the Servers rows read the same saved list.
             let savedHosts = UserDefaultsHostListStore(lastServer: UserDefaultsLastServerStore())
+            let localEngineAvailable = ConnectionView.canRunLocalEngine(
+                hostIsArm64: EngineSupervisor.hostIsArm64,
+                hasEngine: supervisor?.hasEngine == true
+            )
+            let ownPorts: () -> Set<Int> = { [weak supervisor] in supervisor?.ownPorts ?? [] }
+            // A saved host on one of the engine's own ports is the engine
+            // itself. Installs that finished their takeover before the
+            // takeover cleanup existed still have one, so each time the engine
+            // is running they lose it. Idempotent, and no other host is touched.
+            if localEngineAvailable, let supervisor {
+                enginePruneSubscription = supervisor.$state.sink { state in
+                    guard case .running = state else { return }
+                    // `$state` sends before the value is stored; read the ports on the next turn.
+                    DispatchQueue.main.async { savedHosts.removeLoopbackHosts(ports: ownPorts()) }
+                }
+            }
             let fleet = HostFleetModel(
                 hosts: savedHosts,
                 status: session,
-                signIn: .live
+                signIn: .live,
+                localEngineAvailable: localEngineAvailable,
+                ownPorts: ownPorts
             )
             controller = MenuBarController(
                 status: session,
@@ -508,10 +532,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 engineSupervisor: supervisor,
                 localEngineMode: mode == .local,
                 hosts: savedHosts,
-                localEngineAvailable: ConnectionView.canRunLocalEngine(
-                    hostIsArm64: EngineSupervisor.hostIsArm64,
-                    hasEngine: supervisor?.hasEngine == true
-                ),
+                localEngineAvailable: localEngineAvailable,
+                ownPorts: ownPorts,
                 serverSwitch: ConnectionMenuActions.switchServer(present: present)
             )
         }

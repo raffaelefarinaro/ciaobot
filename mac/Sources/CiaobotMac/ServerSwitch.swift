@@ -44,6 +44,25 @@ enum ServerSwitchChoices {
     /// The This Mac row's title. A saved host with this label is disambiguated.
     static let thisMacLabel = "This Mac"
 
+    /// Whether an origin is the bundled engine's own, for presentation and
+    /// polling. It is when the bundled engine is available and the origin is
+    /// loopback on one of the engine's own ports: its private TLS port, its
+    /// workspace port, or the port a taken-over 1.x install served on. Such an
+    /// origin is named "This Mac" and never listed or polled as a second server.
+    /// Any other loopback host (a dev engine on another port) and every other
+    /// machine, even a Tailscale or LAN address that reaches this Mac, is a
+    /// normal server named by its address. Without the bundled engine nothing
+    /// is This Mac, so a saved loopback host stays the person's only server.
+    static func isThisMac(_ origin: Origin, ownPorts: Set<Int>, localAvailable: Bool) -> Bool {
+        localAvailable && origin.isLoopback && ownPorts.contains(origin.portNumber)
+    }
+
+    /// The name a server is shown under: "This Mac" for the bundled engine's
+    /// own origin, else the saved label.
+    static func displayLabel(for origin: Origin, saved: String, ownPorts: Set<Int>, localAvailable: Bool) -> String {
+        isThisMac(origin, ownPorts: ownPorts, localAvailable: localAvailable) ? thisMacLabel : saved
+    }
+
     enum Row: Equatable {
         case thisMac(checked: Bool)
         case host(origin: Origin, label: String, checked: Bool)
@@ -55,7 +74,8 @@ enum ServerSwitchChoices {
         hosts: [HostRecord],
         connected: Origin?,
         localMode: Bool,
-        localAvailable: Bool
+        localAvailable: Bool,
+        ownPorts: Set<Int>
     ) -> [Row] {
         var hostRows: [(origin: Origin, label: String, checked: Bool)] = []
         var seen = Set<String>()
@@ -64,6 +84,7 @@ enum ServerSwitchChoices {
             // not a choice, and a duplicate never becomes a second row.
             guard let origin = Origin(record.origin),
                   origin.canonicalKey == record.origin,
+                  !isThisMac(origin, ownPorts: ownPorts, localAvailable: localAvailable),
                   seen.insert(origin.canonicalKey).inserted else { continue }
             let checked = !localMode && connected?.canonicalKey == origin.canonicalKey
             hostRows.append((
@@ -85,7 +106,10 @@ enum ServerSwitchChoices {
 
         var rows: [Row] = []
         if localAvailable {
-            rows.append(.thisMac(checked: localMode))
+            // Connected to a loopback origin is connected to This Mac, even in
+            // external mode (a dev engine picked through Change Host).
+            let onThisMac = localMode || (connected.map { isThisMac($0, ownPorts: ownPorts, localAvailable: true) } ?? false)
+            rows.append(.thisMac(checked: onThisMac))
         }
         for row in hostRows {
             let label = counts[row.label, default: 0] > 1

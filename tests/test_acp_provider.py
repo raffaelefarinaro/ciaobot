@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -916,3 +917,84 @@ async def test_running_shells_is_zero_once_the_connection_is_not_alive(
     assert provider.running_shells == 0
     provider._connection = None
     assert provider.running_shells == 0
+
+
+def _as_managed_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the installed fake spec as if it were the pinned claude-agent-acp adapter."""
+    import dataclasses
+
+    assert FAKE_SPEC is not None
+    spec = dataclasses.replace(FAKE_SPEC, binary="claude-agent-acp", args=(*FAKE_SPEC.args,))
+    monkeypatch.setattr(sys.modules[__name__], "FAKE_SPEC", spec)
+    monkeypatch.setattr(FakeAcpProvider, "spec", spec, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_a_start_during_the_adapter_install_says_so_and_waits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from ciao import adapter_install
+    from ciao.providers.acp import connection as connection_module
+
+    config, _ = _install(monkeypatch, tmp_path)
+    _as_managed_adapter(monkeypatch)
+    installed = threading.Event()
+    launches: list[str] = []
+
+    def launch(name: str) -> list[str]:
+        launches.append(name)
+        if not installed.is_set():
+            raise adapter_install.AdapterInstalling("being installed")
+        return [sys.executable]
+
+    monkeypatch.setattr(adapter_install, "install_in_progress", lambda name: not installed.is_set())
+    monkeypatch.setattr(connection_module, "launch_argv", launch)
+    monkeypatch.setattr(connection_module, "_INSTALL_POLL_S", 0.01)
+    monkeypatch.setattr(connection_module, "_GAVE_UP", {})
+    service = ProviderService(config)  # type: ignore[arg-type]
+    stream = service.execute_streaming(_request())
+    try:
+        first = await asyncio.wait_for(anext(stream), timeout=5)
+        assert isinstance(first, SystemStatusEvent)
+        assert first.status == "Setting up Fake, one moment."
+
+        # The turn is now blocked on the install: it keeps polling and yields nothing more.
+        following = asyncio.ensure_future(anext(stream))
+        await _until(lambda: len(launches) >= 3)
+        assert not following.done(), "the turn went on before the install finished"
+
+        installed.set()
+        events = [await asyncio.wait_for(following, timeout=10)]
+        events += [event async for event in stream]
+    finally:
+        await stream.aclose()
+
+    assert not any(isinstance(event, SystemStatusEvent) for event in events)
+    assert isinstance(events[-1], ResultEvent)
+    assert events[-1].is_error is False
+
+
+@pytest.mark.asyncio
+async def test_an_adapter_that_is_not_ready_says_why_in_the_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from ciao import adapter_install
+    from ciao.providers.acp import connection as connection_module
+
+    config, _ = _install(monkeypatch, tmp_path)
+    _as_managed_adapter(monkeypatch)
+    sentence = "The ACP adapter claude-agent-acp 0.108.1 is not installed for Ciaobot yet. npm was not found on this machine."
+
+    def launch(name: str) -> list[str]:
+        raise adapter_install.AdapterNotReady(sentence)
+
+    monkeypatch.setattr(adapter_install, "install_in_progress", lambda name: False)
+    monkeypatch.setattr(connection_module, "launch_argv", launch)
+    service = ProviderService(config)  # type: ignore[arg-type]
+
+    events = await _turn(service, _request())
+
+    assert len(events) == 1
+    assert isinstance(events[0], ResultEvent)
+    assert events[0].is_error is True
+    assert events[0].result == f"fake agent did not start: {sentence}"

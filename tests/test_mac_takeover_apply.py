@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -317,6 +318,10 @@ def test_apply_journals_states_and_backs_up_before_bootout(
     assert not _plist_path(machine).exists()
     journal = mac_takeover._load_journal(str(result["id"]))
     assert journal is not None and journal["state"] == "pointer_written"
+    # The handover is stamped with the pointer, so the new engine can tell the old engine's logs.
+    assert mac_takeover.handed_over_at() == datetime.strptime(
+        journal["handed_over"], "%Y%m%dT%H%M%SZ"
+    ).replace(tzinfo=UTC)
     pointer = app_engine.read_pointer()
     assert pointer is not None
     assert pointer.workspace == machine.workspace.resolve()
@@ -2242,3 +2247,46 @@ def test_the_backup_copy_and_the_atomic_restore_sync_their_directory(
     mac_takeover._atomic_restore(source, restored / "plist", sha256=sha)
     # Once after the temp copy, once after the rename that publishes it.
     assert synced == [restored, restored]
+
+
+
+# --- handed_over_at: when the bundled engine took the workspace over ----------------------------
+
+
+def _journal_at(name: str, state: str, **fields: Any) -> None:
+    entry = mac_takeover._takeover_root() / name
+    mac_takeover._make_entry(entry)
+    mac_takeover._write_journal(entry, {"id": name, "state": state, **fields})
+
+
+def test_handed_over_at_is_none_without_any_takeover(machine: Machine) -> None:
+    assert mac_takeover.handed_over_at() is None
+
+
+def test_handed_over_at_reads_the_newest_handover_that_stuck(machine: Machine) -> None:
+    _journal_at("20261101T100000Z", "finished", handed_over="20261101T100500Z")
+    _journal_at("20261110T100000Z", "healthy", handed_over="20261110T100500Z")
+    # A rollback brought the old engine back, so its later stamp hands nothing over.
+    _journal_at("20261120T100000Z", "rolled_back", handed_over="20261120T100500Z")
+    # Not yet handed over, and unreadable stamps, are skipped without failing.
+    _journal_at("20261121T100000Z", "plist_removed", handed_over="20261121T100500Z")
+    _journal_at("20261122T100000Z", "pointer_written", handed_over="not a stamp")
+    _journal_at("20261123T100000Z", "pointer_written")
+
+    assert mac_takeover.handed_over_at() == datetime(2026, 11, 10, 10, 5, tzinfo=UTC)
+
+
+
+def test_handed_over_at_skips_a_stamp_from_the_future(machine: Machine) -> None:
+    """A clock set back, or a forged journal, must not hide every error until that date."""
+    from datetime import timedelta
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    stamp = "%Y%m%dT%H%M%SZ"
+    _journal_at("20261101T100000Z", "finished", handed_over="20261101T100500Z")
+    _journal_at("20261102T100000Z", "finished", handed_over=(now + timedelta(days=30)).strftime(stamp))
+    assert mac_takeover.handed_over_at() == datetime(2026, 11, 1, 10, 5, tzinfo=UTC)
+
+    within_slack = now + timedelta(minutes=2)
+    _journal_at("20261103T100000Z", "healthy", handed_over=within_slack.strftime(stamp))
+    assert mac_takeover.handed_over_at() == within_slack

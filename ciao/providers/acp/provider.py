@@ -29,9 +29,12 @@ from ciao.models import (
     AgentRequest,
     ResultEvent,
     StreamEvent,
+    SystemStatusEvent,
     linked_repo_of,
     provider_reuse_key,
 )
+from ciao import adapter_install
+from ciao.adapter_install import AdapterNotReady
 from ciao.providers.acp.connection import AcpConnection, AgentStartError, AgentVersionError
 from ciao.providers.acp.normalize import UpdateNormalizer
 from ciao.providers.acp.permissions import PermissionBroker
@@ -293,6 +296,13 @@ class AcpProvider(BaseProvider):
             if self._connection is not None and (self._key != key or not self._connection.alive):
                 await self.disconnect()
             if self._connection is None:
+                if self.spec.binary in adapter_install.ADAPTERS and await asyncio.to_thread(
+                    adapter_install.install_in_progress, self.spec.binary
+                ):
+                    # The start below waits for the install; the chat says why it is quiet.
+                    yield SystemStatusEvent(
+                        type="system", status=f"Setting up {self.spec.id.capitalize()}, one moment."
+                    )
                 try:
                     await self._start(request, key)
                 except AgentVersionError as exc:
@@ -301,14 +311,16 @@ class AcpProvider(BaseProvider):
                     return
                 except AgentStartError as exc:
                     # The adapter's error text and stderr stay in the log (stderr keyword-redacted);
-                    # the PWA gets a fixed sentence built from the agent id only.
+                    # the PWA gets a fixed sentence built from the agent id only, plus the adapter
+                    # installer's own sentence (written to be shown) when the adapter is not ready.
                     logger.warning(
                         "%s agent did not start: %s\n%s",
                         self.spec.id, redact_text(str(exc)), redact_text(exc.stderr_tail),
                     )
-                    yield ResultEvent(
-                        type="result", is_error=True, result=f"{self.spec.id} agent did not start."
-                    )
+                    result = f"{self.spec.id} agent did not start."
+                    if isinstance(exc.__cause__, AdapterNotReady):
+                        result = f"{self.spec.id} agent did not start: {exc.__cause__}"
+                    yield ResultEvent(type="result", is_error=True, result=result)
                     return
             connection = self._connection
             assert connection is not None

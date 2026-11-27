@@ -236,6 +236,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// This Mac can run the bundled engine (arm64 and a usable engine), the same
     /// predicate the connection screen uses to offer **Use Ciaobot on This Mac**.
     private let localEngineAvailable: Bool
+    /// The bundled engine's own loopback ports, read when the menu is built.
+    private let ownPorts: () -> Set<Int>
     /// Hands a Servers row's request to the connection screen.
     private let serverSwitch: ((ServerSwitchRequest) -> Void)?
     private let updates: ClientUpdateControlling?
@@ -305,6 +307,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         localEngineMode: Bool = false,
         hosts: HostListStoring? = nil,
         localEngineAvailable: Bool = false,
+        ownPorts: @escaping () -> Set<Int> = { [] },
         serverSwitch: ((ServerSwitchRequest) -> Void)? = nil,
         now: @escaping () -> Date = Date.init,
         reduceMotion: @escaping () -> Bool = {
@@ -335,6 +338,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.localEngineMode = localEngineMode
         self.hosts = hosts
         self.localEngineAvailable = localEngineAvailable
+        self.ownPorts = ownPorts
         self.serverSwitch = serverSwitch
         self.updates = updates
         self.now = now
@@ -476,11 +480,18 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         statusEntry?.title = Self.stoppingTitle
     }
 
-    static func statusTitle(for connection: AppSessionStatus.Connection) -> String {
+    static func statusTitle(
+        for connection: AppSessionStatus.Connection,
+        localAvailable: Bool = false,
+        ownPorts: Set<Int> = []
+    ) -> String {
         switch connection {
         case .disconnected:
             return disconnectedTitle
         case .connected(let origin):
+            if let parsed = Origin(origin), ServerSwitchChoices.isThisMac(parsed, ownPorts: ownPorts, localAvailable: localAvailable) {
+                return connectedTitlePrefix + thisMacTitle
+            }
             return connectedTitlePrefix + origin
         }
     }
@@ -630,7 +641,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     private func statusChanged(_ connection: AppSessionStatus.Connection) {
-        statusEntry?.title = quitting ? Self.stoppingTitle : Self.statusTitle(for: connection)
+        statusEntry?.title = quitting ? Self.stoppingTitle : Self.statusTitle(for: connection, localAvailable: localEngineAvailable, ownPorts: ownPorts())
         // `@Published` sends before the stored connection is updated. A genuine
         // disconnect or origin switch clears the badge from the emitted fact
         // now, so the previous origin's count cannot survive even one frame. A
@@ -790,7 +801,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         animatedRows.removeAll()
 
         let entry = NSMenuItem(
-            title: quitting ? Self.stoppingTitle : Self.statusTitle(for: status.connection),
+            title: quitting ? Self.stoppingTitle : Self.statusTitle(for: status.connection, localAvailable: localEngineAvailable, ownPorts: ownPorts()),
             action: nil,
             keyEquivalent: ""
         )
@@ -1087,7 +1098,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             hosts: hosts.hosts,
             connected: status.isConnected ? status.currentOrigin : nil,
             localMode: localEngineMode,
-            localAvailable: localEngineAvailable
+            localAvailable: localEngineAvailable,
+            ownPorts: ownPorts()
         )
         guard ServerSwitchChoices.showsSection(rows) else { return false }
         menu.addItem(sectionHeader(Self.serversTitle))

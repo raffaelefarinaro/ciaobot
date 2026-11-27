@@ -82,6 +82,8 @@ PROVIDER_ADAPTERS: dict[str, str] = {"claude": CLAUDE_ADAPTER, "codex": CODEX_AD
 
 NODE_MIN_MAJOR = 22
 INSTALL_TIMEOUT_S = 300
+# How long a launch waits for an install that is running now (#first-run): as long as npm may run.
+LAUNCH_WAIT_S = INSTALL_TIMEOUT_S
 # A launch on Windows has no shared lock, so it waits this long for a brief exclusive holder.
 _WINDOWS_LAUNCH_WAIT_S = 1.0
 NPM_CI_FLAGS = ("ci", "--ignore-scripts", "--omit=optional", "--no-audit", "--no-fund")
@@ -112,6 +114,9 @@ _STATE_LOCK = threading.Lock()
 # Windows has no shared file lock, so launches in this process take this lock around their read.
 _LAUNCH_LOCK = threading.Lock()
 _ATTEMPTED: set[str] = set()
+# Startup installs this process has claimed and not finished, so a launch in the gap before the
+# install thread takes the lock still reads the adapter as being installed.
+_RUNNING: set[str] = set()
 _FAILURES: dict[str, str] = {}
 _NODE_MAJOR: dict[tuple[str, int], int] = {}
 _NPM_AUTH = re.compile(r"(?i)(_auth(?:token)?\s*=\s*)\S+")
@@ -123,6 +128,10 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 class AdapterNotReady(RuntimeError):
     """The adapter cannot start yet. The message is safe to show."""
+
+
+class AdapterInstalling(AdapterNotReady):
+    """An install of the adapter is running now, so a launch can wait for it to finish."""
 
 
 class AdapterInstallError(RuntimeError):
@@ -294,7 +303,18 @@ def _marker_ok(name: str) -> bool:
 
 
 def _private_problem(path: Path) -> str | None:
-    """Why ``path`` may not hold code we run, or ``None``. POSIX only: Windows has no owner bits."""
+    """Why ``path`` may not hold code we run, or ``None``. POSIX only: Windows has no owner bits.
+
+    The sentence can reach a chat's error result, so the home folder is written as ``~``.
+    """
+    problem = _path_problem(path)
+    home = str(Path.home())
+    if problem is not None and home and home != "/":
+        problem = problem.replace(home, "~")
+    return problem
+
+
+def _path_problem(path: Path) -> str | None:
     if _windows():
         return None
     if path.is_symlink():
@@ -551,8 +571,21 @@ def describe(name: str, state: str) -> str:
     return f"{text} {failure}".strip() if failure and text else text
 
 
+_INSTALLING_TEXT = "The ACP adapter {name} is being installed. Try again in a moment."
+
+
+def install_in_progress(name: str) -> bool:
+    """True while an install of ``name`` runs: claimed by this process, or holding the lock."""
+    with _STATE_LOCK:
+        if name in _RUNNING:
+            return True
+    return _lock_held_elsewhere(name)
+
+
 def launch_argv(name: str) -> list[str]:
     """``[node, <entry>]`` for a ready adapter. Raises :class:`AdapterNotReady` otherwise.
+
+    While an install runs it raises :class:`AdapterInstalling`, which a caller may wait out.
 
     A machine-wide adapter at the pin is used as it is, with no lock. A managed one is read under
     the adapter's shared lock, so a launch never reads a tree an install is writing.
@@ -563,7 +596,7 @@ def launch_argv(name: str) -> list[str]:
     try:
         with _launch_hold(name) as taken:
             if not taken:
-                raise AdapterNotReady(f"The ACP adapter {name} is being installed. Try again in a moment.")
+                raise AdapterInstalling(_INSTALLING_TEXT.format(name=name))
             state = _check(name, marker=True)
             node = _node_path()
             pkg_dir = _package_dir(name)
@@ -572,6 +605,8 @@ def launch_argv(name: str) -> list[str]:
         raise AdapterNotReady(f"The private adapters folder cannot be used: {exc}") from None
     except OSError:
         raise AdapterNotReady(describe(name, "adapter_missing")) from None
+    if state in ("adapter_missing", "adapter_outdated") and install_in_progress(name):
+        raise AdapterInstalling(_INSTALLING_TEXT.format(name=name))
     # Described after the lock is released, or describe() would report this launch's own lock.
     if state != "ready" or node is None or entry is None:
         raise AdapterNotReady(describe(name, state if state != "ready" else "adapter_missing"))
@@ -743,22 +778,28 @@ def _startup_claim(name: str) -> str | None:
         if name in _ATTEMPTED:
             return _FAILURES.get(name) or describe(name, state)
         _ATTEMPTED.add(name)
+        _RUNNING.add(name)
     return None
 
 
 def _run_startup_install(name: str) -> str:
     """Run the claimed install. Returns ``""`` when it finished ready, else the recorded reason."""
     try:
-        install(name)
-    except (AdapterInstallError, OSError) as exc:
-        message = str(exc) if isinstance(exc, AdapterInstallError) else f"the install failed ({type(exc).__name__})."
+        try:
+            install(name)
+        except (AdapterInstallError, OSError) as exc:
+            message = str(exc) if isinstance(exc, AdapterInstallError) else f"the install failed ({type(exc).__name__})."
+            with _STATE_LOCK:
+                _FAILURES[name] = message
+            logger.warning("Could not install the %s adapter: %s", name, message)
+            return message
         with _STATE_LOCK:
-            _FAILURES[name] = message
-        logger.warning("Could not install the %s adapter: %s", name, message)
-        return message
-    with _STATE_LOCK:
-        _FAILURES.pop(name, None)
-    return ""
+            _FAILURES.pop(name, None)
+        return ""
+    finally:
+        # Cleared after the outcome is recorded, so a waiting launch reads the failure, never a gap.
+        with _STATE_LOCK:
+            _RUNNING.discard(name)
 
 
 def install_at_startup(name: str) -> str:

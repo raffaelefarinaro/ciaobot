@@ -19,7 +19,8 @@ final class ServerSwitchChoicesTests: XCTestCase {
             hosts: [record(remote)],
             connected: Origin(remote),
             localMode: false,
-            localAvailable: false
+            localAvailable: false,
+            ownPorts: []
         )
         XCTAssertFalse(ServerSwitchChoices.showsSection(rows))
     }
@@ -29,7 +30,8 @@ final class ServerSwitchChoicesTests: XCTestCase {
             hosts: [record(local), record(remote)],
             connected: Origin(remote),
             localMode: false,
-            localAvailable: false
+            localAvailable: false,
+            ownPorts: []
         )
         XCTAssertTrue(ServerSwitchChoices.showsSection(rows))
         XCTAssertEqual(rows, [
@@ -43,7 +45,8 @@ final class ServerSwitchChoicesTests: XCTestCase {
             hosts: [record(remote)],
             connected: nil,
             localMode: true,
-            localAvailable: true
+            localAvailable: true,
+            ownPorts: []
         )
         XCTAssertTrue(ServerSwitchChoices.showsSection(rows))
         XCTAssertEqual(rows, [
@@ -52,8 +55,93 @@ final class ServerSwitchChoicesTests: XCTestCase {
         ], "Local mode checks This Mac and never a saved host, even one with the same address shape")
     }
 
+    private let ports: Set<Int> = [61190, 8445]
+
+    func testALoopbackOriginOnAnOwnPortIsThisMacOnlyWhenTheBundledEngineIsAvailable() throws {
+        let spellings = [
+            "http://127.0.0.1:8445", "https://127.0.0.1:61190", "http://localhost:8445",
+            "http://[::1]:8445", "https://localhost:61190",
+        ]
+        for text in spellings {
+            let origin = try XCTUnwrap(Origin(text), text)
+            XCTAssertTrue(ServerSwitchChoices.isThisMac(origin, ownPorts: ports, localAvailable: true), text)
+            XCTAssertFalse(ServerSwitchChoices.isThisMac(origin, ownPorts: ports, localAvailable: false), text)
+            XCTAssertEqual(ServerSwitchChoices.displayLabel(for: origin, saved: "x", ownPorts: ports, localAvailable: true), "This Mac")
+            XCTAssertEqual(ServerSwitchChoices.displayLabel(for: origin, saved: "x", ownPorts: ports, localAvailable: false), "x")
+        }
+    }
+
+    func testADevEngineOnAnotherLoopbackPortIsNotThisMac() throws {
+        for text in ["http://127.0.0.1:8543", "http://localhost:9000"] {
+            let origin = try XCTUnwrap(Origin(text), text)
+            XCTAssertFalse(ServerSwitchChoices.isThisMac(origin, ownPorts: ports, localAvailable: true), text)
+            XCTAssertEqual(ServerSwitchChoices.displayLabel(for: origin, saved: "127.0.0.1:8543", ownPorts: ports, localAvailable: true), "127.0.0.1:8543")
+        }
+    }
+
+    func testAnotherMachineIsNeverThisMacEvenOnAnOwnPort() throws {
+        for text in ["https://100.64.1.2:8445", "https://mac.tailnet.ts.net:8445", "https://192.168.1.20:8445"] {
+            let origin = try XCTUnwrap(Origin(text), text)
+            XCTAssertFalse(ServerSwitchChoices.isThisMac(origin, ownPorts: ports, localAvailable: true), text)
+        }
+    }
+
+    func testOnlySavedLoopbackHostsOnOwnPortsAreHiddenWhenThisMacIsAvailable() throws {
+        let rows = ServerSwitchChoices.rows(
+            hosts: [record("http://127.0.0.1:8445"), record("http://localhost:8543"), record("https://mac.tailnet.ts.net:8445")],
+            connected: Origin("https://127.0.0.1:61190"),
+            localMode: true,
+            localAvailable: true,
+            ownPorts: ports
+        )
+        XCTAssertEqual(rows, [
+            .thisMac(checked: true),
+            .host(origin: try XCTUnwrap(Origin("http://localhost:8543")), label: "localhost:8543", checked: false),
+            .host(origin: try XCTUnwrap(Origin("https://mac.tailnet.ts.net:8445")), label: "mac.tailnet.ts.net:8445", checked: false),
+        ], "The dev engine and the Tailscale host on the same port stay servers")
+    }
+
+    func testASavedLoopbackHostIsKeptWhenThisMacCannotRunTheEngine() throws {
+        let rows = ServerSwitchChoices.rows(
+            hosts: [record("http://127.0.0.1:8445"), record(remote)],
+            connected: Origin("http://127.0.0.1:8445"),
+            localMode: false,
+            localAvailable: false,
+            ownPorts: ports
+        )
+        XCTAssertEqual(rows, [
+            .host(origin: try XCTUnwrap(Origin("http://127.0.0.1:8445")), label: "127.0.0.1:8445", checked: true),
+            .host(origin: try XCTUnwrap(Origin(remote)), label: "vps.example:8443", checked: false),
+        ])
+    }
+
+    func testBeingConnectedToAnOwnPortInExternalModeChecksThisMacButADevEngineDoesNot() throws {
+        let own = ServerSwitchChoices.rows(
+            hosts: [record(remote)], connected: Origin("http://127.0.0.1:8445"),
+            localMode: false, localAvailable: true, ownPorts: ports
+        )
+        XCTAssertEqual(own.first, .thisMac(checked: true))
+        let dev = ServerSwitchChoices.rows(
+            hosts: [record("http://127.0.0.1:8543")], connected: Origin("http://127.0.0.1:8543"),
+            localMode: false, localAvailable: true, ownPorts: ports
+        )
+        XCTAssertEqual(dev.first, .thisMac(checked: false))
+        XCTAssertEqual(dev.last, .host(origin: try XCTUnwrap(Origin("http://127.0.0.1:8543")), label: "127.0.0.1:8543", checked: true))
+    }
+
+    @MainActor
+    func testTheConnectedTitleNamesThisMacOnlyForTheEnginesOwnPorts() {
+        let raw = AppSessionStatus.Connection.connected("https://127.0.0.1:61190")
+        XCTAssertEqual(MenuBarController.statusTitle(for: raw, localAvailable: true, ownPorts: ports), "Connected to This Mac")
+        XCTAssertEqual(MenuBarController.statusTitle(for: raw, localAvailable: false, ownPorts: ports), "Connected to https://127.0.0.1:61190")
+        let dev = AppSessionStatus.Connection.connected("http://127.0.0.1:8543")
+        XCTAssertEqual(MenuBarController.statusTitle(for: dev, localAvailable: true, ownPorts: ports), "Connected to http://127.0.0.1:8543")
+        let remoteHost = AppSessionStatus.Connection.connected("https://vps.example:8443")
+        XCTAssertEqual(MenuBarController.statusTitle(for: remoteHost, localAvailable: true, ownPorts: ports), "Connected to https://vps.example:8443")
+    }
+
     func testALocalCapableMacWithNoSavedHostHasOneChoiceAndNoSection() {
-        let rows = ServerSwitchChoices.rows(hosts: [], connected: nil, localMode: false, localAvailable: true)
+        let rows = ServerSwitchChoices.rows(hosts: [], connected: nil, localMode: false, localAvailable: true, ownPorts: [])
         XCTAssertFalse(ServerSwitchChoices.showsSection(rows), "One choice is not a switch")
     }
 
@@ -62,7 +150,8 @@ final class ServerSwitchChoicesTests: XCTestCase {
             hosts: [record("https://vps.example:8443/admin"), record(remote)],
             connected: Origin(remote),
             localMode: false,
-            localAvailable: true
+            localAvailable: true,
+            ownPorts: []
         )
         XCTAssertEqual(rows.count, 2, "The unparsable origin must not become a row")
         XCTAssertEqual(rows.last, .host(origin: try XCTUnwrap(Origin(remote)), label: "vps.example:8443", checked: true))
@@ -74,7 +163,8 @@ final class ServerSwitchChoicesTests: XCTestCase {
             hosts: [record(remote, label: hostile)],
             connected: nil,
             localMode: false,
-            localAvailable: true
+            localAvailable: true,
+            ownPorts: []
         )
         guard case .host(_, let label, _) = try XCTUnwrap(rows.last) else {
             return XCTFail("The saved host row is missing")
@@ -95,7 +185,8 @@ extension ServerSwitchChoicesTests {
             ],
             connected: nil,
             localMode: false,
-            localAvailable: false
+            localAvailable: false,
+            ownPorts: []
         )
         XCTAssertEqual(rows.compactMap(label), [
             "Work (vps.example:8443)",
@@ -108,7 +199,8 @@ extension ServerSwitchChoicesTests {
             hosts: [HostRecord(origin: remoteOrigin, label: "This Mac")],
             connected: nil,
             localMode: false,
-            localAvailable: true
+            localAvailable: true,
+            ownPorts: []
         )
         XCTAssertEqual(rows.compactMap(label), ["This Mac (vps.example:8443)"])
     }
