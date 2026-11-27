@@ -52,7 +52,7 @@ export function useProjectRail(currentId: () => string): TitleRail {
       mark,
       titlePending: false,
       label: projectRailLabel(p.name, subtitle, mark, codeTitle),
-      ...(codeTitle ? { codeTitle } : {}),
+      ...(inCodeMode(p.repo) ? { repo: p.repo } : {}),
     }
   }))
 

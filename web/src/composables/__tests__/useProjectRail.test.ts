@@ -63,10 +63,10 @@ describe('useProjectRail', () => {
       project('c', 2),
     ] as never
     const [a, b, c] = useProjectRail(() => 'a').items.value
-    expect(a.codeTitle).toBe('Linked to a repository: app')
+    expect(a.repo?.path).toBe('/r/app')
     expect(a.label).toBe('name a, no chats, Linked to a repository: app')
-    expect(b.codeTitle).toBeUndefined()
-    expect(c.codeTitle).toBeUndefined()
+    expect(b.repo).toBeUndefined()
+    expect(c.repo).toBeUndefined()
   })
 
   it('steps by routing to the neighbour and records the side it came from', async () => {

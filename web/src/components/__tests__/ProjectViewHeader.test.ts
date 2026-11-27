@@ -97,8 +97,8 @@ describe('ProjectView header', () => {
     store.projects[1] = { ...store.projects[1], repo } as typeof store.projects[number]
     const wrapper = await mountView()
     const items = wrapper.findAll('.title-rail-item')
-    expect(items.map(i => i.find('.title-rail-code').exists())).toEqual([false, true, false])
-    expect(items[1].get('.title-rail-code').attributes('aria-hidden')).toBe('true')
+    expect(items.map(i => i.find('.code-mark').exists())).toEqual([false, true, false])
+    expect(items[1].get('.code-mark').attributes('aria-hidden')).toBe('true')
     expect(items[1].attributes('aria-label')).toContain('Linked to a repository: app')
     wrapper.unmount()
 

@@ -845,6 +845,9 @@ describe('delegated task chats on Home', () => {
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
     const row = rowFor(wrapper, 'A quiet chat')
+    // The "·" before the status is a sibling rule: the status must follow the
+    // project group directly, marked or not.
+    expect(row.get('.home-chat-status').element.previousElementSibling?.classList.contains('home-chat-project-group')).toBe(true)
     const tag = row.find('.code-mark')
     expect(tag.exists()).toBe(tagged)
     expect(row.find('.home-chat-code').exists()).toBe(false)

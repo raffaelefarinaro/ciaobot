@@ -763,6 +763,15 @@ async function startWork(options: { workspace?: string; projectId?: string; reme
   flex: 0 1 auto;
 }
 
+/* On a phone the row has no room to spare: the glyph is decorative and the
+   chip's accessible name carries the repository, so the name and the model
+   label keep their width instead. */
+@media (max-width: 520px) {
+  .home-intake-project .code-mark {
+    display: none;
+  }
+}
+
 /* The project's name keeps a few characters too ("Gene…", not "G…"). */
 .home-intake-project .home-intake-chip-label {
   min-width: min(5ch, 100%);

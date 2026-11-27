@@ -99,13 +99,17 @@
                      that sorted the row into its tier, so the sub-line can
                      never claim more than the tier heading above it. -->
                 <template #sub>
-                  <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
-                  <!-- Code mode is the project's: the glyph follows the project
-                       name, and the repository is named in text for AT. -->
-                  <template v-if="inCodeMode(store.projectFor(chat.chat_id)?.repo)">
-                    <CodeMark :repo="store.projectFor(chat.chat_id)?.repo" />
-                    <span class="sr-only">, {{ projectCodeTitle(store.projectFor(chat.chat_id)!.repo!) }}</span>
-                  </template>
+                  <!-- One group, so the status's separator still follows its
+                       sibling. Code mode is the project's: the glyph follows
+                       the project name, and the repository is named in text
+                       for AT. -->
+                  <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project-group">
+                    <span class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
+                    <template v-if="inCodeMode(store.projectFor(chat.chat_id)?.repo)">
+                      <CodeMark :repo="store.projectFor(chat.chat_id)?.repo" />
+                      <span class="sr-only">, {{ projectCodeTitle(store.projectFor(chat.chat_id)!.repo!) }}</span>
+                    </template>
+                  </span>
                   <span class="home-chat-status">{{ statusPhrase(entry.key, chat) }}</span>
                   <span v-if="chat.local === false" class="remote-chip">remote</span>
                 </template>
@@ -1085,11 +1089,16 @@ defineExpose({ onArrow })
   color: var(--fg3);
 }
 
-.home-chat-project + .code-mark {
-  margin-left: 4px;
+.home-chat-project-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
 }
 
-:is(.home-chat-project, .code-mark) + .home-chat-status::before {
+.home-chat-project-group + .home-chat-status::before {
   content: '·';
   margin-right: 6px;
   color: var(--fg3);

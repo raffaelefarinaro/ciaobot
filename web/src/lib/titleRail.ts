@@ -1,4 +1,5 @@
 import type { HomeTierKey } from './homeLanes'
+import type { ProjectRepo } from './types'
 
 export const RAIL_SETTLE_MS = 120 // debounce after the last scroll event
 export const RAIL_SLIDE_MS = 220 // a keyboard step slides the title this long before switching
@@ -18,8 +19,8 @@ export interface RailItem {
   mark: RailMark | null
   titlePending: boolean
   label: string
-  /** A project in code mode: its tooltip, which puts the `›_` after the title. */
-  codeTitle?: string
+  /** A project in code mode: its repository, which puts the `›_` after the title. */
+  repo?: ProjectRepo
 }
 
 /**
