@@ -191,3 +191,15 @@ export const Narrow: Story = {
     expect(button.getBoundingClientRect().height).toBeGreaterThanOrEqual(32)
   },
 }
+
+// Workspace care's tone: the warning dot and a spoken word, for a row that waits
+// on the owner without stopping anything.
+export const AttentionTone: Story = {
+  args: { tone: 'attention', title: 'Synthetic care row', line: '2 things to look at.' },
+  play: async ({ canvas, canvasElement }) => {
+    const row = rowOf(canvasElement)
+    expect(row.classList.contains('needs-you-row--attention')).toBe(true)
+    expect(canvasElement.querySelector('.needs-you-marker')).not.toBeNull()
+    expect(canvas.getByText('Needs attention:')).toBeTruthy()
+  },
+}
