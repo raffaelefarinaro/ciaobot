@@ -34,26 +34,61 @@ function orderedUnique(models: string[]): string[] {
   return result
 }
 
+/** The CLI's own "let me choose" entry: Claude Code lists it as `default`. */
+export const AGENT_DEFAULT_MODEL = 'default'
+
+/** The short name of a provider, the CLI the chat runs on: "Claude Code". */
+export function providerShortLabel(response: ModelsResponse | null | undefined, provider: string): string {
+  return response?.providers?.find((item) => item.id === provider)?.short_label || provider
+}
+
+/**
+ * The concrete model a provider's `default` entry runs, as the agent
+ * describes it ("Opus 4.5"), or '' when it has not said.
+ */
+export function agentDefaultModelName(response: ModelsResponse | null | undefined, provider: string): string {
+  const entry = response?.provider_catalog_evidence?.[provider]?.models
+    ?.find((item) => item.id === AGENT_DEFAULT_MODEL)
+  return entry?.description?.trim() || ''
+}
+
+/**
+ * The readable name of one model of one provider. The agent's `default`
+ * entry is named by the model it runs, never by the word "default"; when the
+ * agent has not said which model that is, the name is '' and the caller shows
+ * the provider alone.
+ */
+export function modelName(response: ModelsResponse | null | undefined, provider: string, model: string): string {
+  const id = model.trim()
+  if (!id || id === AGENT_DEFAULT_MODEL) return agentDefaultModelName(response, provider)
+  return modelDisplayName(id)
+}
+
+/** "Claude Code · Opus 4.5", or the provider alone when the model has no name yet. */
+export function providerModelLabel(response: ModelsResponse | null | undefined, provider: string, model: string): string {
+  const name = modelName(response, provider, model)
+  const short = providerShortLabel(response, provider)
+  return name ? `${short} · ${name}` : short
+}
+
 /** The readable name of every model in a section, keyed by its raw id. */
-function labelsFor(models: string[]): Record<string, string> {
+function labelsFor(response: ModelsResponse, provider: string, models: string[]): Record<string, string> {
   const labels: Record<string, string> = {}
-  for (const model of models) labels[model] = modelDisplayName(model)
+  for (const model of models) labels[model] = modelName(response, provider, model) || providerShortLabel(response, provider)
   return labels
 }
 
 /**
- * The badges a model carries: the provider's default, plus the provider
- * namespace the model's own id states. The namespace is taken from the id and
- * nowhere else, so a tier alias ("opus") is never attributed to a vendor.
+ * The badges a model carries: the provider namespace the model's own id
+ * states. The namespace is taken from the id and nowhere else, so a tier
+ * alias ("opus") is never attributed to a vendor. The provider default is not
+ * a badge: pickers highlight the default as the current model instead.
  */
-function badgesFor(models: string[], defaultModel?: string): Record<string, string[]> {
+function badgesFor(models: string[]): Record<string, string[]> {
   const badges: Record<string, string[]> = {}
   for (const model of models) {
-    const list: string[] = []
-    if (defaultModel && model === defaultModel) list.push('Default')
     const provider = modelProviderPrefix(model)
-    if (provider) list.push(provider)
-    if (list.length) badges[model] = list
+    if (provider) badges[model] = [provider]
   }
   return badges
 }
@@ -74,13 +109,12 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
   for (const id of ids) {
     const models = orderedUnique(catalogs[id] ?? [])
     if (!models.length) continue
-    const defaultModel = response.provider_defaults?.[id]
-    const badges = badgesFor(models, defaultModel)
+    const badges = badgesFor(models)
     sections.push({
       key: sectionKeyForProvider(id),
-      label: registry.find((item) => item.id === id)?.short_label ?? id,
+      label: providerShortLabel(response, id),
       models,
-      modelLabels: labelsFor(models),
+      modelLabels: labelsFor(response, id, models),
       ...(Object.keys(badges).length ? { modelBadges: badges } : {}),
     })
   }

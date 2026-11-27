@@ -1133,13 +1133,18 @@
                 type="button"
                 ref="composerModelTrigger"
                 class="model-picker-summary composer-chip"
-                :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+                :title="chipTitle"
                 aria-haspopup="listbox"
                 :aria-expanded="showModelPicker"
                 @click.stop="toggleModelPicker"
               >
                 <span class="composer-model-dot" aria-hidden="true"></span>
-                <span class="composer-chip-label"><template v-if="chat.provider">{{ routingProviderLabel(activeBucket, chat.provider) }} · </template>{{ chipModelLabel }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></span>
+                <!-- The provider never ellipsises; only the model part does. -->
+                <span class="composer-chip-provider">{{ chipProviderLabel }}</span>
+                <template v-if="chipModelLabel || chipThinkingLabel">
+                  <span class="composer-chip-sep"> · </span>
+                  <span class="composer-chip-label">{{ chipModelLabel }}<template v-if="chipThinkingLabel">{{ chipModelLabel ? ' · ' : '' }}{{ chipThinkingLabel }}</template></span>
+                </template>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 9 5 5 5-5" /></svg>
               </button>
               <ModelSelector
@@ -1484,7 +1489,7 @@ import InjectedPromptCard from './InjectedPromptCard.vue'
 import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText, type FileMentionTargets } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
-import { providerForModelSection, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
+import { modelName, providerForModelSection, providerShortLabel, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isBridgeMode, type BridgeMode } from '../lib/permissionModes'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
@@ -3237,17 +3242,8 @@ const activeBucket = computed<BucketKey>(() => {
   return (chat.value?.provider as BucketKey) || 'claude'
 })
 
-const chatModelSections = computed(() => {
-  const baseSections = sectionsFromModelsResponse(modelsResponse.value)
-  // Name the Anthropic section for its vendor so it reads as a peer of the
-  // opencode section rather than as "the default".
-  return baseSections.map(section => {
-    if (section.key === 'anthropic') {
-      return { ...section, label: 'Claude (Anthropic)' }
-    }
-    return section
-  })
-})
+// One section per provider, headed by the CLI's short name ("Claude Code").
+const chatModelSections = computed(() => sectionsFromModelsResponse(modelsResponse.value))
 const pickerModelSections = computed(() => chatModelSections.value.map(section => ({
   ...section,
   disabled: section.disabled || (pickerMode.value === 'normal' && modeWritePending.value),
@@ -3329,14 +3325,13 @@ const chipThinkingLabel = computed(() => {
 // The provider is already the chip's first segment, so a model id that
 // repeats it as a prefix ("opencode/deepseek-...") wastes the width budget.
 // The tooltip keeps the full id.
-const chipModelLabel = computed(() => {
-  const model = activeModelId.value || ''
-  const provider = chat.value?.provider || ''
-  if (!model) return 'select model'
-  return provider && model.startsWith(`${provider}/`)
-    ? model.slice(provider.length + 1)
-    : model
-})
+// The chip reads "<provider> · <model>": the provider is the CLI's short name
+// and the model its readable name, the agent's own "default" entry named by
+// the model it runs. While the catalog is loading (or the agent has not said
+// which model its default is) the chip shows the provider alone.
+const chipProviderLabel = computed(() => providerShortLabel(modelsResponse.value, activeBucket.value))
+const chipModelLabel = computed(() => modelName(modelsResponse.value, activeBucket.value, activeModelId.value || ''))
+const chipTitle = computed(() => [chipProviderLabel.value, chipModelLabel.value, chipThinkingLabel.value].filter(Boolean).join(' · '))
 
 const inputPlaceholder = computed(() => {
   const comments = view.pendingChatComments.length + view.pendingComments.length
@@ -5125,26 +5120,6 @@ function canonicalTier(model: string): string {
   const alias = tierAlias(model)
   if (alias) return alias
   return model
-}
-
-// Render the vendor behind the chat as the operator in the brain chip. Falls
-// back to the CLI provider when no bucket is set, so a chat in the legacy /
-// auto state still shows something sensible instead of going blank.
-function routingBucketLabel(bucket: string | undefined, provider: string): string {
-  if (!bucket) return provider
-  if (bucket === 'claude') return 'anthropic'
-  return bucket
-}
-
-// Vendor name for the header chip, from the chat's provider.
-function routingProviderLabel(bucket: string | undefined, provider: string): string {
-  const lower = routingBucketLabel(bucket, provider)
-  if (!lower) return ''
-  if (lower === 'anthropic') return 'Anthropic'
-  // Lower-case on purpose: that is how opencode brands itself.
-  if (lower === 'opencode') return 'opencode'
-  if (lower === 'claude') return 'Claude'
-  return lower.charAt(0).toUpperCase() + lower.slice(1)
 }
 
 function bucketLabel(bucket: BucketKey): string {
@@ -7176,6 +7151,19 @@ details[open] > .activity-summary::before {
 }
 
 .composer-chip svg { flex: none; }
+
+.composer-chip-provider,
+.composer-chip-sep {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* The separator carries its own spaces (so the chip's text reads
+   "Claude Code · Opus"); the negative margin cancels the flex gap. */
+.composer-chip-sep {
+  margin: 0 -6px;
+  white-space: pre;
+}
 
 .composer-chip-label {
   min-width: 0;

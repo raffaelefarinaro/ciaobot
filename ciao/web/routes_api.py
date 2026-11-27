@@ -5661,7 +5661,11 @@ async def list_models(request: Request) -> JSONResponse:
             "status": "observed" if models else "unknown",
             "source": "acp_config_options" if models else None,
             "models": [
-                {"id": str(row["model"]), "label": str(row.get("label") or row["model"])}
+                {
+                    "id": str(row["model"]),
+                    "label": str(row.get("label") or row["model"]),
+                    **({"description": str(row["description"])} if row.get("description") else {}),
+                }
                 for row in rows if row.get("model")
             ],
             "reason": None if models else "no_models_reported",

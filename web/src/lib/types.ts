@@ -48,6 +48,8 @@ export type WorkspaceProvider = RuntimeProvider
 export interface WorkspaceProviderOption {
   value: WorkspaceProvider
   label: string
+  /** The CLI's short name ("Claude Code"), for chips and picker headings. */
+  short_label?: string
   runner?: RuntimeProvider
   default_model?: string
 }
@@ -910,7 +912,9 @@ export interface ModelsResponse {
 export interface ProviderCatalogEvidence {
   status: 'observed' | 'unknown'
   source: 'claude_initialize' | 'opencode_catalog' | null
-  models: Array<{ id: string; label: string }>
+  // `description` is the agent's own note on an entry; for Claude Code's
+  // `default` it names the concrete model that entry runs ("Opus 4.5").
+  models: Array<{ id: string; label: string; description?: string }>
   reason: 'not_observed' | 'expired' | 'invalid_response' | 'no_models_reported' | null
 }
 

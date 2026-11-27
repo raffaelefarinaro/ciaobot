@@ -292,6 +292,65 @@ describe('HomeIntake', () => {
     wrapper.unmount()
   })
 
+  it('highlights the workspace default, keeps following it when its row is picked, and offers the way back after a pin', async () => {
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude' },
+    ] as unknown as typeof store.workspaces
+    store.workspaceRegistryStatus = 'ready'
+    store.projects = [
+      { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },
+    ] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+    const tasks = useTaskStore()
+    tasks.models = {
+      models: ['default', 'opus'], default: 'default',
+      provider_models: { claude: ['default', 'opus', 'sonnet'] },
+      provider_defaults: { claude: 'default' },
+      providers: [{ id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude Code', capabilities: {} }],
+      provider_catalog_evidence: { claude: { status: 'observed', source: null, reason: null, models: [
+        { id: 'default', label: 'Default (recommended)', description: 'Opus 4.5' },
+        { id: 'opus', label: 'Opus' },
+        { id: 'sonnet', label: 'Sonnet' },
+      ] } },
+    } as unknown as typeof tasks.models
+    const create = vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'x' } as ChatInfo)
+    vi.spyOn(store, 'sendMessage').mockReturnValue(true)
+    const wrapper = mount(HomeIntake, { attachTo: document.body })
+    const trigger = wrapper.get('.home-intake-model-trigger')
+    expect(trigger.text()).toBe('Claude Code · Opus 4.5')
+
+    const options = () => Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+    await trigger.trigger('click')
+    await flushPromises()
+    expect(document.body.textContent).not.toMatch(/\bdefault\b/i)
+    const current = options().find(option => option.dataset.model === 'default')!
+    expect(current.textContent).toContain('Opus 4.5')
+    expect(current.getAttribute('aria-selected')).toBe('true')
+    // Picking the default's own row keeps following the workspace default.
+    current.click()
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('One')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(create).toHaveBeenLastCalledWith('general')
+
+    // A pin offers one way back, which follows the default again.
+    await trigger.trigger('click')
+    await flushPromises()
+    options().find(option => option.dataset.model === 'sonnet')!.click()
+    await flushPromises()
+    expect(trigger.text()).toBe('Claude Code · Sonnet')
+    await trigger.trigger('click')
+    await flushPromises()
+    const back = options().find(option => option.textContent?.includes('Use workspace default'))!
+    expect(back.textContent).toContain('Use workspace default (Claude Code · Opus 4.5)')
+    back.click()
+    await flushPromises()
+    expect(trigger.text()).toBe('Claude Code · Opus 4.5')
+    wrapper.unmount()
+  })
+
   it('starts the chat on a picked model instead of the workspace default', async () => {
     const store = useProjectStore()
     store.workspaces = [
@@ -312,13 +371,18 @@ describe('HomeIntake', () => {
       provider_models: { claude: ['opus', 'sonnet'], opencode: ['openai/gpt-5.2'] },
       provider_defaults: { claude: 'opus', opencode: 'openai/gpt-5.2' },
       opencode_models: ['openai/gpt-5.2'],
-    }
+      providers: [
+        { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude Code', capabilities: {} },
+        { id: 'opencode', label: 'OpenCode', short_label: 'OpenCode', capabilities: {} },
+      ],
+    } as unknown as typeof tasks.models
     const create = vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'x' } as ChatInfo)
     vi.spyOn(store, 'sendMessage').mockReturnValue(true)
 
     const wrapper = mount(HomeIntake, { attachTo: document.body })
     const trigger = wrapper.get('.home-intake-model-trigger')
-    expect(trigger.text()).toContain('OpenCode default')
+    // The workspace default, named concretely: never "default".
+    expect(trigger.text()).toBe('OpenCode · GPT-5.2')
     expect(wrapper.get('button[type="submit"]').attributes('aria-label')).toBe('New chat')
 
     await trigger.trigger('click')
@@ -328,7 +392,7 @@ describe('HomeIntake', () => {
     expect(sonnet).toBeTruthy()
     sonnet!.click()
     await flushPromises()
-    expect(trigger.text()).toContain('sonnet')
+    expect(trigger.text()).toBe('Claude Code · Sonnet')
 
     await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Plan the week')
     await wrapper.get('form').trigger('submit')

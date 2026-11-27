@@ -233,7 +233,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (epoch !== workspaceRegistryEpoch) return res
       workspaceProviderOptions.value = res.provider_options?.length
         ? res.provider_options
-        : [{ value: 'claude', label: 'Claude' }]
+        : [{ value: 'claude', label: 'Claude', short_label: 'Claude Code' }]
       claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
       if (epoch !== workspaceRegistryEpoch) return res
       const names = (bootstrap ? workspaceOptions.value : workspaces.value).map(w => w.name)
@@ -249,7 +249,7 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
   const workspaceProviderOptions = ref<WorkspaceProviderOption[]>([
-    { value: 'claude', label: 'Claude' },
+    { value: 'claude', label: 'Claude', short_label: 'Claude Code' },
   ])
   // The engine's Claude context-trim catalog (Settings > Overview card). Kept from the last response that carried it.
   const claudeTrimOptions = ref<ClaudeTrimOption[]>([])
@@ -2549,7 +2549,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (epoch !== workspaceRegistryEpoch) return res
         workspaceProviderOptions.value = res.provider_options?.length
           ? res.provider_options
-          : [{ value: 'claude', label: 'Claude' }]
+          : [{ value: 'claude', label: 'Claude', short_label: 'Claude Code' }]
         claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
       }
       return res
@@ -2594,7 +2594,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (epoch !== workspaceRegistryEpoch) return res
         workspaceProviderOptions.value = res.provider_options?.length
           ? res.provider_options
-          : [{ value: 'claude', label: 'Claude' }]
+          : [{ value: 'claude', label: 'Claude', short_label: 'Claude Code' }]
         claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
         if (epoch !== workspaceRegistryEpoch) return res
         if (epoch === workspaceRegistryEpoch && activeWorkspace.value && !workspaces.value.some(w => w.name === activeWorkspace.value)) {
@@ -2637,7 +2637,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (epoch === workspaceRegistryEpoch) {
           workspaceProviderOptions.value = res.provider_options?.length
             ? res.provider_options
-            : [{ value: 'claude', label: 'Claude' }]
+            : [{ value: 'claude', label: 'Claude', short_label: 'Claude Code' }]
           claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
           if (epoch === workspaceRegistryEpoch && activeWorkspace.value === name) {
             activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
@@ -2685,7 +2685,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (epoch !== workspaceRegistryEpoch) return res
         workspaceProviderOptions.value = res.provider_options?.length
           ? res.provider_options
-          : [{ value: 'claude', label: 'Claude' }]
+          : [{ value: 'claude', label: 'Claude', short_label: 'Claude Code' }]
         claudeTrimOptions.value = res.claude_trim_options ?? claudeTrimOptions.value
       }
       return res

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  modelName,
   providerForModelSection,
+  providerModelLabel,
   sectionKeyForProvider,
   sectionsFromModelsResponse,
 } from './modelSections'
@@ -69,7 +71,8 @@ describe('modelSections', () => {
     expect(codex?.label).toBe('Codex')
     expect(codex?.models).toEqual(['gpt-5.5', 'gpt-5.4-mini'])
     expect(codex?.modelLabels).toEqual({ 'gpt-5.5': 'GPT-5.5', 'gpt-5.4-mini': 'GPT-5.4 Mini' })
-    expect(codex?.modelBadges).toEqual({ 'gpt-5.5': ['Default'] })
+    // The provider default is highlighted by pickers, never badged "Default".
+    expect(codex?.modelBadges).toBeUndefined()
     // An empty catalog is not a section, and the registry order is kept.
     expect(sections.map((section) => section.key)).toEqual(['anthropic', 'codex'])
   })
@@ -126,7 +129,7 @@ describe('modelSections', () => {
     } as ModelsResponse)
 
     const anthropic = sections.find((section) => section.key === 'anthropic')
-    expect(anthropic?.modelBadges).toEqual({ opus: ['Default'] })
+    expect(anthropic?.modelBadges).toBeUndefined()
     expect(anthropic?.modelLabels).toEqual({ opus: 'Opus' })
   })
 })
@@ -181,7 +184,7 @@ describe('opencode section', () => {
     ])
   })
 
-  it("tags each provider's default model", () => {
+  it("never badges a provider's default model with the word Default", () => {
     const sections = sectionsFromModelsResponse({
       ...base,
       providers: [CLAUDE, OPENCODE],
@@ -189,10 +192,44 @@ describe('opencode section', () => {
       provider_models: { claude: ['a-model', 'b-model'], opencode: ['google/gemini-3-pro'] },
       provider_defaults: { claude: 'b-model', opencode: 'google/gemini-3-pro' },
     })
-    expect(sections.find((s) => s.key === 'anthropic')?.modelBadges).toEqual({ 'b-model': ['Default'] })
-    // The default badge stays, and the namespace the id states rides beside it.
+    expect(sections.find((s) => s.key === 'anthropic')?.modelBadges).toBeUndefined()
+    // Only the namespace the id states is a badge.
     expect(sections.find((s) => s.key === 'opencode')?.modelBadges).toEqual({
-      'google/gemini-3-pro': ['Default', 'google'],
+      'google/gemini-3-pro': ['google'],
     })
+  })
+
+  it("names the agent's default entry by the model it runs, never 'Default'", () => {
+    const response = {
+      ...base,
+      providers: [CLAUDE],
+      models: ['default', 'opus'],
+      provider_models: { claude: ['default', 'opus'] },
+      provider_defaults: { claude: 'default' },
+      provider_catalog_evidence: {
+        claude: { status: 'observed', source: null, reason: null, models: [
+          { id: 'default', label: 'Default (recommended)', description: 'Opus 4.5' },
+          { id: 'opus', label: 'Opus' },
+        ] },
+      },
+    } as ModelsResponse
+    const claude = sectionsFromModelsResponse(response).find((s) => s.key === 'anthropic')
+    expect(claude?.modelLabels).toEqual({ default: 'Opus 4.5', opus: 'Opus' })
+    expect(modelName(response, 'claude', 'default')).toBe('Opus 4.5')
+    expect(modelName(response, 'claude', '')).toBe('Opus 4.5')
+    expect(providerModelLabel(response, 'claude', 'default')).toBe('Claude · Opus 4.5')
+  })
+
+  it('shows the provider alone while the default entry has no concrete name', () => {
+    const response = {
+      ...base,
+      providers: [CLAUDE],
+      models: ['default'],
+      provider_models: { claude: ['default'] },
+      provider_defaults: { claude: 'default' },
+    } as ModelsResponse
+    expect(modelName(response, 'claude', 'default')).toBe('')
+    expect(providerModelLabel(response, 'claude', 'default')).toBe('Claude')
+    expect(sectionsFromModelsResponse(response)[0].modelLabels).toEqual({ default: 'Claude' })
   })
 })

@@ -279,7 +279,7 @@ function workspacesPayload(state) {
   return {
     workspaces: ordered.map(w => ({ ...w, shared_brains: state.sharedBrains?.[w.name] ?? [] })),
     active: ordered[0].name,
-    provider_options: [{ value: 'claude', label: 'Claude' }],
+    provider_options: [{ value: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude Code' }],
   }
 }
 
@@ -763,7 +763,7 @@ const GET_ROUTES = {
     },
     provider_defaults: { claude: 'synthetic-model' },
     providers: [
-      { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+      { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude Code', capabilities: {} },
       { id: 'codex', label: 'OpenAI (via Codex)', short_label: 'Codex', capabilities: {} },
     ],
     thinking_levels: { claude: ['low', 'high'] },

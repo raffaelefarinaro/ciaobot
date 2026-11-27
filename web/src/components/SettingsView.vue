@@ -1263,7 +1263,6 @@ import SettingsRadioGroup from './settings/SettingsRadioGroup.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsWorkspaceOverview from './settings/SettingsWorkspaceOverview.vue'
 import type { ModelSection } from '../lib/modelSections'
-import { modelDisplayName } from '../lib/modelLabels'
 import { settingsTabLabel } from '../lib/settingsNav'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { BYPASS_NOTE, permissionDocsFor } from '../lib/permissionDocs'
@@ -1531,6 +1530,7 @@ const workspaceModels = ref<ModelsResponse | null>(null)
 
 const {
   getProviderSection,
+  modelNameFor,
   providerSectionsWithDefault,
   providerDefaultModelOverride,
   providerThinkingOptions,
@@ -1617,7 +1617,7 @@ function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSecti
   return providerSectionsWithDefault(
     provider,
     DEFAULT_MODEL_SELECTION,
-    (effective) => (effective ? `Automatic (${modelDisplayName(effective)})` : 'Automatic'),
+    (effective) => (effective ? `Automatic (${modelNameFor(provider, effective)})` : 'Automatic'),
     true, // the entry names the model Automatic resolves to
   )
 }

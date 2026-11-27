@@ -235,11 +235,24 @@ function badgeClass(badge: string): string {
 }
 
 function scrollActiveIntoView() {
-  if (!listRef.value) return
-  const active = listRef.value.querySelector('.ms-item--active') as HTMLElement | null
-  if (active && typeof active.scrollIntoView === 'function') {
-    active.scrollIntoView({ block: 'nearest' })
-  }
+  // Scroll only the picker's own scroller (the list, or the whole popover on
+  // a short screen), never the page: Element.scrollIntoView also scrolls every
+  // ancestor, and it ran before Popper had placed the popover, which scrolled
+  // Home's page away under it on a phone.
+  const list = listRef.value
+  const active = list?.querySelector('.ms-item--active') as HTMLElement | null
+  if (!list || !active) return
+  const popover = list.closest('.model-selector__popover') as HTMLElement | null
+  const scroller = [list, popover].find((el): el is HTMLElement => (
+    !!el && el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY !== 'visible'
+  ))
+  if (!scroller) return
+  const box = scroller.getBoundingClientRect()
+  const row = active.getBoundingClientRect()
+  // Leave room for the sticky provider heading above the row.
+  const top = box.top + 36
+  if (row.top < top) scroller.scrollTop -= top - row.top
+  else if (row.bottom > box.bottom) scroller.scrollTop += row.bottom - box.bottom
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -495,9 +508,9 @@ onMounted(() => {
               class="model-selector__section"
               :class="{ 'model-selector__section--disabled': section.disabled }"
               role="group"
-              :aria-label="section.label"
+              :aria-label="section.label || undefined"
             >
-              <div class="model-selector__section-header">
+              <div v-if="section.label" class="model-selector__section-header">
                 <span class="model-selector__section-label">{{ section.label }}</span>
                 <span v-if="section.badge" class="model-selector__badge">{{ section.badge }}</span>
               </div>
@@ -540,7 +553,7 @@ onMounted(() => {
           </div>
 
           <div v-else class="model-selector__empty" role="status">
-            No models match "{{ query }}"
+            {{ normalizedQuery ? `No models match "${query}"` : 'No models listed.' }}
           </div>
 
           </div>
@@ -562,11 +575,18 @@ onMounted(() => {
   width: 100%;
 }
 
+/* A triggerless picker belongs to a chip its host draws. Its root only
+   anchors the popover over that chip's (positioned) wrapper and takes no room
+   in the row, so the chip keeps the same width open or closed. */
 .model-selector--triggerless {
-  width: 100%;
-  height: 100%;
-  min-height: 30px;
-  align-self: stretch;
+  position: absolute;
+  inset: 0;
+  width: auto;
+  pointer-events: none;
+}
+
+.model-selector--triggerless .model-selector__popover {
+  pointer-events: auto;
 }
 
 .model-selector__trigger {

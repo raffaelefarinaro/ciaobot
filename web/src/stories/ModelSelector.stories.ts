@@ -20,7 +20,7 @@ export const Default: Story = {
 }
 export const Empty: Story = {
   args: { sections: [], modelValue: '', triggerless: true },
-  play: async ({ canvas }) => { expect(canvas.getByText('No models match ""')).toBeTruthy() },
+  play: async ({ canvas }) => { expect(canvas.getByText('No models listed.')).toBeTruthy() },
 }
 export const Disabled: Story = {
   args: { disabled: true },
@@ -111,8 +111,9 @@ const OPENCODE_MODELS = [
   'google/gemini-3-pro', 'deepseek/deepseek-v4', 'mistral/devstral-2',
 ]
 const MANY_SECTIONS: ModelSection[] = [
-  { key: 'anthropic', label: 'Claude (Anthropic)', models: CLAUDE_MODELS, modelBadges: { sonnet: ['Default'] }, modelLabels: { default: 'Default', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' } },
-  { key: 'opencode', label: 'opencode', models: OPENCODE_MODELS, modelBadges: { 'openai/gpt-5.6': ['Default'] } },
+  // Claude Code's own default entry is named by the model it runs, never "Default".
+  { key: 'anthropic', label: 'Claude Code', models: CLAUDE_MODELS, modelLabels: { default: 'Opus 4.5', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' } },
+  { key: 'opencode', label: 'OpenCode', models: OPENCODE_MODELS },
 ]
 
 /** The composer's picker: the triggerless popover with the Permission mode menu in its footer. */
@@ -138,8 +139,9 @@ export const ComposerManyModels: Story = {
   args: { triggerless: true, placement: 'top-start', modelValue: 'sonnet', sections: MANY_SECTIONS },
   render: composerRender,
   play: async ({ canvas }) => {
-    expect(canvas.getByText('Claude (Anthropic)')).toBeTruthy()
-    expect(canvas.getByText('opencode')).toBeTruthy()
+    expect(canvas.getByText('Claude Code')).toBeTruthy()
+    expect(canvas.getByText('OpenCode')).toBeTruthy()
+    expect(document.querySelector('.model-selector__popover')!.textContent).not.toMatch(/\bdefault\b/i)
     expect(canvas.getByRole('option', { name: /Sonnet/ }).getAttribute('aria-selected')).toBe('true')
     // The list is the roomy part: it holds far more than a hundred pixels of rows.
     const list = document.querySelector<HTMLElement>('.model-selector__list')!

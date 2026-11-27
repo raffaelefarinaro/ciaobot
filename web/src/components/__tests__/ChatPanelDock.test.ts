@@ -453,7 +453,8 @@ describe('ChatPanel model summary', () => {
     })
 
     const summary = wrapper.get('.model-picker-summary')
-    expect(summary.text()).toContain('anthropic/claude-sonnet-4-6')
+    // The readable name, never the raw id.
+    expect(summary.text()).toContain('Claude Sonnet-4-6')
     expect(summary.text()).not.toContain('think:auto')
     wrapper.unmount()
   })

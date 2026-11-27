@@ -234,7 +234,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 The workspace-move operation record includes `denied` and, when launchd observed it, `startup_exit_code`. A destination access denial or engine startup exit 78 is captured before rollback; the source engine's successful restart can clear the shared denial notice without erasing the operation's diagnosis.
 
-`provider_catalog_evidence` is keyed by `claude` and `opencode`; each value is `{status: "observed"|"unknown", source: "claude_initialize"|"opencode_catalog"|null, models: [{id, label}], reason: "not_observed"|"expired"|"invalid_response"|"no_models_reported"|null}`. Claude evidence is passively captured from `get_server_info()` after an already-authorized chat connection, scoped to its SDK working directory and retained in process memory for 300 seconds. Missing/malformed/expired evidence has no models. The `provider_models`/`models` fields remain configured aliases and must not be represented as account availability; observed catalog metadata is not generation-verified.
+`provider_catalog_evidence` is keyed by `claude` and `opencode`; each value is `{status: "observed"|"unknown", source: "claude_initialize"|"opencode_catalog"|null, models: [{id, label, description?}], reason: "not_observed"|"expired"|"invalid_response"|"no_models_reported"|null}`. Claude evidence is passively captured from `get_server_info()` after an already-authorized chat connection, scoped to its SDK working directory and retained in process memory for 300 seconds. Missing/malformed/expired evidence has no models. `description` is present when the agent describes an entry; Claude Code describes its `default` entry by the concrete model it runs, which the PWA shows as that entry's name. The `provider_models`/`models` fields remain configured aliases and must not be represented as account availability; observed catalog metadata is not generation-verified.
 
 OpenCode `credential_inventory` is `{status, providers}`. Status is `complete`,
 `partial` (entries omitted or truncated), or `unknown` (the list could not be
@@ -826,7 +826,8 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 
 ```bash
 # List — returns {workspaces, active, primary, provider_options,
-# claude_trim_options}. Each workspace also reports shared_brains ([{name, path, identity, kind, enabled}],
+# claude_trim_options}. provider_options rows are {value, label, short_label}:
+# short_label is the CLI's short name ("Claude Code") that chips show. Each workspace also reports shared_brains ([{name, path, identity, kind, enabled}],
 # always present, [] when none): the Git checkouts or ordinary folders it links as
 # shared brains. A save that omits kind keeps the linked row's kind; a raw new row
 # that omits kind defaults to Git for backward compatibility, while the Settings form

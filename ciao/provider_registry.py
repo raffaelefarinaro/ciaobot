@@ -35,7 +35,8 @@ class ProviderDescriptor:
     # Long form for settings rows and workspace pickers, naming the vendor:
     # "Anthropic (via Claude Code)".
     label: str
-    # Compact form for chat headers and badges: "Claude".
+    # Compact form for chat headers, model chips and picker headings: the CLI
+    # the chat runs on, "Claude Code".
     short_label: str
     # The CLI product's own name, for text about what the tool loaded:
     # "Claude Code".
@@ -137,7 +138,7 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
     ProviderDescriptor(
         id="claude",
         label="Anthropic (via Claude Code)",
-        short_label="Claude",
+        short_label="Claude Code",
         cli_label="Claude Code",
         factory_path="ciao.providers.acp.agents:ClaudeAcpProvider",
         auth_command_path="ciao.providers.acp.agents:claude_auth_command",

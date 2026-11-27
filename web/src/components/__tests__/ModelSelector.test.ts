@@ -490,12 +490,12 @@ describe('ModelSelector', () => {
     await flushPromises()
     const search = wrapper.get<HTMLInputElement>('.model-selector__search')
     expect(document.activeElement).toBe(search.element)
-    expect(scrollIntoView).toHaveBeenCalled()
     await search.setValue('glm')
     await flushPromises()
     expect(wrapper.findAll('.model-selector__item')).toHaveLength(1)
     expect(document.activeElement).toBe(search.element)
-    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    // The list scrolls itself; nothing asks the page to scroll.
+    expect(scrollIntoView).not.toHaveBeenCalled()
     wrapper.unmount()
     if (descriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', descriptor)
     else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
@@ -688,16 +688,43 @@ describe('ModelSelector list keyboard and selection', () => {
     expect((document.activeElement as HTMLElement).dataset.model).toBe('llama3.1:latest')
   })
 
-  it('scrolls the current model into view when it opens', async () => {
-    const scrolled: string[] = []
+  it('scrolls the current model into view in the list only, never the page', async () => {
+    const pageScrolls: string[] = []
     const original = HTMLElement.prototype.scrollIntoView
-    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) { scrolled.push(this.dataset.model || '') }
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) { pageScrolls.push(this.dataset.model || '') }
+    // A 200px list holding 600px of rows; the current row sits at 450-490.
+    const height = vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(function (this: Element) {
+      return this.classList.contains('model-selector__list') ? 600 : 0
+    })
+    const client = vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (this: Element) {
+      return this.classList.contains('model-selector__list') ? 200 : 0
+    })
+    const setTop = vi.spyOn(Element.prototype, 'scrollTop', 'set')
+    // jsdom applies no stylesheet; the list is the scroller, as its CSS says.
+    const realStyle = window.getComputedStyle.bind(window)
+    const style = vi.spyOn(window, 'getComputedStyle').mockImplementation((el, pseudo) => (
+      (el as Element).classList?.contains('model-selector__list')
+        ? ({ ...realStyle(el, pseudo), overflowY: 'auto' } as CSSStyleDeclaration)
+        : realStyle(el, pseudo)
+    ))
+    const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      if (this.classList.contains('model-selector__list')) return { top: 100, bottom: 300 } as DOMRect
+      if (this.getAttribute('data-model') === 'llama3.1:latest') return { top: 450, bottom: 490 } as DOMRect
+      return { top: 0, bottom: 0 } as DOMRect
+    })
     try {
       await openSelector({ modelValue: 'llama3.1:latest' })
       await flushPromises()
-      expect(scrolled).toContain('llama3.1:latest')
+      // 490 - 300: just enough to bring the row's bottom into the list.
+      expect(setTop).toHaveBeenCalledWith(190)
+      expect(pageScrolls).toEqual([])
     } finally {
       HTMLElement.prototype.scrollIntoView = original
+      height.mockRestore()
+      client.mockRestore()
+      setTop.mockRestore()
+      style.mockRestore()
+      rect.mockRestore()
     }
   })
 
