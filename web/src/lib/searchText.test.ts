@@ -17,6 +17,15 @@ describe('plainText', () => {
   })
 })
 
+describe('plainText cap', () => {
+  it('caps long input and stays fast on pathological brackets', () => {
+    const start = Date.now()
+    const out = plainText('['.repeat(100000))
+    expect(out.length).toBeLessThanOrEqual(2000)
+    expect(Date.now() - start).toBeLessThan(500)
+  })
+})
+
 describe('highlightSegments', () => {
   it('flags each term case-insensitively and keeps the original casing', () => {
     expect(highlightSegments('Fix the Login bug', 'login fix')).toEqual([
@@ -28,6 +37,11 @@ describe('highlightSegments', () => {
     expect(highlightSegments('a.b (c) a+b', 'a.b (c')).toEqual([
       { text: 'a.b', match: true }, { text: ' ', match: false },
       { text: '(c', match: true }, { text: ') a+b', match: false },
+    ])
+  })
+  it('ignores terms shorter than two characters', () => {
+    expect(highlightSegments('a bc a', 'a bc')).toEqual([
+      { text: 'a ', match: false }, { text: 'bc', match: true }, { text: ' a', match: false },
     ])
   })
   it('returns one plain run for an empty query or empty text', () => {

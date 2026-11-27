@@ -11,18 +11,19 @@
           <input
             id="chat-search-input" ref="input" v-model="query" type="search" autocomplete="off" class="chat-search-input"
             placeholder="Title or conversation text" role="combobox" aria-autocomplete="list" aria-haspopup="listbox"
-            :aria-expanded="items.length > 0" aria-controls="chat-search-results"
+            :aria-expanded="items.length > 0" :aria-controls="items.length ? 'chat-search-results' : undefined"
             :aria-activedescendant="activeIndex >= 0 ? optionId(activeIndex) : undefined"
-            @keydown.down.prevent="moveActive(1)" @keydown.up.prevent="moveActive(-1)" @keydown.enter.prevent="submit"
+            @keydown.down="onArrow($event, 1)" @keydown.up="onArrow($event, -1)" @keydown.enter="onEnter"
           />
         </div>
+        <div class="chat-search-body">
         <p v-if="status" class="chat-search-status" role="status" aria-live="polite">{{ status }}</p>
         <button v-if="retryAction" type="button" class="chat-search-more chat-search-retry" @click="retry">Try again</button>
         <ul v-if="items.length" id="chat-search-results" class="chat-search-results" role="listbox" aria-label="Matching chats">
           <li
             v-for="(item, index) in items" :id="optionId(index)" :key="item.chat_id" role="option" class="chat-search-result"
             :class="{ 'chat-search-result--active': index === activeIndex }" :aria-selected="index === activeIndex"
-            @click="select(item.chat_id)"
+            @click="select(item.chat_id)" @mousemove="activeIndex = index"
           >
             <span class="chat-search-result-title"><template v-for="(part, i) in highlight(item.title)" :key="i"><mark v-if="part.match" class="chat-search-mark">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></span>
             <span v-if="item.project_title || item.archived" class="chat-search-meta">
@@ -34,6 +35,7 @@
         </ul>
         <button v-if="nextCursor && !retryAction" class="chat-search-more" type="button" :disabled="loading" @click="searchMore">Search more</button>
         <p v-if="skippedLarge" class="chat-search-help">Some large transcripts were skipped. A title match may still appear.</p>
+        </div>
         <div class="chat-search-actions"><button type="button" class="chat-search-close" @click="close">Close</button></div>
       </DialogContent>
     </DialogPortal>
@@ -79,6 +81,17 @@ function reset() {
 }
 function optionId(index: number) { return `chat-search-option-${index}` }
 function highlight(text: string) { return highlightSegments(text, shownQuery.value) }
+function composing(event: KeyboardEvent) { return event.isComposing || event.keyCode === 229 }
+function onArrow(event: KeyboardEvent, step: 1 | -1) {
+  if (composing(event)) return
+  event.preventDefault()
+  moveActive(step)
+}
+function onEnter(event: KeyboardEvent) {
+  if (composing(event)) return
+  event.preventDefault()
+  submit()
+}
 function moveActive(step: 1 | -1) {
   if (!items.value.length) return
   activeIndex.value = Math.max(-1, Math.min(items.value.length - 1, activeIndex.value + step))
@@ -161,9 +174,10 @@ watch(() => props.open, (open) => {
 
 <style scoped>
 .chat-search-backdrop { position: fixed; inset: 0; z-index: 1000; background: rgb(0 0 0 / 55%); }
-.chat-search { position: fixed; z-index: 1001; inset: 50% auto auto 50%; transform: translate(-50%, -50%); width: min(560px, calc(100vw - 32px)); max-height: min(80vh, 720px); overflow: auto; padding: var(--space-5); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--fg); }
+.chat-search { display: flex; flex-direction: column; position: fixed; z-index: 1001; inset: 50% auto auto 50%; transform: translate(-50%, -50%); width: min(560px, calc(100vw - 32px)); max-height: min(80vh, 720px); overflow: hidden; padding: var(--space-5); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--fg); }
 .chat-search-title { margin: 0; font-size: 1.1rem; }
 .chat-search-help { margin: var(--space-1) 0 0; color: var(--fg2); font-size: var(--text-base); }
+.chat-search-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .chat-search-field { position: relative; margin-top: var(--space-4); }
 .chat-search-glyph { position: absolute; top: 50%; left: var(--space-3); transform: translateY(-50%); color: var(--fg3); pointer-events: none; }
 .chat-search-input { box-sizing: border-box; width: 100%; min-height: 44px; padding: var(--space-2) var(--space-3) var(--space-2) calc(var(--space-3) + 18px + var(--space-2)); color: var(--fg); background: var(--bg2); border: 1px solid var(--border-strong); border-radius: var(--radius); font: inherit; }
@@ -171,14 +185,14 @@ watch(() => props.open, (open) => {
 .chat-search-status { margin: var(--space-4) 0 var(--space-2); color: var(--fg2); font-size: var(--text-base); }
 .chat-search-results { list-style: none; margin: var(--space-2) 0 var(--space-3); padding: 0; border-top: 1px solid var(--border); }
 .chat-search-result { display: grid; gap: var(--space-1); min-height: 64px; padding: var(--space-4) var(--space-3); border-bottom: 1px solid var(--border); text-align: left; cursor: pointer; }
-.chat-search-result:hover, .chat-search-result--active { background: var(--bg2); }
-.chat-search-result--active { box-shadow: inset 2px 0 0 var(--accent); }
+.chat-search-result--active { background: var(--bg3); outline: 1px solid var(--accent); outline-offset: -1px; }
+@media (forced-colors: active) { .chat-search-result--active { outline: 2px solid Highlight; outline-offset: -2px; } }
 .chat-search-result-title { font-weight: 600; overflow-wrap: anywhere; }
 .chat-search-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); color: var(--fg2); font-size: var(--text-sm); }
 .chat-search-chip { padding: 0 var(--space-1); color: var(--fg2); border: 1px solid var(--border-strong); border-radius: var(--radius-xs); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 16px; }
 .chat-search-snippet { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; color: var(--fg2); font-size: var(--text-base); line-height: 1.45; }
 .chat-search-mark { padding: 0 1px; color: var(--fg); background: color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 2px; }
-.chat-search-actions { display: flex; justify-content: flex-end; margin-top: var(--space-3); }
+.chat-search-actions { flex: 0 0 auto; display: flex; justify-content: flex-end; margin-top: var(--space-3); }
 .chat-search-close, .chat-search-more { min-height: 44px; padding: 0 var(--space-3); color: inherit; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); }
 .chat-search :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 600px) { .chat-search { inset: auto 0 0; transform: none; width: auto; max-height: 90dvh; border-radius: var(--radius) var(--radius) 0 0; padding: var(--space-4) max(var(--space-4), var(--safe-left)) max(var(--space-4), env(safe-area-inset-bottom)) max(var(--space-4), var(--safe-right)); } }

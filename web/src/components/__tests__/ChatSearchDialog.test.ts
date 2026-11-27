@@ -287,4 +287,109 @@ describe('ChatSearchDialog', () => {
     expect(document.querySelector<HTMLInputElement>('#chat-search-input')!.placeholder).toBe('Title or conversation text')
     wrapper.unmount()
   })
+
+  const two = { items: [
+    { chat_id: 'one', title: 'One', project_title: 'P', archived: false, snippet: '' },
+    { chat_id: 'two', title: 'Two', project_title: 'P', archived: false, snippet: '' },
+  ], next_cursor: null, skipped_large_transcripts: false }
+  const press = async (el: Element, init: KeyboardEventInit) => {
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+    el.dispatchEvent(event)
+    await nextTick()
+    return event
+  }
+
+  it('ignores Enter and arrows during IME composition', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue(two)
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = await searchFor('match')
+    await press(input, { key: 'ArrowDown' })
+    expect(input.getAttribute('aria-activedescendant')).toBe('chat-search-option-0')
+    const composingEnter = await press(input, { key: 'Enter', isComposing: true })
+    const legacyEnter = await press(input, { key: 'Enter', keyCode: 229 })
+    const composingArrow = await press(input, { key: 'ArrowDown', isComposing: true })
+    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(composingEnter.defaultPrevented || legacyEnter.defaultPrevented || composingArrow.defaultPrevented).toBe(false)
+    expect(input.getAttribute('aria-activedescendant')).toBe('chat-search-option-0')
+    wrapper.unmount()
+  })
+
+  it('selects on click, and hover moves the single active option', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue(two)
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = await searchFor('match')
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+    options[1]!.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }))
+    await nextTick()
+    expect(input.getAttribute('aria-activedescendant')).toBe(options[1]!.id)
+    expect(document.querySelectorAll('.chat-search-result--active')).toHaveLength(1)
+    options[0]!.click()
+    expect(wrapper.emitted('select')?.at(-1)).toEqual(['one'])
+    wrapper.unmount()
+  })
+
+  it('searches at once on Enter with nothing selected', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue(two)
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = document.querySelector<HTMLInputElement>('#chat-search-input')!
+    input.value = 'quick'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(post).not.toHaveBeenCalled()
+    await press(input, { key: 'Enter' })
+    expect(post).toHaveBeenCalledWith('/api/chats/search', { workspace: 'work', q: 'quick' })
+    wrapper.unmount()
+  })
+
+  it('closes on Escape', async () => {
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await press(document.querySelector('#chat-search-input')!, { key: 'Escape' })
+    await settle()
+    expect(wrapper.emitted('close')).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('keeps Search more and Try again as real tab stops after the field, and scrolls the active option into view', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValueOnce({ ...two, next_cursor: 'next' })
+    post.mockRejectedValueOnce(new Error('offline'))
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = await searchFor('match')
+    const tabbable = () => [...document.querySelectorAll<HTMLElement>('input, button, [tabindex]')].filter(el => el.tabIndex >= 0)
+    expect(tabbable().map(el => el.textContent?.trim() || el.id)).toEqual(['chat-search-input', 'Search more', 'Close'])
+    expect(document.querySelector('[role="option"]')!.hasAttribute('tabindex')).toBe(false)
+    const scroll = vi.mocked(Element.prototype.scrollIntoView)
+    await press(input, { key: 'ArrowDown' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(scroll).toHaveBeenCalledWith({ block: 'nearest' })
+    document.querySelector<HTMLButtonElement>('.chat-search-more')!.click()
+    await settle()
+    expect(tabbable().map(el => el.textContent?.trim() || el.id)).toContain('Try again')
+    wrapper.unmount()
+  })
+
+  it('only points aria-controls at a rendered listbox', async () => {
+    vi.useFakeTimers()
+    post.mockResolvedValue(two)
+    const wrapper = mount(ChatSearchDialog, { attachTo: document.body, props: { open: true, workspace: 'work' } })
+    await settle()
+    await vi.advanceTimersByTimeAsync(20)
+    const input = document.querySelector<HTMLInputElement>('#chat-search-input')!
+    expect(input.hasAttribute('aria-controls')).toBe(false)
+    await searchFor('match')
+    expect(input.getAttribute('aria-controls')).toBe(document.querySelector('[role="listbox"]')!.id)
+    wrapper.unmount()
+  })
 })

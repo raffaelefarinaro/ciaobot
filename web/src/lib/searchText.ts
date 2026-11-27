@@ -4,9 +4,11 @@
 
 export type TextSegment = { text: string; match: boolean }
 
-/** Flatten a markdown excerpt to one line of plain text. */
+/** Flatten a markdown excerpt to one line of plain text. Input is capped so the link patterns stay linear in practice. */
+export const MAX_PLAIN_TEXT = 2000
+
 export function plainText(markdown: string): string {
-  return markdown
+  return markdown.slice(0, MAX_PLAIN_TEXT)
     .replace(/```[a-zA-Z0-9_-]*/g, ' ')
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -22,7 +24,7 @@ function escapeRegExp(value: string): string {
 
 /** Split text into runs, flagging the runs that equal a query term (case-insensitive). */
 export function highlightSegments(text: string, query: string): TextSegment[] {
-  const terms = [...new Set(query.trim().split(/\s+/).filter(Boolean))].sort((a, b) => b.length - a.length)
+  const terms = [...new Set(query.trim().split(/\s+/).filter(term => term.length >= 2))].sort((a, b) => b.length - a.length)
   if (!terms.length || !text) return [{ text, match: false }]
   const pattern = new RegExp(`(${terms.map(escapeRegExp).join('|')})`, 'gi')
   const segments: TextSegment[] = []
