@@ -712,7 +712,7 @@ def test_unsure_list_offers_a_removed_region_entry_back_but_never_an_unsafe_one(
 
 def test_second_look_is_due_only_after_an_archived_memory_pass() -> None:
     prompt = _curation_prompt()
-    assert "- second-look: the due check under Inputs in `curation-pass-8-second-look.md` finds an archived memory pass" in prompt
+    assert "- second-look: the Inputs due check in `curation-pass-8-second-look.md` finds an archived memory pass" in prompt
     assert "chk ciao chat list; chk ciao chat get; chk ciao project list; chk ciao vault search;" in prompt
     lines = [line for line in prompt.splitlines() if line.startswith("- ")]
     order = [line.split(":", 1)[0][2:] for line in lines[:6]]
@@ -769,7 +769,7 @@ def test_second_look_judges_only_what_a_read_pass_wrote_and_stays_bounded() -> N
 
 def test_closed_tasks_is_due_only_for_a_completed_task_no_memory_pass_covers() -> None:
     prompt = _curation_prompt()
-    assert "- closed-tasks: the due check under Inputs in `curation-pass-9-closed-tasks.md` finds a task" in prompt
+    assert "- closed-tasks: the Inputs due check in `curation-pass-9-closed-tasks.md` finds a task" in prompt
     assert "chk ciao task list; chk ciao task get;" in prompt
     assert "has --completed-since ciao task list" in prompt
     step = _reference("curation-pass-9-closed-tasks.md")
@@ -898,6 +898,113 @@ def test_the_needs_you_standard_lives_in_the_preamble_and_the_prompt_points_at_i
         assert "`note: " in text, name
         assert "`needs you: P" not in text, name
     assert "Choose Optimize to trim it together. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
+
+
+def _self_check_line() -> str:
+    """The one-line needs-you self-check the orchestrator runs, from the preamble."""
+    preamble = _reference("step-preamble.md")
+    block = preamble.split("Self-check:", 1)[1].split("```\n", 2)[1]
+    line = block.strip()
+    assert "\n" not in line and line.startswith("awk -v n=") and line.endswith(' "<V>/Workspace/Care-Report.md"'), line
+    return line
+
+
+def _run_self_check(tmp_path: Path, report: str, unsure: str | None = None) -> list[str]:
+    import shutil
+    import subprocess
+
+    if shutil.which("awk") is None or shutil.which("sh") is None:
+        pytest.skip("no POSIX shell and awk on this machine")
+    # A vault path with a space: the command quotes it.
+    vault = tmp_path / "my vault"
+    workspace = vault / "Workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "Care-Report.md").write_text(report, encoding="utf-8")
+    unsure_path = workspace / "Unsure.md"
+    if unsure is None:
+        unsure_path.unlink(missing_ok=True)
+    else:
+        unsure_path.write_text(unsure, encoding="utf-8")
+    command = _self_check_line().replace("<V>", str(vault))
+    result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+_REAL_RUN_ITEMS = (
+    "1. Memory regions are still high (memory 94.8%, profile 92.4%) and every entry is a durable rule: choose in an attended chat what leaves.",
+    "2. Open lines in `Workspace/Unsure.md`: 17 (4 added by the stale step). Tick `- [x]` to apply.",
+    "3. Approve or reject `Workspace/Proposals/agents-md-trim-duplicates.md` and the other proposals filed today.",
+)
+
+
+def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_path: Path) -> None:
+    """The orchestrator's check: every old-jargon item is printed, every standard item passes."""
+    head = "# Care report 2026-11-27\n- [x] unsure: a — b; verify: c\n\n## What needs you\n"
+    notes = "\n## Notes\n- `note` with a backtick is not an item\n"
+    assert _run_self_check(tmp_path, head + "\n".join(_REAL_RUN_ITEMS) + notes) == list(_REAL_RUN_ITEMS)
+    sample = _reference("curation-report-example.md")
+    rewritten = (
+        "1. Your always-loaded memory is nearly full (95% and 92%) and everything in it still matters. Choose Optimize to trim it together. (path: AGENTS.md)",
+        "2. 17 suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
+        "3. A proposal would remove repeated lines from your guide. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/agents-md-trim-duplicates.md)",
+    )
+    for item in rewritten:
+        number, text = item.split(" ", 1)
+        assert f'{number} "{text}"' in sample, item
+    assert _run_self_check(tmp_path, head + "\n".join(rewritten) + notes) == []
+    # The worked example's report passes as written.
+    assert _run_self_check(tmp_path, sample.split("```\n", 2)[1]) == []
+    # Open Unsure lines need their own item; a missing Unsure file needs none.
+    unsure = "# Unsure\n- [ ] Should I remember a thing?\n- [ ] Another?\n- [x] category: Done?\n"
+    proposal_only = head + rewritten[2] + "\n"
+    assert _run_self_check(tmp_path, proposal_only, unsure) == ["missing: the item for 2 open Unsure lines"]
+    assert _run_self_check(tmp_path, head + "\n".join(rewritten) + "\n", unsure) == []
+    # A long proposal path does not count against the length.
+    long_path = "1. A proposal would change a skill. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/" + "x" * 200 + ".md)"
+    assert _run_self_check(tmp_path, head + long_path + "\n") == []
+    # The tail is read as the parser reads it: any case, trailing space. A hyphenated word is not a step id.
+    assert _run_self_check(tmp_path, head + "1. A peer-review proposal is ready. (Path: AGENTS.md) \n") == []
+    # Each rule bites on its own.
+    for bad in (
+        "1. Hygiene [!] stayed blocked. (path: Workspace/Care-Report.md)",
+        "1. Open `Workspace/Unsure.md` and decide. (path: AGENTS.md)",
+        "1. The second-look found two notes. (path: Workspace/Care-Report.md)",
+        "1. Second try, retry 2 of 3. (path: Workspace/Care-Report.md)",
+        "1. Notes whose updated: is old. (path: Workspace/Care-Report.md)",
+        "1. hygiene: 4 notes need you. (path: Workspace/Care-Report.md)",
+        "1. The guide-review found two things. (path: AGENTS.md)",
+        "1. The closed-tasks pass read three tasks. (path: AGENTS.md)",
+        "1. " + "word " * 60 + "(path: AGENTS.md)",
+        "1. Choose Optimize to trim it together.",
+    ):
+        assert _run_self_check(tmp_path, head + bad + "\n") == [bad], bad
+
+
+def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:
+    prompt = _curation_prompt()
+    assert "read its What needs you section; rewrite a line that breaks it" in prompt
+    assert "Run the preamble's self-check, rewrite each item it prints, and run it once more" in prompt
+    preamble = _reference("step-preamble.md")
+    for rule in (
+        "Copy a step's `needs you:` text without that lead when it follows the rules above, and rewrite it when it does not",
+        "Rewrite each item it prints, add a missing item, and run it once more",
+        "never rename or move a file to pass the check",
+        "No backticks or other Markdown",
+        "N suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
+    ):
+        assert rule in preamble, rule
+    # Each step that emits an item gives it with its path.
+    for name, form in (
+        ("curation-pass-1-unsure.md", "need one more step from you, such as adding a category in Settings. Choose Open Unsure to see them. (path: Workspace/Unsure.md)"),
+        ("curation-pass-2-regions.md", "(path: AGENTS.md)`, A and B as whole numbers"),
+        ("curation-pass-3-stale-notes.md", "(path: Workspace/Proposals/<slug>.md)"),
+        ("curation-pass-4-learnings.md", "(path: Workspace/Proposals/<slug>.md)"),
+        ("curation-pass-6-hygiene.md", "(path: Workspace/Proposals/<slug>.md)"),
+        ("curation-pass-7-guide-body.md", "(path: Workspace/Proposals/<slug>.md)"),
+        ("curation-pass-8-second-look.md", "(path: Workspace/Proposals/<slug>.md)"),
+    ):
+        assert form in _reference(name), name
 
 
 def test_the_stale_step_re_dates_only_a_note_it_re_checked_in_full() -> None:

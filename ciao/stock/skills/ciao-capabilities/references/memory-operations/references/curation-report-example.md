@@ -20,7 +20,7 @@ Interrupted last run: guide-review
 
 ## What needs you
 1. Tomas Berg had two notes, so his facts were moved into one and the old note can go. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/retire-tom.md)
-2. 2 suggestions are waiting in Unsure: the office wifi line and Rae's new team. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)
+2. 2 suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)
 
 ## Notes
 - The review of your guide could not read the file; it tries again on the next run.
@@ -33,9 +33,9 @@ Checkbox lines appear only in the checklist above the first `##` heading; every 
 
 Each item under `## What needs you` follows the standard in `step-preamble.md`: one decision, at most two short sentences in everyday words (the situation, the recommendation, how to act), ending in `(path: …)` when there is a file to open. The app reads the path to pick the button: a proposal opens a review with Approve and Reject, `Workspace/Unsure.md` opens Unsure, `AGENTS.md` opens the guide, another vault file opens that file. Every item also offers "Fix with a chat".
 
-- Open Unsure lines are one item for the whole list: "N suggestions are waiting in Unsure", naming at most the first 3, then "Open Memory > Unsure and approve or reject them.", with `(path: Workspace/Unsure.md)`.
+- Open Unsure lines are one item for the whole list, whoever added them: "N suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)".
 - Hygiene fixes what a rule settles and leaves at most one item for skills that are too long (pointing at the first open proposal) and one for findings that need a decision, never one item per finding.
-- A region still nearly full because everything in it is durable is one item: say so and recommend "Choose Optimize to trim it together." with `(path: AGENTS.md)`.
+- A region still nearly full because everything in it is durable is one item: say so, in whole percentages, and recommend "Choose Optimize to trim it together." with `(path: AGENTS.md)`.
 - `## Notes` holds what the person need not act on: the steps' `note:` items, a blocked step that runs again next time, the interrupted ids, leftover counts. Plain `- ` bullets, never checkboxes.
 
 A worked example, from a real run that wrote items nobody could act on. What the run wrote first, then what the standard asks for:
@@ -45,9 +45,17 @@ A worked example, from a real run that wrote items nobody could act on. What the
 | "stale [!]: the stale-notes audit reads frontmatter `updated:`, which the step may not change, so stamped notes stay listed (297 stale). Decide whether … Retry 1 of 3." | Note: "Re-checking older notes did not finish; it tries again on the next run." |
 | "Approve or reject `Workspace/Proposals/guide-trim-duplicates.md` (removes the tool status section and a duplicate chat-logs path from AGENTS.md)." | 1. "A proposal would trim your guide: it removes an outdated status section and a repeated folder path. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/guide-trim-duplicates.md)" |
 | "Both memory regions are still high (memory 97.6%, profile 95.1%); all remaining entries are durable. Choose what leaves in an attended chat. The scheduled-prompts rule on Unsure cannot go in until then." | 2. "Your always-loaded memory is nearly full (98% and 95%) and everything in it still matters. Choose Optimize to trim it together. (path: AGENTS.md)" Note: "One suggestion in Unsure waits until memory has room." |
-| "13 open lines in `Workspace/Unsure.md`: pick the canonical brief template, Project B brief status, a new People page, a stub merge, Calendar edits rule placement, and others. Tick `- [x]` to apply." | 3. "13 suggestions are waiting in Unsure, such as which brief template to keep, a project's status and a new People page. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)" |
+| "13 open lines in `Workspace/Unsure.md`: pick the canonical brief template, Project B brief status, a new People page, a stub merge, Calendar edits rule placement, and others. Tick `- [x]` to apply." | 3. "13 suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)" |
 | "Second-look left 17 memory passes unread (cap); drain left Observations.md (~200 patterns) for the next run." | Notes: "17 memory passes were not re-read this time; the next run continues." and "About 200 older patterns are still to be moved to Unsure; the next run continues." |
 | "Hygiene: 63 findings listed under `## Hygiene` (orphans, frontmatter, 6 skills over size budget)." | The step fixes what a rule settles (a missing or misspelled category, a link to a note that moved, a note nothing links to) and lists the rest under `## Hygiene`. 4. "6 skills are longer than they should be, and a proposal to shorten each is ready. Choose Review proposal to approve or reject the first. (path: Workspace/Proposals/shorten-skill-one.md)" 5. "4 notes need a decision the run cannot make alone, such as two notes for one person. Choose Fix with a chat to go through them. (path: Workspace/Care-Report.md)" |
+
+A later run copied its steps' old lines as they were, so the page could show no button for them. Each breaks the standard (backticks, a step named, a Markdown instruction, no path), the self-check in `step-preamble.md` prints all three, and the orchestrator rewrites them:
+
+| The run wrote | Under the standard |
+|---|---|
+| "Memory regions are still high (memory 94.8%, profile 92.4%) and every entry is a durable rule: choose in an attended chat what leaves." | 1. "Your always-loaded memory is nearly full (95% and 92%) and everything in it still matters. Choose Optimize to trim it together. (path: AGENTS.md)" |
+| "Open lines in `Workspace/Unsure.md`: 17 (4 added by the stale step). Tick `- [x]` to apply." | 2. "17 suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)" |
+| "Approve or reject `Workspace/Proposals/agents-md-trim-duplicates.md` and the other proposals filed today." | 3. "A proposal would remove repeated lines from your guide. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/agents-md-trim-duplicates.md)" Each other proposal filed that day is its own item with its own path. |
 
 ## The final reply
 
