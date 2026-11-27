@@ -54,7 +54,7 @@ from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import loads_untrusted, write_private_text
 from ciao.file_kernel import QueueLockError
-from ciao.unsure_list import UnsureError, change_line, read_list
+from ciao.unsure_list import UnsureError, change_line, read_list, is_line_id as is_unsure_line_id
 from ciao.os_support.child_env import child_env
 from ciao.port_in_use import BIND_PHASE
 from ciao.web.auth import (
@@ -4323,8 +4323,38 @@ async def care_report(request: Request) -> JSONResponse:
     return JSONResponse(body)
 
 
-# The largest body the Unsure page sends: an action and a 16-character line id.
+# The largest body the Unsure page sends: an action and a line id.
 _UNSURE_BODY_MAX_BYTES = 1024
+
+
+def _unsure_error(message: str, status: int, code: str) -> JSONResponse:
+    return JSONResponse({"error": message, "code": code}, status_code=status)
+
+
+async def _bounded_body(request: Request, limit: int) -> bytes | None:
+    """The request body, or None once it passes `limit` bytes (never buffered past it)."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            return None
+    return bytes(body)
+
+
+def _care_running(request: Request, workspace: str) -> bool:
+    """Whether the workspace's care run is in progress (the scheduler's own stamp)."""
+    sm = getattr(request.app.state, "schedule_manager", None)
+    if sm is None:
+        return False
+    try:
+        current = sm.get_with_revision(system_schedule_id(CARE_SCHEDULE_BASE_ID, workspace))
+    except ScheduleStoreCorrupt:
+        return False
+    entry = current[0] if current is not None else None
+    return entry is not None and entry.last_status == "running"
 
 
 async def unsure_list(request: Request) -> JSONResponse:
@@ -4333,48 +4363,53 @@ async def unsure_list(request: Request) -> JSONResponse:
     GET `?workspace=<name>` answers the list parsed (see
     :func:`ciao.unsure_list.read_list`) plus the file's display path. POST
     `{"workspace", "op": "tick" | "untick" | "remove", "id"}` changes the one
-    line whose content hash is `id` under the list's file lock and answers the
-    list as written; 409 when no line has that id any more (the page reads
-    again). The file is fixed under the workspace's vault: the client names a
-    workspace, never a path. Line text is never logged.
+    item line with that id under the list's file lock and answers the list as
+    written. Every refusal carries a `code`: `line_changed` (409, the page
+    reads again), `care_running` (423: the care run edits the file with its own
+    tools, which do not take the lock), `not_plain_file` (422), `too_large`
+    (413), `busy` (503, lock held past 2 s), `vault_unavailable` (503),
+    `bad_request` (400). The client names a workspace, never a path, and line
+    text is never logged.
     """
     config = request.app.state.config
     if request.method == "POST":
-        raw = await request.body()
-        if len(raw) > _UNSURE_BODY_MAX_BYTES:
-            return JSONResponse({"error": "body too large"}, status_code=413)
+        raw = await _bounded_body(request, _UNSURE_BODY_MAX_BYTES)
+        if raw is None:
+            return _unsure_error("body too large", 413, "too_large")
         try:
             body = json.loads(raw or b"{}")
         except ValueError:
-            return JSONResponse({"error": "bad json"}, status_code=400)
+            return _unsure_error("bad json", 400, "bad_request")
         if not isinstance(body, dict):
-            return JSONResponse({"error": "bad json"}, status_code=400)
+            return _unsure_error("bad json", 400, "bad_request")
         workspace = str(body.get("workspace", "")).strip()
         op = str(body.get("op", ""))
         target = str(body.get("id", ""))
-        if op not in ("tick", "untick", "remove") or not re.fullmatch(r"[0-9a-f]{16}", target):
-            return JSONResponse({"error": "op and id are required"}, status_code=400)
+        if op not in ("tick", "untick", "remove") or not is_unsure_line_id(target):
+            return _unsure_error("op and id are required", 400, "bad_request")
     else:
         workspace = request.query_params.get("workspace", "").strip()
     if not workspace or config.workspace(workspace) is None:
-        return JSONResponse({"error": "workspace is required"}, status_code=400)
+        return _unsure_error("workspace is required", 400, "bad_request")
     try:
         vault = Path(config.workspace_vault_root(workspace)).resolve()
     except (AttributeError, ValueError, OSError) as exc:
-        logger.warning("unsure list: vault for %s unavailable: %s", workspace, exc)
-        return JSONResponse({"error": "vault unavailable"}, status_code=409)
+        logger.warning("unsure list: vault for %s unavailable: %s", workspace, type(exc).__name__)
+        return _unsure_error("the workspace's vault is not available", 503, "vault_unavailable")
+    if request.method == "POST" and _care_running(request, workspace):
+        return _unsure_error("Workspace care is running and may be editing the list; try again when it finishes", 423, "care_running")
     try:
         if request.method == "POST":
             payload = await asyncio.to_thread(change_line, vault, op, target)
         else:
             payload = await asyncio.to_thread(read_list, vault)
     except UnsureError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=exc.status)
+        return _unsure_error(str(exc), exc.status, exc.code)
     except QueueLockError:
-        return JSONResponse({"error": "the list is being written; try again"}, status_code=503)
+        return _unsure_error("the list is being written; try again", 503, "busy")
     except OSError as exc:
         logger.warning("unsure list: %s for %s failed: %s", request.method, workspace, type(exc).__name__)
-        return JSONResponse({"error": "the list could not be read or written"}, status_code=500)
+        return _unsure_error("the list could not be read or written", 500, "io_error")
     payload["workspace"] = workspace
     payload["path"] = _care_display_path(config, vault / CARE_UNSURE_PATH)
     return JSONResponse(payload)

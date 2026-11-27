@@ -10,7 +10,7 @@ import type { UnsureItem, UnsureList } from '../lib/unsureList'
  */
 export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
   {
-    "id": "1595d4b902c9b287",
+    "id": "1595d4b902c9b287-0",
     "raw": "- [ ] Is the live Northwind deployment unaffected by the December 11 model retirement? — unsure because the review checked local code and configuration, not the production environment, where a model override could still select a retiring ID; source: chat-7e11530b; 2026-11-27",
     "checked": false,
     "kind": "",
@@ -23,7 +23,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "db7523f800669f0c",
+    "id": "db7523f800669f0c-0",
     "raw": "- [ ] Does the November 27 summary of the voice feature reflect a changed decision or just an imprecise summary? — unsure because the [Northwind note](../projects/active/Northwind/Northwind.md#audio) records the decision to keep the current default while credit lasts; the later review reports no new decision and does not verify the deployed default; sources: chat-30605c3a and chat-7e11530b; 2026-11-27",
     "checked": false,
     "kind": "",
@@ -36,7 +36,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "ae52338c77ab7db1",
+    "id": "ae52338c77ab7db1-0",
     "raw": "- [ ] Should Sam Rivera's note say he moved from the platform team to the payments team? — unsure because two notes disagree and neither names a date; source: People/Sam Rivera.md; 2026-11-26",
     "checked": false,
     "kind": "",
@@ -49,7 +49,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "3dbbb1383fdd682f",
+    "id": "3dbbb1383fdd682f-0",
     "raw": "- [ ] observation: You prefer a short status update before a long explanation. — seen in: chat-1a2b3c4d, chat-5e6f7a8b — unsure because it has shown up in two chats so far; source: chat-5e6f7a8b; 2026-11-25",
     "checked": false,
     "kind": "observation",
@@ -62,7 +62,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "84b0576a499c94af",
+    "id": "84b0576a499c94af-0",
     "raw": "- [ ] drop memory: Remove the reminder about the old staging password rotation from what every chat loads. \"Staging credentials rotate every Friday; ask before rotating\" — unsure because the rotation may still be in place; source: care run; 2026-11-25",
     "checked": false,
     "kind": "drop",
@@ -75,7 +75,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "2591ae6f5758b7fd",
+    "id": "2591ae6f5758b7fd-0",
     "raw": "- [ ] restore to profile: Put back that you work from Lisbon on Mondays. \"Works from the Lisbon office on Mondays\" — removed because no typed turn of yours said it; source: chat-9c8d7e6f; 2026-11-24",
     "checked": false,
     "kind": "restore",
@@ -88,7 +88,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "b98bbd4469d88305",
+    "id": "b98bbd4469d88305-0",
     "raw": "- [ ] category: Add a category for recipes? Three notes about cooking have no category that fits. — unsure because no category in VOCABULARY.md covers them; source: chat-0f1e2d3c; 2026-11-24",
     "checked": false,
     "kind": "category",
@@ -101,7 +101,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "5b3eada211e50395",
+    "id": "5b3eada211e50395-0",
     "raw": "- [ ] repo ~/repos/northwind-api: Run the API tests with `uv run pytest -n auto` instead of plain pytest. — unsure because only one chat used that command; source: chat-4b5c6d7e; 2026-11-23",
     "checked": false,
     "kind": "repo",
@@ -114,7 +114,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "f35ec7f92ae8d440",
+    "id": "f35ec7f92ae8d440-0",
     "raw": "- [ ] rule flip memory/stale-days: Re-check notes every 45 days instead of every 30? 30 -> 45 — unsure because the operator has not approved the change; source: care run; 2026-11-23",
     "checked": false,
     "kind": "rule",
@@ -127,7 +127,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "b78024e6100587d9",
+    "id": "b78024e6100587d9-0",
     "raw": "- [ ] Atlas renewal: contract owner listed as procurement in Projects/Atlas.md but the 2026-11-12 thread names finance as owner, both cited, neither superseded, kept both pending confirmation, also budget line differs (EUR 40k vs EUR 42k) between the brief and the kickoff deck — unsure because two sources conflict; source: Projects/Atlas.md; 2026-11-22",
     "checked": false,
     "kind": "",
@@ -140,7 +140,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "9df23e4e51f8aa65",
+    "id": "9df23e4e51f8aa65-0",
     "raw": "- [x] Is Dana Okafor the new contact for the Northwind invoices? — unsure because only an agent message says so; source: Tasks/2026-11-20-invoices.md; 2026-11-21",
     "checked": true,
     "kind": "",
@@ -153,7 +153,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "57e8995d8422e516",
+    "id": "57e8995d8422e516-0",
     "raw": "- [ ] Does the weekly sync still happen on Thursdays at 10:00? — unsure because the calendar note is from last spring; source: Projects/Weekly sync.md; 2026-11-20",
     "checked": false,
     "kind": "",
@@ -166,7 +166,7 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "malformed": false
   },
   {
-    "id": "1b810829470a24d2",
+    "id": "1b810829470a24d2-0",
     "raw": "- [ ] Should the travel note keep the old frequent-flyer number? — unsure because the airline account was closed in the October chat; source: chat-2c3d4e5f; 2026-11-19",
     "checked": false,
     "kind": "",

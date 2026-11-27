@@ -140,7 +140,7 @@ describe('MemoryGuideBudget', () => {
     expect(root.get('.docked-window-head #guide-budget-title').text()).toBe('Always loaded')
     expect(root.get('.docked-window-head-end').text()).toMatch(/tokens$/)
     expect(root.text()).toContain('Loaded into every chat; keep it short.')
-    expect(root.text()).toContain('Trim these with a chat. Nothing changes until you approve.')
+    expect(root.text()).toContain('Trim these with a chat. Ciaobot asks before changing anything.')
   })
 
   it('puts Optimize forward only when a region is at 85% or more', async () => {

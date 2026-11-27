@@ -122,7 +122,7 @@ export const Default: Story = {
     const discuss = canvas.getByRole('button', { name: 'Optimize' })
     // Under the trim line, Optimize is a quiet link; the plain line says nothing changes yet.
     expect(discuss.className).toContain('guide-budget-link')
-    expect(canvas.getByText('Trim these with a chat. Nothing changes until you approve.')).toBeTruthy()
+    expect(canvas.getByText('Trim these with a chat. Ciaobot asks before changing anything.')).toBeTruthy()
     expect(canvas.getByText('Loaded into every chat; keep it short.')).toBeTruthy()
     expect(open.getAttribute('disabled')).toBeNull()
     expect(discuss.getAttribute('disabled')).toBeNull()

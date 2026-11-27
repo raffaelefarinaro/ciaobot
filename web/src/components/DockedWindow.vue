@@ -38,7 +38,7 @@ defineProps<{
   font-size: var(--text-sm);
 }
 
-:global(:root.theme-light) .docked-window {
+:global(:root.theme-light .docked-window) {
   box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
 }
 

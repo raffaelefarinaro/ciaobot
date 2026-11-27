@@ -2,11 +2,12 @@
  * Start the chat that trims the two bounded regions every chat loads
  * (`ciao:memory` and `ciao:profile` in the workspace guide).
  *
- * Shared by Memory's Always loaded window and the care report's "regions full"
- * item: one helper, so both open the same conversation. The prompt is a draft
- * the person sends (startFileDiscussion never auto-sends), the guide is pinned
- * beside it, and nothing is changed until the person approves the trimmed
- * version in that chat.
+ * Called by Memory's Always loaded window (MemoryGuideBudget.vue). Any other
+ * surface that offers to trim the regions should call this too, so they all
+ * open the same conversation. The prompt is a draft the person sends
+ * (startFileDiscussion never auto-sends), the guide is pinned beside it, and the
+ * prompt asks the agent to show the trimmed version and wait for approval
+ * before it changes anything.
  */
 import { startFileDiscussion } from './fileDiscussion'
 import { fetchWorkspaceGuide } from './workspaceGuide'
@@ -24,7 +25,7 @@ export function memoryOptimizeSeed(guidePath: string): string {
     '',
     'Then propose a trimmed version of each region: merge duplicates, drop entries that are expired, stale or can be found elsewhere, move facts that only matter to one project into that project\'s doc, and shorten the wording. Keep every lasting fact I would miss.',
     '',
-    'Show me the before and after and wait for my approval. Only after I agree, apply it with `ciao memory update`, logging each removed or replaced entry in `Workspace/Memory-Consolidations.md` with `by: chat <this chat\'s id>`, as the undo-log rule in the memory guide says. Then run `ciao memory status` again and tell me the new percentages.',
+    'Show me the before and after and wait for my approval. Only after I agree, apply it with `ciao memory update`, logging each removed or replaced entry in `Workspace/Memory-Consolidations.md` in the vault with `by: chat <this chat\'s id>`, as the undo-log rule in the memory guide says. Then run `ciao memory status` again and tell me the new percentages.',
   ].join('\n')
 }
 

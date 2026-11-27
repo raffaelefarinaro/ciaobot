@@ -122,7 +122,7 @@ def test_a_changed_line_is_a_conflict_and_nothing_is_written(tmp_path: Path) -> 
     stale = ul.line_id(PLAIN + " edited")
     with pytest.raises(ul.UnsureError) as caught:
         ul.change_line(tmp_path, "tick", stale)
-    assert caught.value.status == 409
+    assert (caught.value.status, caught.value.code) == (409, "line_changed")
     assert path.read_text(encoding="utf-8") == LIST
 
 
@@ -173,7 +173,7 @@ def test_links_and_oversized_lists_are_refused(tmp_path: Path) -> None:
     for call in (lambda: ul.read_list(vault), lambda: ul.change_line(vault, "remove", ul.line_id(PLAIN))):
         with pytest.raises(ul.UnsureError) as caught:
             call()
-        assert caught.value.status == 409
+        assert (caught.value.status, caught.value.code) == (422, "not_plain_file")
     assert outside.read_text(encoding="utf-8") == PLAIN + "\n"
 
     linked = tmp_path / "linked"
@@ -247,7 +247,7 @@ def test_route_changes_one_line_and_answers_the_list(setup: SimpleNamespace, cap
     assert "- [x] Should I remember" in path.read_text(encoding="utf-8")
     stale = setup.client.post("/api/memory/unsure", json={"workspace": "personal", "op": "tick", "id": ul.line_id(PLAIN)})
     assert stale.status_code == 409
-    assert stale.json() == {"error": "the list changed; reload it"}
+    assert stale.json() == {"error": "the list changed; reload it", "code": "line_changed"}
     assert "Mo now works" not in caplog.text
 
 
@@ -264,3 +264,131 @@ def test_route_takes_no_path_and_rejects_bad_bodies(setup: SimpleNamespace) -> N
     resp = post("/api/memory/unsure", json={"workspace": "personal", "op": "remove", "id": ul.line_id(PLAIN), "path": str(other)})
     assert resp.status_code == 200
     assert other.read_text(encoding="utf-8") == PLAIN + "\n"
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u0085", "\x0b", "\x0c", "\x1c", "\r"])
+def test_only_newlines_end_a_line_for_the_reader_and_the_writer(tmp_path: Path, separator: str) -> None:
+    # A separator inside a line keeps it one line: it can be acted on, it
+    # cannot hide a second item, and a tick lands on its own box only.
+    hidden = f"- [ ] Is this one item?{separator}- [ ] Or a hidden second one? — unsure because test; source: chat-1; 2026-11-27"
+    text = f"# Unsure\n\n{hidden}\n{PLAIN}\n"
+    path = _write(tmp_path, text)
+    items = ul.parse_list(text)
+    assert len(items) == 2
+    assert items[0]["raw"].startswith("- [ ] Is this one item?")
+    body = ul.change_line(tmp_path, "tick", items[0]["id"])
+    after = path.read_bytes().decode("utf-8")
+    assert after == text.replace("- [ ] Is this one item?", "- [x] Is this one item?", 1)
+    assert after.count("- [x]") == 1
+    assert body["counts"] == {"waiting": 1, "ticked": 1}
+
+
+def test_crlf_lines_keep_their_ending(tmp_path: Path) -> None:
+    text = f"# Unsure\r\n\r\n{PLAIN}\r\n{DROP}\r\n"
+    path = _write(tmp_path, "")
+    path.write_bytes(text.encode("utf-8"))
+    ul.change_line(tmp_path, "tick", ul.line_id(PLAIN))
+    assert path.read_bytes().decode("utf-8") == text.replace("- [ ] Should", "- [x] Should", 1)
+
+
+def test_identical_lines_are_told_apart_and_only_one_changes(tmp_path: Path) -> None:
+    text = f"# Unsure\n\n{PLAIN}\n{DROP}\n{PLAIN}\n"
+    path = _write(tmp_path, text)
+    ids = [i["id"] for i in ul.parse_list(text)]
+    assert ids[0] != ids[2]
+    assert ids[0] == ul.line_id(PLAIN, 0) and ids[2] == ul.line_id(PLAIN, 1)
+    ul.change_line(tmp_path, "remove", ids[2])
+    assert path.read_text(encoding="utf-8") == f"# Unsure\n\n{PLAIN}\n{DROP}\n"
+    # The second copy is gone: its id no longer names anything.
+    with pytest.raises(ul.UnsureError):
+        ul.change_line(tmp_path, "tick", ids[2])
+
+
+def test_the_heading_and_prose_can_never_be_named(tmp_path: Path) -> None:
+    path = _write(tmp_path, LIST)
+    for line in ("# Unsure", "Some prose the person wrote.", "- [ ] inside a fence, not an item"):
+        with pytest.raises(ul.UnsureError) as caught:
+            ul.change_line(tmp_path, "remove", ul.line_id(line))
+        assert caught.value.code == "line_changed"
+    assert path.read_text(encoding="utf-8") == LIST
+
+
+def test_kinds_are_lower_case_only() -> None:
+    assert ul.parse_item("- [ ] Observation: Not a kind. — unsure because x")["kind"] == ""
+    assert ul.parse_item("- [ ] observation: A kind. — unsure because x")["kind"] == "observation"
+
+
+def test_a_hard_linked_list_is_refused_and_its_twin_untouched(tmp_path: Path) -> None:
+    path = _write(tmp_path, LIST)
+    twin = tmp_path / "twin.md"
+    os.link(path, twin)
+    with pytest.raises(ul.UnsureError) as caught:
+        ul.change_line(tmp_path, "tick", ul.line_id(PLAIN))
+    assert caught.value.code == "not_plain_file"
+    assert twin.read_text(encoding="utf-8") == LIST
+
+
+def test_route_answers_busy_quickly_while_the_lock_is_held(setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _write(setup.vault, LIST)
+    monkeypatch.setattr(ul.change_line, "__kwdefaults__", {"lock_timeout_s": 0.3})
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with queue_lock(path):
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    held.wait(5)
+    try:
+        started = time.monotonic()
+        resp = setup.client.post("/api/memory/unsure", json={"workspace": "personal", "op": "tick", "id": ul.line_id(PLAIN)})
+        assert resp.status_code == 503
+        assert resp.json()["code"] == "busy"
+        assert time.monotonic() - started < 5
+    finally:
+        release.set()
+        holder.join(5)
+    assert path.read_text(encoding="utf-8") == LIST
+
+
+class _Schedules:
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+    def get_with_revision(self, schedule_id: str) -> tuple[SimpleNamespace, str]:
+        return (SimpleNamespace(schedule_id=schedule_id, last_status=self.status), "r1")
+
+
+def test_route_refuses_writes_while_care_runs(setup: SimpleNamespace) -> None:
+    path = _write(setup.vault, LIST)
+    setup.app.state.schedule_manager = _Schedules("running")
+    resp = setup.client.post("/api/memory/unsure", json={"workspace": "personal", "op": "remove", "id": ul.line_id(PLAIN)})
+    assert resp.status_code == 423
+    assert resp.json()["code"] == "care_running"
+    assert path.read_text(encoding="utf-8") == LIST
+    # Reading is still fine, and a finished run lets the write through.
+    assert setup.client.get("/api/memory/unsure?workspace=personal").status_code == 200
+    setup.app.state.schedule_manager = _Schedules("ok")
+    ok = setup.client.post("/api/memory/unsure", json={"workspace": "personal", "op": "remove", "id": ul.line_id(PLAIN)})
+    assert ok.status_code == 200
+
+
+def test_route_refuses_a_large_declared_body_without_reading_it(setup: SimpleNamespace) -> None:
+    resp = setup.client.post(
+        "/api/memory/unsure", content=b"{}", headers={"content-length": "999999", "content-type": "application/json"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["code"] == "too_large"
+
+
+def test_route_names_a_link_with_its_own_code(setup: SimpleNamespace, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.md"
+    outside.write_text(PLAIN + "\n", encoding="utf-8")
+    (setup.vault / "Workspace").mkdir(parents=True)
+    os.symlink(outside, setup.vault / "Workspace" / "Unsure.md")
+    resp = setup.client.get("/api/memory/unsure?workspace=personal")
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "not_plain_file"

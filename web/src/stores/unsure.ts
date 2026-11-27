@@ -14,7 +14,8 @@ const CARE_SCHEDULE_PREFIX = 'system-memory-curation@'
  * A row's action is `POST /api/memory/unsure` naming the line by its hash; the
  * answer is the list as written, so the counts move with the click. A 409 means
  * the file changed under the page (a care run, an edit in the file): the list is
- * read again and the person is told. The care schedule's own row moving
+ * read again and the person is told; any other refusal shows the engine's own
+ * words. The list is re-read when the page opens and when the tab comes back. The care schedule's own row moving
  * (dispatched, finished) re-reads it too, since a run applies and removes lines.
  */
 export const useUnsureStore = defineStore('unsure', () => {
@@ -82,17 +83,27 @@ export const useUnsureStore = defineStore('unsure', () => {
       }
       return ''
     } catch (cause) {
-      const status = (cause as { status?: number }).status
-      if (status === 409) {
+      const code = ((cause as { payload?: { code?: string } }).payload ?? {}).code
+      if (code === 'line_changed') {
         await load(ws)
         return 'The list changed since this page read it, so nothing was changed. It has been read again.'
       }
+      // Every other refusal (care running, busy, not a plain file) says why in
+      // the engine's own words.
       return cause instanceof Error ? cause.message : String(cause)
     } finally {
       const next = new Set(busy.value)
       next.delete(item.id)
       busy.value = next
     }
+  }
+
+  // Coming back to the app re-reads the list: a care run or an edit in the file
+  // may have changed it while the tab was hidden.
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') void refresh()
+    })
   }
 
   watch(

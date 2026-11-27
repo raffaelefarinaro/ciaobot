@@ -32,6 +32,7 @@ A line with no kind is a fact or change to a note, project doc or region. These 
 - Flatten to one line, present tense. Never put a credential value on it; name the credential.
 - A line written before this format (its text starting with the entry or a run of notes, with no plain first sentence) is still read and acted on as the table says; do not rewrite it only to change its wording.
 - Search the list before adding: do not add a line that is already there.
+- Re-read `Unsure.md` immediately before each edit to it, and change only the lines you mean to: the person ticks, unticks and removes lines from the Memory · Unsure page at any time.
 - The person ticks `[x]` to approve an item and deletes a line to reject it. On the next run (or when asked), act on each ticked line as the table says. Never act on an unticked line. A ticked line you leave in place stays ticked; mention it once per run, not as a new item.
 - An observation line collects distinct chat ids: append each new one to the same line. At three distinct chats write the fact to its profile or people destination and delete the line.
 - A stale note you cannot settle against its sources, a conflict between two sources (quote both), and anything else you doubt belong here.

@@ -165,12 +165,75 @@ describe('MemoryUnsurePanel', () => {
     const a = item('a')
     answer(listOf([a]))
     const wrapper = await mountPanel()
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('the list changed; reload it'), { status: 409 }))
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('the list changed; reload it'), { status: 409, payload: { code: 'line_changed' } }))
     answer(listOf([item('z')]))
     await button(wrapper, 'Approve: Item a?').trigger('click')
     await flushPromises()
     expect(wrapper.get('.mu-notice').text()).toContain('The list changed since this page read it')
     expect(wrapper.findAll('.mu-row-title').map(t => t.text())).toEqual(['Item z?'])
+  })
+
+  it('reads the list again when the page opens on a workspace it already showed', async () => {
+    answer(listOf([item('a')]))
+    const first = await mountPanel()
+    first.unmount()
+    const reads = () => apiGet.mock.calls.filter(([url]) => String(url).startsWith('/api/memory/unsure')).length
+    expect(reads()).toBe(1)
+    answer(listOf([item('a'), item('n')]))
+    const again = await mountPanel()
+    expect(reads()).toBe(2)
+    expect(again.findAll('.mu-row')).toHaveLength(2)
+  })
+
+  it('reads the list again when the tab comes back', async () => {
+    answer(listOf([item('a')]))
+    await mountPanel()
+    answer(listOf([item('a'), item('n')]))
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(document.querySelectorAll('.mu-row')).toHaveLength(2)
+  })
+
+  it('moves focus to the next row after an action, then the previous one, then the heading', async () => {
+    const [a, b] = [item('a'), item('b')]
+    answer(listOf([a, b]))
+    const wrapper = await mountPanel()
+    apiPost.mockResolvedValueOnce(listOf([b]))
+    const reject = button(wrapper, 'Reject: Item a?')
+    ;(reject.element as HTMLElement).focus()
+    await reject.trigger('click')
+    await flushPromises()
+    expect(document.activeElement?.textContent).toContain('Item b?')
+    expect((document.activeElement as HTMLElement).matches('[data-unsure-row]')).toBe(true)
+
+    apiPost.mockResolvedValueOnce(listOf([{ ...b, checked: true }]))
+    await button(wrapper, 'Approve: Item b?').trigger('click')
+    await flushPromises()
+    // Nothing is left waiting: focus lands on a heading, not on the body.
+    expect((document.activeElement as HTMLElement).classList.contains('mu-group-title')).toBe(true)
+  })
+
+  it('while care runs, Approve, Reject and Undo wait, and a refusal shows the engine\'s words', async () => {
+    answer(listOf([item('a'), item('c', { checked: true }), item('r', { kind: 'repo' })]))
+    const wrapper = await mountPanel()
+    const care = useCareReportStore()
+    care.report = { ...(care.report as object), running: { since: '', step: 'unsure', index: 1, total: 6 } } as never
+    await flushPromises()
+    expect(wrapper.text()).toContain('Workspace care is running and may change this list.')
+    expect(button(wrapper, 'Approve: Item a?').attributes('disabled')).toBeDefined()
+    expect(button(wrapper, 'Reject: Item a?').attributes('disabled')).toBeDefined()
+    expect(button(wrapper, 'Undo approval: Item c?').attributes('disabled')).toBeDefined()
+    // Discuss, and Approve that only opens a chat, still work.
+    expect(button(wrapper, 'Discuss: Item a?').attributes('disabled')).toBeUndefined()
+    expect(button(wrapper, 'Approve in a chat: Item r?').attributes('disabled')).toBeUndefined()
+
+    care.report = { ...(care.report as object), running: null } as never
+    await flushPromises()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('Workspace care is running and may be editing the list; try again when it finishes'), { status: 423, payload: { code: 'care_running' } }))
+    await button(wrapper, 'Approve: Item a?').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.mu-notice').text()).toBe('Workspace care is running and may be editing the list; try again when it finishes')
   })
 
   it('Apply now runs care through its run-now path', async () => {

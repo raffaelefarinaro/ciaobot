@@ -1,6 +1,6 @@
 <template>
-  <section class="mu" aria-labelledby="mu-title" :aria-busy="showSkeleton">
-    <h2 id="mu-title" class="sr-only">Unsure</h2>
+  <section ref="root" class="mu" aria-labelledby="mu-title" :aria-busy="showSkeleton">
+    <h2 id="mu-title" class="sr-only" tabindex="-1">Unsure</h2>
 
     <!-- First read: three quiet placeholder rows, so the list arrives in place. -->
     <ul v-if="showSkeleton" class="mu-skeleton" aria-hidden="true">
@@ -22,13 +22,16 @@
 
     <template v-else>
       <p class="mu-notice" role="status">{{ notice }}</p>
+      <p v-if="careRunning" class="mu-care-note">
+        Workspace care is running and may change this list. Approve, Reject and Undo wait until it finishes.
+      </p>
 
       <template v-for="group in groups" :key="group.key">
         <div v-if="group.items.length" class="mu-group">
-          <h3 :id="`mu-group-${group.key}`" class="mu-group-title">
+          <h3 :id="`mu-group-${group.key}`" class="mu-group-title" tabindex="-1" :data-group="group.key">
             {{ group.label }} <span class="mu-group-count">{{ group.items.length }}</span>
           </h3>
-          <ul class="mu-list" :aria-labelledby="`mu-group-${group.key}`" @keydown="roam">
+          <ul class="mu-list" :aria-labelledby="`mu-group-${group.key}`" :data-group="group.key" @keydown="roam">
             <li
               v-for="entry in group.items"
               :key="entry.key"
@@ -84,7 +87,7 @@
                     v-if="!entry.item.malformed"
                     type="button"
                     class="mu-action"
-                    :disabled="unsure.busy.has(entry.item.id)"
+                    :disabled="locked(entry.item)"
                     :aria-label="`Undo approval: ${entry.item.title}`"
                     @click="act('untick', entry.item)"
                   >Undo</button>
@@ -100,7 +103,7 @@
                   <button
                     type="button"
                     class="mu-action mu-action--approve"
-                    :disabled="unsure.busy.has(entry.item.id)"
+                    :disabled="appliesUnattended(entry.item) && locked(entry.item)"
                     :aria-label="appliesUnattended(entry.item) ? `Approve: ${entry.item.title}` : `Approve in a chat: ${entry.item.title}`"
                     :title="appliesUnattended(entry.item) ? 'The next care run applies it' : 'Opens a chat, because this one cannot be applied unattended'"
                     @click="approve(entry.item)"
@@ -108,7 +111,7 @@
                   <button
                     type="button"
                     class="mu-action"
-                    :disabled="unsure.busy.has(entry.item.id)"
+                    :disabled="locked(entry.item)"
                     :aria-label="`Reject: ${entry.item.title}`"
                     title="Remove this line from the list"
                     @click="act('remove', entry.item)"
@@ -137,7 +140,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useUnsureStore } from '../stores/unsure'
@@ -160,15 +163,27 @@ const fileViewer = useFileViewerStore()
 const unsure = useUnsureStore()
 const care = useCareReportStore()
 
+const mountedOnWorkspace = unsure.workspace === store.activeWorkspace
 watch(() => store.activeWorkspace, ws => { unsure.show(ws); care.show(ws) }, { immediate: true })
 let releaseCare: () => void = () => {}
-onMounted(() => { releaseCare = care.attach() })
+onMounted(() => {
+  releaseCare = care.attach()
+  // Opening the page always reads the list again: `show` keeps what it has
+  // for the same workspace, and the file may have changed since.
+  if (mountedOnWorkspace) void unsure.refresh()
+})
 onBeforeUnmount(() => releaseCare())
 
 const list = computed(() => (unsure.list && unsure.list.workspace === store.activeWorkspace ? unsure.list : null))
 const items = computed(() => list.value?.items ?? [])
 const showSkeleton = computed(() => !list.value && !unsure.error)
 const careRunning = computed(() => !!care.report?.running)
+const root = ref<HTMLElement | null>(null)
+
+/** A write is in flight for this line, or care is running and may be editing the file. */
+function locked(item: UnsureItem): boolean {
+  return unsure.busy.has(item.id) || careRunning.value
+}
 
 const groups = computed(() => {
   const rows = items.value.map((item, index) => ({ item, key: `${item.id}-${index}`, titleId: `mu-t-${item.id}-${index}` }))
@@ -198,9 +213,35 @@ function subTitle(item: UnsureItem): string {
   return [item.reason && `Unsure because ${plain(item.reason)}`, item.source && `source: ${item.source}`, item.date].filter(Boolean).join('; ')
 }
 
+/** Where the acted-on row was: its group and its place in it. */
+function placeOf(item: UnsureItem): { group: string; index: number } {
+  const group = item.checked ? 'approved' : 'waiting'
+  const rows = groups.value.find(g => g.key === group)?.items ?? []
+  return { group, index: rows.findIndex(r => r.item.id === item.id) }
+}
+
+/**
+ * The focused button goes away with its row's state, so focus moves on: to the
+ * row now in the same place (the next one), else the one before, else the
+ * group's heading, else the other group's, else the page's.
+ */
+async function restoreFocus(place: { group: string; index: number }): Promise<void> {
+  await nextTick()
+  const el = root.value
+  if (!el) return
+  const rows = Array.from(el.querySelectorAll<HTMLElement>(`.mu-list[data-group="${place.group}"] [data-unsure-row]`))
+  const target = rows[Math.min(Math.max(place.index, 0), rows.length - 1)]
+    ?? el.querySelector<HTMLElement>(`.mu-group-title[data-group="${place.group}"]`)
+    ?? el.querySelector<HTMLElement>('.mu-group-title')
+    ?? el.querySelector<HTMLElement>('#mu-title')
+  target?.focus()
+}
+
 async function act(op: UnsureOp, item: UnsureItem): Promise<void> {
   notice.value = ''
+  const place = placeOf(item)
   const problem = await unsure.act(op, item)
+  await restoreFocus(place)
   if (problem) { notice.value = problem; return }
   notice.value = op === 'tick'
     ? `Approved “${item.title}”. The next care run applies it.`
@@ -282,7 +323,9 @@ async function discussAll(): Promise<void> {
   line-height: 1.45;
 }
 
+.mu-care-note { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.45; }
 .mu-group { display: flex; flex-direction: column; }
+.mu-group-title:focus-visible, #mu-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
 .mu-group + .mu-group { margin-top: var(--space-4); }
 .mu-group-title {
   display: flex;

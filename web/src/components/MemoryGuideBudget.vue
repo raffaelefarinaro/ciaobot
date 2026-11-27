@@ -58,7 +58,7 @@
     </template>
     <p v-else-if="!guideLoading" class="guide-budget-note">No guide file found for this workspace.</p>
     <div class="guide-budget-actions" :class="{ 'guide-budget-actions--trim': needsTrim }">
-      <p class="guide-budget-hint">Trim these with a chat. Nothing changes until you approve.</p>
+      <p class="guide-budget-hint">Trim these with a chat. Ciaobot asks before changing anything.</p>
       <div class="guide-budget-buttons">
         <button
           type="button"
