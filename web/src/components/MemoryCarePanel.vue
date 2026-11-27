@@ -3,9 +3,6 @@
     <button v-if="proposalPath" type="button" class="mc-back" @click="closeProposal">
       <span aria-hidden="true">‹</span> Workspace care
     </button>
-    <RouterLink v-else class="mc-back" :to="memorySectionPath('map')">
-      <span aria-hidden="true">‹</span> Memory
-    </RouterLink>
     <h2 id="mc-title" ref="titleEl" class="mc-title" tabindex="-1">{{ proposalPath ? 'Review proposal' : 'Workspace care' }}</h2>
     <p v-if="!proposalPath" class="mc-lede">What the daily run left for you, and how it went. Read from Workspace/Care-Report.md.</p>
 
@@ -123,38 +120,18 @@
           <li v-for="(note, i) in report.notes" :key="i">{{ note }}</li>
         </ul>
       </details>
-
-      <div class="mc-foot">
-        <span class="mc-foot-note">{{ weeklyWords }}</span>
-        <span class="mc-foot-actions">
-          <button
-            v-if="report.schedule"
-            type="button"
-            class="mc-link"
-            :disabled="care.starting || !!report.running"
-            @click="runAgain"
-          >{{ care.starting ? 'Starting…' : report.running ? 'Running…' : report.status === 'missing' ? 'Run care now' : 'Run care again' }}</button>
-          <button
-            type="button"
-            class="mc-link"
-            :disabled="report.status === 'missing'"
-            :title="`Open ${report.report_path}`"
-            @click="openReport"
-          >Open Care-Report.md</button>
-        </span>
-      </div>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import AppIcon from './AppIcon.vue'
 import CareGlyph from './CareGlyph.vue'
 import CareProposalReview from './CareProposalReview.vue'
 import {
-  careFixSeed, careGlyph, careNeedChatTitle, careNeedFixSeed, careState, careSummaryMeta, careSummaryTitle, dayWords, needAction,
+  careFixSeed, careGlyph, careNeedChatTitle, careNeedFixSeed, careState, careSummaryMeta, careSummaryTitle, needAction,
   needActionLabel, openNeeds, stepCanFix, stepGlyph, stepLine, stepName, stepsCountWords, stepsOpenByDefault,
   stepWord, type CareNeed, type CareStep,
 } from '../lib/careReport'
@@ -206,10 +183,6 @@ const calmWords = computed(() => {
   }
 })
 const stepsCount = computed(() => (report.value ? stepsCountWords(report.value) : ''))
-const weeklyWords = computed(() => {
-  const day = report.value ? dayWords(report.value.weekly_done) : ''
-  return day ? `Weekly checks last done ${day}` : 'Weekly checks not done yet'
-})
 
 const retryWords = computed(() => (report.value?.weekly_retry ?? [])
   .map(r => `${stepName(r.id)} (run ${r.runs} of 3)`).join(', '))
@@ -285,16 +258,6 @@ async function openChecked(path: string): Promise<void> {
   } catch {
     status.value = 'That file cannot be opened right now.'
   }
-}
-
-async function runAgain(): Promise<void> {
-  status.value = ''
-  const { message } = await care.runAgain()
-  status.value = message
-}
-
-function openReport(): void {
-  if (report.value) void fileViewer.open(report.value.report_path)
 }
 
 async function act(item: CareNeed): Promise<void> {
@@ -485,16 +448,6 @@ button.mc-back { padding: 0; border: 0; background: none; cursor: pointer; font:
 }
 .mc-step-state { color: var(--fg3); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.9; }
 
-.mc-foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2) var(--space-4);
-  padding-top: var(--space-2);
-}
-.mc-foot-note { color: var(--fg3); font-size: var(--text-sm); }
-.mc-foot-actions { display: flex; flex-wrap: wrap; gap: var(--space-4); }
 .mc-link {
   min-height: var(--touch);
   padding: 0;

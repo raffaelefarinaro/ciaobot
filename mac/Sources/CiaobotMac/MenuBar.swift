@@ -251,6 +251,15 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// Only running while the menu is open. A closed menu must run neither.
     private let glyphTicker: MenuTicking
     private let menuRefreshTicker: MenuTicking
+    /// The menu-bar mark's working loop (C → ring → C). Its frames, ticker and
+    /// monotonic clock are injected so a test drives it by hand.
+    private let markImages: TrayMarkImageProviding
+    private let markTicker: MenuTicking
+    private let uptime: () -> TimeInterval
+    /// Present while the status item shows the bundled mark; a missing mark
+    /// leaves the text fallback, which does not animate.
+    private var markAnimator: TrayMarkAnimator?
+    private var reduceMotionObserver: NSObjectProtocol?
     private var subscription: AnyCancellable?
     private var chatStateSubscription: AnyCancellable?
     private var activityStateSubscription: AnyCancellable?
@@ -315,7 +324,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         },
         glyphRenderer: MenuGlyphRendering = WorkingGlyphRenderer(),
         glyphTicker: MenuTicking = RunLoopMenuTicker(),
-        menuRefreshTicker: MenuTicking = RunLoopMenuTicker()
+        menuRefreshTicker: MenuTicking = RunLoopMenuTicker(),
+        markImages: TrayMarkImageProviding = TrayMarkImageCache(),
+        markTicker: MenuTicking = RunLoopMenuTicker(),
+        uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
         self.status = status
         self.statusItemFactory = statusItemFactory
@@ -346,6 +358,9 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.glyphRenderer = glyphRenderer
         self.glyphTicker = glyphTicker
         self.menuRefreshTicker = menuRefreshTicker
+        self.markImages = markImages
+        self.markTicker = markTicker
+        self.uptime = uptime
         super.init()
     }
 
@@ -371,6 +386,22 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             template.size = AppAssets.menuBarImagePointSize
             item.image = template
             item.title = ""
+            markAnimator = TrayMarkAnimator(
+                idleImage: template,
+                images: markImages,
+                ticker: markTicker,
+                clock: uptime,
+                reduceMotion: reduceMotion,
+                apply: { [weak item] image in item?.image = image }
+            )
+            // Reduce Motion can change while the app runs; the mark follows it.
+            reduceMotionObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.markAnimator?.reduceMotionChanged() }
+            }
         } else {
             item.image = nil
             item.title = Self.fallbackTitle
@@ -424,10 +455,17 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         activity?.start()
         fleet?.start()
         updateToolTip()
+        updateWorkingMark()
     }
 
     func stop() {
         stopMenuTickers()
+        markAnimator?.stop()
+        markAnimator = nil
+        if let reduceMotionObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(reduceMotionObserver)
+        }
+        reduceMotionObserver = nil
         engineStateSubscription?.cancel()
         engineStateSubscription = nil
         notificationStreamSubscription?.cancel()
@@ -654,6 +692,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         }
         if !keepsBadge { clearBadge() }
         updateToolTip()
+        updateWorkingMark()
         if menuIsOpen {
             // A connection change invalidates every chat row on screen. Close
             // the tracking session so the deferred rebuild cannot leave the
@@ -675,6 +714,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
 
     private func chatStateChanged() {
         updateToolTip()
+        updateWorkingMark()
         updateBadge()
         if menuIsOpen {
             needsChatRebuild = true
@@ -750,11 +790,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         if let count = snapshot.attentionCount, count > 0 {
             parts.append(Self.attentionTitle(count))
         }
-        let workingCount = TrayChatList.sections(
-            snapshot: snapshot,
-            activity: activity?.state,
-            now: now()
-        ).flatMap(\.rows).filter(\.working).count
+        let workingCount = workingCount(snapshot, activity: activity?.state)
         if workingCount > 0 {
             parts.append(workingCount == 1 ? "1 working" : "\(workingCount) working")
         }
@@ -779,11 +815,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             if let count = snapshot.attentionCount, count > 0 {
                 parts.append(prefix + Self.attentionTitle(count))
             }
-            let workingCount = TrayChatList.sections(
-                snapshot: snapshot,
-                activity: feed.activity,
-                now: now()
-            ).flatMap(\.rows).filter(\.working).count
+            let workingCount = workingCount(snapshot, activity: feed.activity)
             if workingCount > 0 {
                 parts.append(prefix + (workingCount == 1 ? "1 working" : "\(workingCount) working"))
             }
@@ -791,6 +823,34 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         statusItem?.toolTip = parts.isEmpty
             ? Self.toolTip
             : "\(Self.toolTip) — \(parts.joined(separator: ", "))"
+    }
+
+    /// The chats the tray lists as working: the tooltip's "N working" and the
+    /// animated mark read this one predicate.
+    private func workingCount(_ snapshot: ChatListSnapshot, activity: ChatActivityState?) -> Int {
+        TrayChatList.sections(snapshot: snapshot, activity: activity, now: now())
+            .flatMap(\.rows)
+            .filter(\.working)
+            .count
+    }
+
+    /// True while a connected host's tray list has a working chat, over every
+    /// loaded host when the fleet feeds the tray.
+    var anyChatWorking: Bool {
+        guard status.isConnected else { return false }
+        if let fleet {
+            return fleet.feeds.contains { feed in
+                guard case .loaded(let snapshot) = feed.list else { return false }
+                return workingCount(snapshot, activity: feed.activity) > 0
+            }
+        }
+        guard let chatList, case .loaded(let snapshot) = displayState(chatList.state) else { return false }
+        return workingCount(snapshot, activity: activity?.state) > 0
+    }
+
+    /// Plays the mark's C → ring loop while something works (see `TrayMarkAnimator`).
+    private func updateWorkingMark() {
+        markAnimator?.setWorking(anyChatWorking)
     }
 
     private func rebuildMenu() {
@@ -862,6 +922,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
 
         // The rebuilt rows and the status item read the same settled snapshot.
         updateToolTip()
+        updateWorkingMark()
         updateBadge()
     }
 
