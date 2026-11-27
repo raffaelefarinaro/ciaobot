@@ -9,7 +9,7 @@ Take at most 5 notes, oldest first. This step may use about 40 tool calls. For e
 1. Read it, then run `ciao note related <path>`. A disagreeing related note is evidence, and a related note you actually read counts as checked. Reading the note alone is not checking it.
 2. Judge each fact against real sources (the related notes, the files and projects it names). Fix what the sources plainly contradict, citing the source, directly in the note. Re-read the note after every write before judging a second fact.
 3. Add `[verified: <today>]` to a bullet only after checking that exact sentence. Never stamp on save or merge, and leave `updated:` alone.
-4. Anything doubtful, and any conflict between two sources (quote both), goes on `Workspace/Unsure.md` (skip a line already there). New advice that supersedes a stored line replaces it; the note keeps one instruction with its source and date.
+4. Anything doubtful, and any conflict between two sources (quote both after the first sentence), goes on `Workspace/Unsure.md` as one line in the format of `unsure-and-proposals.md`, its first sentence a plain question (skip a line already there). New advice that supersedes a stored line replaces it; the note keeps one instruction with its source and date.
 5. Never retire or delete a note: write a `note-retire` proposal file (`unsure-and-proposals.md` in this folder) and run `ciao proposal-check` on it.
 
 ## Done when

@@ -14,7 +14,7 @@ Consolidate each region at or above ~85% (or over its cap). Consolidation rewrit
 - Move project-scoped entries out to their owning project's canonical doc (move, do not delete).
 - Keep or add the trailing learned-at stamp `[YYYY-MM-DD]` on entries you rewrite (today's date for a merged entry).
 
-Run `ciao memory status` after every region write. When a removal needs judgment you cannot make confidently, keep the entry and add a line to `Workspace/Unsure.md` (skip one already there): `- [ ] drop <region>: "<entry text>" — unsure because <reason>; source: care run; <YYYY-MM-DD>`.
+Run `ciao memory status` after every region write. When a removal needs judgment you cannot make confidently, keep the entry and add a line to `Workspace/Unsure.md` (skip one already there): `- [ ] drop <region>: <plain question, e.g. Remove the note that … from what every chat loads?> "<entry text>" — unsure because <reason>; source: care run; <YYYY-MM-DD>` (the line format is in `unsure-and-proposals.md`).
 
 The cap is advisory: nothing refuses a write, and a durable fact is never worth dropping to fit it. If a region stays over because every entry is high-signal, say so as a `needs you` item: leave it over the cap, or ask an attended chat to consolidate further.
 

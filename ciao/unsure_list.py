@@ -233,13 +233,14 @@ def parse_item(line: str) -> dict[str, Any]:
     parts = _TAIL.split(body, maxsplit=1)
     head = parts[0].strip()
     if len(parts) == 2:
+        # Read from the end: the date, then the source; a reason may hold "; " itself.
         fields = [f.strip() for f in parts[1].split(";")]
-        item["reason"] = re.sub(r"^(?:unsure|removed) because\s+", "", fields[0], flags=re.IGNORECASE)
-        for field in fields[1:]:
-            if field.lower().startswith("source:"):
-                item["source"] = field.split(":", 1)[1].strip()
-            elif _DATE.match(field):
-                item["date"] = field
+        if len(fields) > 1 and _DATE.match(fields[-1]):
+            item["date"] = fields.pop()
+        if len(fields) > 1 and re.match(r"^sources?:", fields[-1], re.IGNORECASE):
+            item["source"] = fields.pop().split(":", 1)[1].strip()
+        reason = "; ".join(fields)
+        item["reason"] = re.sub(r"^(?:unsure|removed) because\s+", "", reason, flags=re.IGNORECASE)
     for kind, pattern in _KINDS:
         kind_match = pattern.match(head)
         if kind_match is not None:

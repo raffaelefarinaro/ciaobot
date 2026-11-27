@@ -5,6 +5,7 @@ import type { MemoryGraphEntryCoverage } from '../stores/memoryMap'
 import { useMemoryMapStore } from '../stores/memoryMap'
 import { useProjectStore } from '../stores/projects'
 import type { FixtureRoute } from './fixtureBoundary'
+import { UNSURE_FIXTURE_ITEMS, unsureFixtureList } from './unsureFixture'
 import { mountConnected, type ConnectedFixture } from './mountConnected'
 
 /**
@@ -223,24 +224,57 @@ const workspaceGuideRoute: FixtureRoute = {
   }),
 }
 
-/** The Unsure list the section reads from the vault, and the guide its rail reads. */
-export const unsureListBody = [
-  '# Unsure',
-  '',
-  '- [ ] memory: Storybook prefers short briefs — unsure because it was said once; 2026-11-01',
-  '- [x] people: Storybook colleague works on the project — source: storybook; 2026-11-02',
-  '',
-].join('\n')
+export type UnsureMode = 'loaded' | 'empty' | 'error' | 'held' | 'many'
 
-export function memoryPageRoutes(): FixtureRoute[] {
+/** The Unsure list in each mode: the thirteen-line list, none, or sixty lines. */
+function unsureBody(mode: UnsureMode) {
+  if (mode === 'empty') return { ...unsureFixtureList(mapWorkspace, []), found: false }
+  if (mode === 'many') {
+    const many = Array.from({ length: 60 }, (_, n) => {
+      const base = UNSURE_FIXTURE_ITEMS[n % UNSURE_FIXTURE_ITEMS.length]
+      return { ...base, id: (n.toString(16) + base.id).slice(0, 16), checked: false }
+    })
+    return unsureFixtureList(mapWorkspace, many)
+  }
+  return unsureFixtureList(mapWorkspace)
+}
+
+/**
+ * Memory · Unsure's reads and its one write: the list, the care report the
+ * page reads for Apply now (care never ran here), and the row action, which
+ * answers the list with its first line approved.
+ */
+export function unsureRoutes(mode: UnsureMode = 'loaded'): FixtureRoute[] {
+  const [first, ...rest] = UNSURE_FIXTURE_ITEMS
   return [
-    workspaceGuideRoute,
     {
       method: 'GET',
-      path: `/api/workspace-file?exact=1&path=${encodeURIComponent(`memory-vault/${mapWorkspace}/Workspace/Unsure.md`)}`,
-      respond: () => new Response(unsureListBody, { status: 200, headers: { 'Content-Type': 'text/plain' } }),
+      path: `/api/memory/unsure?workspace=${mapWorkspace}`,
+      respond: () => mode === 'held' ? held()
+        : mode === 'error' ? response({ error: 'Synthetic Unsure read failure' }, 503)
+          : response(unsureBody(mode)),
+    },
+    {
+      method: 'POST',
+      path: '/api/memory/unsure',
+      respond: () => response(unsureFixtureList(mapWorkspace, [{ ...first, checked: true, id: 'f'.repeat(16) }, ...rest])),
+    },
+    {
+      method: 'GET',
+      path: `/api/care-report?workspace=${mapWorkspace}`,
+      respond: () => response({
+        status: 'missing', modified_at: '', updated: '', weekly_done: '', weekly_retry: [], interrupted_ids: [],
+        nothing_due: false, malformed: false, steps: [], needs_you: [], counts: { total: 0, done: 0, blocked: 0, open: 0 },
+        workspace: mapWorkspace, report_path: `memory-vault/${mapWorkspace}/Workspace/Care-Report.md`,
+        unsure_path: `memory-vault/${mapWorkspace}/Workspace/Unsure.md`, schedule: null, running: null,
+      }),
     },
   ]
+}
+
+/** The Memory pages' reads: the guide the Always loaded window reads, and Unsure's. */
+export function memoryPageRoutes(unsure: UnsureMode = 'loaded'): FixtureRoute[] {
+  return [workspaceGuideRoute, ...unsureRoutes(unsure)]
 }
 
 const noteFileBody = (title: string): string =>
@@ -263,10 +297,10 @@ const markdownPathsRoute: FixtureRoute = {
 }
 
 /** The exact declared reads and writes for one MemoryMapView story. */
-export function mapRoutes(options: { graph: GraphMode; dense?: boolean; notes?: string[] }): FixtureRoute[] {
+export function mapRoutes(options: { graph: GraphMode; dense?: boolean; notes?: string[]; unsure?: UnsureMode }): FixtureRoute[] {
   const routes = [
     graphRoute(options.graph, (options.dense ? denseSyntheticVault : syntheticVault)()),
-    ...memoryPageRoutes(),
+    ...memoryPageRoutes(options.unsure),
   ]
   for (const id of options.notes ?? []) routes.push(noteFileRoute(id))
   routes.push(markdownPathsRoute)

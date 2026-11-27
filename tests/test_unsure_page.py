@@ -74,6 +74,17 @@ def test_parser_reads_kinds_titles_reasons_sources_and_dates() -> None:
     assert items[6]["qualifier"] == "memory/stale-days"
 
 
+def test_parser_keeps_a_reason_that_holds_semicolons_and_reads_plural_sources() -> None:
+    line = (
+        "- [ ] Did the summary change the decision? — unsure because the note records one default; "
+        "the later review reports no new decision; sources: chat-a and chat-b; 2026-11-27"
+    )
+    item = ul.parse_item(line)
+    assert item["reason"] == "the note records one default; the later review reports no new decision"
+    assert item["source"] == "chat-a and chat-b"
+    assert item["date"] == "2026-11-27"
+
+
 def test_parser_shows_malformed_lines_and_skips_fenced_code() -> None:
     items = ul.parse_list(LIST)
     assert not any("inside a fence" in i["raw"] for i in items)

@@ -7,7 +7,7 @@
 ## Procedure
 Review the guide file's body (AGENTS.md), outside the fenced `ciao:memory` and `ciao:profile` regions, for the things `memory-audit` cannot judge on shape alone. The body is the workspace's standing contract with every session, so a wrong claim there is asserted before the operator has said a word.
 
-This step is review-only. You do not edit the guide body, because a change to what every session loads needs a person's approval. Write each finding that proposes a change as a `guide-edit` proposal file (see `unsure-and-proposals.md`), checked with `ciao proposal-check`; a finding you are only unsure about is a line on `Workspace/Unsure.md`. Report both as `needs you` items.
+This step is review-only. You do not edit the guide body, because a change to what every session loads needs a person's approval. Write each finding that proposes a change as a `guide-edit` proposal file (see `unsure-and-proposals.md`), checked with `ciao proposal-check`; a finding you are only unsure about is a line on `Workspace/Unsure.md` in the format of `unsure-and-proposals.md`, its first sentence saying in plain words what you would change. Report both as `needs you` items.
 
 Look for:
 

@@ -1,16 +1,22 @@
 <template>
   <!-- The workspace guide (AGENTS.md; CLAUDE.md pre-migration) is the one file
        every chat loads, and the vault graph does not show it because it is not
-       a vault note. Its bounded regions budget every session, so their use sits
-       on the Memory page's rail rather than being hidden in the sidebar. -->
-  <section class="rail-section guide-budget" :class="{ 'guide-budget--over': guideOverCap }" aria-labelledby="guide-budget-title">
-    <h2 id="guide-budget-title" class="rail-title">Always loaded</h2>
-    <p class="guide-card-title">
-      <span class="guide-budget-path">{{ guidePathLabel }}</span>
-      <span v-if="guideOverCap" class="guide-budget-flag" title="A bounded region is over its advisory cap">over cap</span>
-      <span v-else-if="guideLoading" class="guide-budget-muted">loading…</span>
-    </p>
-    <p v-if="guideError" class="rail-note guide-budget-error">{{ guideError }}</p>
+       a vault note. Its two bounded regions budget every session, so their use
+       sits in a docked window on the Memory rail, in Chat details' vocabulary. -->
+  <DockedWindow
+    class="guide-budget"
+    :class="{ 'guide-budget--over': guideOverCap }"
+    title="Always loaded"
+    title-id="guide-budget-title"
+  >
+    <template v-if="guideLoading" #head>
+      <span class="guide-budget-muted">loading…</span>
+    </template>
+    <template v-else-if="guideStats" #head>
+      <span :title="`The whole guide, sent with every chat: ${(guideStats?.totalTokens ?? 0).toLocaleString()} tokens`">{{ formatTokens(guideStats?.totalTokens ?? 0) }} tokens</span>
+    </template>
+    <p class="guide-budget-lede">Loaded into every chat; keep it short.</p>
+    <p v-if="guideError" class="guide-budget-note guide-budget-error" role="alert">{{ guideError }}</p>
     <template v-else-if="guideStats">
       <div class="guide-card-regions">
         <div v-for="r in guideStats.regions" :key="r.key" class="guide-region">
@@ -24,7 +30,7 @@
           </div>
           <div
             class="guide-region-bar"
-            :class="{ 'guide-region-bar--warn': r.overCap, 'guide-region-bar--high': !r.overCap && r.pct >= 80 }"
+            :class="{ 'guide-region-bar--warn': r.overCap, 'guide-region-bar--high': !r.overCap && r.pct >= TRIM_AT_PCT }"
             role="meter"
             :aria-label="`${r.label}: ${r.pct}% of its cap`"
             aria-valuemin="0"
@@ -34,31 +40,49 @@
             <span :style="{ width: Math.min(100, r.pct) + '%' }"></span>
           </div>
           <p class="guide-region-meta">
-            {{ r.entryCount }} {{ r.entryCount === 1 ? 'entry' : 'entries' }} · {{ r.pct }}%
+            <span class="guide-region-pct">{{ r.pct }}%</span>
+            · {{ r.entryCount }} {{ r.entryCount === 1 ? 'entry' : 'entries' }}
+            <span v-if="r.overCap" class="guide-region-meta--warn"> · over its cap</span>
             <span v-if="r.expiredCount"> · {{ r.expiredCount }} expired</span>
             <span v-if="r.malformedCount" class="guide-region-meta--warn"> · {{ r.malformedCount }} malformed tag</span>
           </p>
         </div>
       </div>
-      <p class="rail-note">
-        Region bars count entry text inside the markers; ≈ {{ guideStats.totalTokens.toLocaleString() }} {{ guideStats.totalTokens === 1 ? 'token' : 'tokens' }} is the whole file sent with every chat, including markers, headings, and separators.
-      </p>
+      <div class="guide-card-title">
+        <span class="guide-budget-path" :title="guidePathLabel">{{ guidePathLabel }}</span>
+        <span
+          class="guide-budget-tokens"
+          :title="'The bars count entry text inside the markers; this is the whole file, markers and headings included'"
+        >≈ {{ guideStats.totalTokens.toLocaleString() }} {{ guideStats.totalTokens === 1 ? 'token' : 'tokens' }}</span>
+      </div>
     </template>
-    <p v-else-if="!guideLoading" class="rail-note">No guide file found for this workspace.</p>
-    <div class="guide-budget-actions">
-      <button type="button" class="guide-budget-link" :disabled="guideLoading || !!guideError || !guideResolvedPath" :title="`Open ${guidePathLabel}`" @click="openGuideFile">Open</button>
-      <span aria-hidden="true">·</span>
-      <button type="button" class="guide-budget-link" :disabled="!canDiscussGuide" title="Start a chat about this guide" @click="discussGuide">Discuss</button>
+    <p v-else-if="!guideLoading" class="guide-budget-note">No guide file found for this workspace.</p>
+    <div class="guide-budget-actions" :class="{ 'guide-budget-actions--trim': needsTrim }">
+      <p class="guide-budget-hint">Trim these with a chat. Nothing changes until you approve.</p>
+      <div class="guide-budget-buttons">
+        <button
+          type="button"
+          :class="needsTrim ? 'btn-small guide-budget-optimize' : 'guide-budget-link'"
+          :disabled="!canOptimize"
+          title="Start a chat that proposes a shorter version for you to approve"
+          @click="optimize"
+        >Optimize</button>
+        <button type="button" class="guide-budget-link" :disabled="guideLoading || !!guideError || !guideResolvedPath" :title="`Open ${guidePathLabel}`" @click="openGuideFile">Open</button>
+      </div>
     </div>
-  </section>
+  </DockedWindow>
 </template>
 
 <script setup lang="ts">
-import { fetchWorkspaceGuide, tokensFor } from '../lib/workspaceGuide'
+import { fetchWorkspaceGuide, formatTokens, tokensFor } from '../lib/workspaceGuide'
 import { computed, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
-import { startFileDiscussion } from '../lib/fileDiscussion'
+import { startMemoryOptimizeChat } from '../lib/memoryOptimize'
+import DockedWindow from './DockedWindow.vue'
+
+/** At or above this share of its cap a region asks to be trimmed. */
+const TRIM_AT_PCT = 85
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
@@ -133,7 +157,9 @@ const guideStats = computed(() => {
   return { regions, totalTokens: tokensFor(content.length) }
 })
 const guideOverCap = computed(() => !!guideStats.value?.regions.some(r => r.overCap))
-const canDiscussGuide = computed(() => !!guideResolvedPath.value && !guideLoading.value && !guideError.value)
+/** A region at or over the trim line puts Optimize forward; otherwise it stays quiet. */
+const needsTrim = computed(() => !!guideStats.value?.regions.some(r => r.pct >= TRIM_AT_PCT))
+const canOptimize = computed(() => !!guideResolvedPath.value && !guideLoading.value && !guideError.value)
 let guideFetchSeq = 0
 async function fetchGuide(): Promise<void> {
   const seq = ++guideFetchSeq
@@ -153,63 +179,66 @@ function openGuideFile(): void {
   if (!guideResolvedPath.value) return
   void fileViewer.open(guideResolvedPath.value)
 }
-async function discussGuide(): Promise<void> {
+async function optimize(): Promise<void> {
   if (!guideResolvedPath.value) return
-  const path = guideResolvedPath.value
-  // Reuse the generic file-discuss flow (creates a chat and pins the guide).
-  await startFileDiscussion(store, { path, seed: `Let's review the workspace guide \`${path}\`. Help me audit it — what should we trim, clarify, or promote from the bounded regions?` })
+  await startMemoryOptimizeChat(store, { guidePath: guideResolvedPath.value })
 }
 </script>
 
 <style scoped>
-.guide-card-title {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  margin: 0 0 var(--space-1);
-  min-width: 0;
+.guide-budget-lede {
+  margin: 10px 0 12px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
 }
 
-.guide-budget-path {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.guide-budget-flag {
-  color: var(--warning);
-  font-size: var(--text-xs);
-  font-weight: 600;
+.guide-budget-note {
+  margin: 0 0 12px;
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 
 .guide-budget-muted {
   color: var(--fg3);
-  font-size: var(--text-xs);
 }
 
 .guide-budget-error {
   color: var(--warning);
 }
 
+/* Hairline rows, like At a glance and Chat details: no boxes inside the window. */
 .guide-card-regions {
-  display: grid;
-  gap: var(--space-3);
-  margin-top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+}
+
+.guide-region {
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.guide-region:first-child {
+  border-top: 1px solid var(--border);
 }
 
 .guide-region-head {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
   gap: var(--space-2);
   color: var(--fg);
+  font-size: var(--text-base);
 }
 
-.guide-region-count {
+.guide-region-count,
+.guide-budget-tokens,
+.guide-region-pct {
   color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .guide-region-count--warn {
@@ -218,7 +247,7 @@ async function discussGuide(): Promise<void> {
 
 .guide-region-bar {
   height: 4px;
-  margin-top: 6px;
+  margin-top: 8px;
   overflow: hidden;
   border-radius: 2px;
   background: var(--bg3);
@@ -240,7 +269,7 @@ async function discussGuide(): Promise<void> {
 }
 
 .guide-region-meta {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   color: var(--fg3);
   font-size: var(--text-xs);
 }
@@ -249,11 +278,52 @@ async function discussGuide(): Promise<void> {
   color: var(--warning);
 }
 
+.guide-card-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.guide-budget-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .guide-budget-actions {
   display: flex;
-  align-items: center;
-  gap: var(--space-2);
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 10px;
+}
+
+.guide-budget-hint {
+  margin: 0;
   color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.guide-budget-buttons {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.guide-budget-actions--trim .guide-budget-buttons {
+  margin-top: 6px;
+}
+
+.guide-budget-optimize {
+  min-height: 36px;
 }
 
 .guide-budget-link {
@@ -269,6 +339,7 @@ async function discussGuide(): Promise<void> {
 
 @media (pointer: coarse) {
   .guide-budget-link { min-width: var(--touch); }
+  .guide-budget-optimize { min-height: var(--touch); }
 }
 
 .guide-budget-link:hover:not(:disabled) {
@@ -281,7 +352,8 @@ async function discussGuide(): Promise<void> {
   cursor: default;
 }
 
-.guide-budget-link:focus-visible {
+.guide-budget-link:focus-visible,
+.guide-budget-optimize:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-xs);

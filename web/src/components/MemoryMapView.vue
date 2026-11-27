@@ -16,13 +16,15 @@
     </div>
 
     <!-- Unsure is the list of what Ciaobot could not settle: one Markdown file,
-         with the always-loaded budget beside it. -->
+         one row per line. The rail holds two docked windows: how the list works
+         (with its counts) and what every chat loads. -->
     <div v-else-if="mm.section === 'unsure'" class="mm-review-wrap">
       <div class="page-grid mm-review-grid">
         <div class="page-main">
           <MemoryUnsurePanel />
         </div>
-        <aside class="page-rail mm-review-rail" aria-label="Always loaded">
+        <aside class="page-rail mm-review-rail" aria-label="About the Unsure list">
+          <MemoryUnsureRail />
           <MemoryGuideBudget />
         </aside>
       </div>
@@ -290,6 +292,7 @@ import MemoryGuideBudget from './MemoryGuideBudget.vue'
 import MemoryHowItWorks from './MemoryHowItWorks.vue'
 import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
 import MemoryUnsurePanel from './MemoryUnsurePanel.vue'
+import MemoryUnsureRail from './MemoryUnsureRail.vue'
 import MemoryCarePanel from './MemoryCarePanel.vue'
 import { useProjectStore } from '../stores/projects'
 import {
@@ -1502,6 +1505,13 @@ onBeforeUnmount(() => {
 }
 .mm-review-grid {
   padding-block: var(--space-5) var(--space-6);
+}
+/* Unsure's rail: two docked windows, one gap between them. */
+.mm-review-rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
 }
 .mm-body {
   flex: 1;

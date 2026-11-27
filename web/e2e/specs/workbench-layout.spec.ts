@@ -493,7 +493,9 @@ test.describe('workbench layout', () => {
     expect(main.names).toContain('needs-you')
     expect(main.names).toContain('home-intake')
     expect(main.names.indexOf('needs-you')).toBeLessThan(main.names.indexOf('home-intake'))
-    expect(rail.names).toEqual(['home-review-summary'])
+    // At a glance is the shared docked window (DockedWindow.vue).
+    expect(rail.names).toEqual(['docked-window'])
+    await expect(page.locator('.home-rail > .home-review-summary')).toHaveCount(1)
     // Every boundary is the one token, not just the two ends being equal, which
     // a leftover section margin in the middle would still pass.
     for (const column of [main, rail]) {

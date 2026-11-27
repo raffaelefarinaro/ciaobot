@@ -67,11 +67,11 @@ describe('ProjectSidebar memory section', () => {
     vi.unstubAllGlobals()
   })
 
-  it('makes no review requests of its own and carries no count on the Memory link', async () => {
+  it('makes no review requests of its own and carries no count on the Memory link while nothing waits', async () => {
     useMemoryMapStore().setSection('unsure')
     const wrapper = await mountSidebar()
 
-    // There is no queue to count: unsure items are lines in a Markdown file.
+    // An Unsure list that has not answered (or has nothing waiting) adds no count.
     const memoryLink = wrapper.get('a[href="/memory"]')
     expect(memoryLink.attributes('data-count')).toBeUndefined()
     expect(memoryLink.attributes('aria-label')).toBe('memory')
@@ -343,6 +343,31 @@ describe('ProjectSidebar memory section', () => {
     const manage = wrapper.get('.mm-row-links a')
     expect(manage.text()).toBe('Manage')
     expect(manage.attributes('href')).toBe('/memory/categories')
+  })
+
+  it('counts the Unsure lines waiting, on the Unsure row and the Memory link, and follows the list', async () => {
+    const list = (waiting: number, workspace = 'personal') => ({
+      workspace, path: `memory-vault/${workspace}/Workspace/Unsure.md`, found: true, items: [],
+      counts: { waiting, ticked: 2 },
+    })
+    apiGet.mockImplementation(async (path: string) => (String(path).startsWith('/api/memory/unsure') ? list(3) : { rows: [] }))
+    useMemoryMapStore().setSection('unsure')
+    const wrapper = await mountSidebar()
+    await vi.waitFor(() => expect(wrapper.get('a[href="/memory"]').attributes('data-count')).toBe('3'))
+
+    expect(apiGet).toHaveBeenCalledWith('/api/memory/unsure?workspace=personal')
+    expect(wrapper.get('a[href="/memory"]').attributes('aria-label')).toBe('memory — 3 waiting on Unsure')
+    const row = wrapper.get('a[href="/memory/unsure"]')
+    expect(row.get('.memory-nav-count').text()).toBe('3')
+    expect(row.attributes('aria-label')).toBe('Unsure, 3 waiting')
+
+    // A row action answers the list as written; the count follows it, and 0 hides it.
+    const { useUnsureStore } = await import('../../stores/unsure')
+    useUnsureStore().list = list(0)
+    await nextTick()
+    expect(wrapper.get('a[href="/memory"]').attributes('data-count')).toBeUndefined()
+    expect(wrapper.get('a[href="/memory/unsure"]').find('.memory-nav-count').exists()).toBe(false)
+    apiGet.mockResolvedValue({ rows: [] })
   })
 
   it('shows no map count until the selected workspace\'s graph has loaded', async () => {
