@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
 import { expect, waitFor } from 'storybook/test'
-import { defineComponent, h, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
+import { defineComponent, h, onBeforeUnmount, onMounted, ref, shallowRef, type Component } from 'vue'
 import type { Pinia } from 'pinia'
 import NewScheduleForm from '../components/NewScheduleForm.vue'
 import SchedulePanel from '../components/SchedulePanel.vue'
@@ -48,7 +48,7 @@ const loadedHooks = webhooks(() => json({ triggers: [trigger] }))
 
 // This host keeps the real panel mounted when its overview link changes route,
 // and can open on one of the three Automations pages.
-const automationRoutes = (component: typeof SchedulePanel | typeof ProjectSidebar) => [
+const automationRoutes = (component: Component) => [
   { path: '/schedules', component },
   { path: '/schedules/:scheduleId', component },
   { path: '/automations/loops', component },
