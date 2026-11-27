@@ -4901,12 +4901,15 @@ watch(
   () => [retryCoveredIdx.value, hasPendingRetry.value] as const,
   async ([idx, pending], [prevIdx]) => {
     if (prevIdx < 0 || idx >= 0 || pending || view.isStreaming) return
-    // The confirm dialog has already handed focus back to a button that is gone.
-    const wanted = stopFocusPending || Boolean(document.activeElement?.closest('.retry-state'))
+    // Only a stop the reader confirmed moves focus: the dialog has already
+    // handed it back to a button that is gone. A retry that cleared on its own
+    // leaves focus where it is.
+    const wanted = stopFocusPending
     stopFocusPending = false
     if (!wanted) return
     await nextTick()
-    const row = document.querySelector<HTMLElement>(`[data-msg-index="${prevIdx}"]`)
+    // This panel's rows only: a split pane renders its own rows with the same indexes.
+    const row = messagesEl.value?.querySelector<HTMLElement>(`[data-msg-index="${prevIdx}"]`)
     const target = row?.querySelector<HTMLElement>('.error-actions button:not(:disabled)')
       ?? row?.querySelector<HTMLElement>('.injected-card-toggle')
     if (target) target.focus()

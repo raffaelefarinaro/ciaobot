@@ -902,15 +902,23 @@ describe('ChatPanel retry from error bubble', () => {
       wrapper.unmount()
     })
 
+    const stopRetryBy = (store: ReturnType<typeof useProjectStore>) => {
+      askConfirm.mockResolvedValue(true)
+      return vi.spyOn(store, 'stopChatRetry').mockImplementation(async (id: string) => {
+        const chat = store.chats.find(c => c.chat_id === id)!
+        chat.retry = undefined
+        return chat
+      })
+    }
+    const stopButton = (wrapper: VueWrapper) => wrapper.findAll('.retry-state-actions button')[1]
+
     it('moves focus to the returning error card when the retry is stopped', async () => {
       const { wrapper, store } = await mountPanel({ attach: true })
+      stopRetryBy(store)
       store.messages['chat-1'] = failed('Error: strange failure 42') as never
       store.chats[0].retry = { ...pending('strange failure 42'), schedule_id: 's1' }
       await flushPromises()
-      const stop = wrapper.findAll('.retry-state-actions button')[1]
-      ;(stop.element as HTMLElement).focus()
-      expect(document.activeElement).toBe(stop.element)
-      store.chats[0].retry = undefined
+      await stopButton(wrapper).trigger('click')
       await flushPromises()
       expect(document.activeElement?.textContent).toBe('Fix this error')
       expect(document.activeElement?.closest('.injected-card--error')).not.toBeNull()
@@ -919,13 +927,49 @@ describe('ChatPanel retry from error bubble', () => {
 
     it('focuses the returning card\'s toggle when it has no enabled action', async () => {
       const { wrapper, store } = await mountPanel({ attach: true })
+      stopRetryBy(store)
       store.messages['chat-1'] = failed('Error: you have reached your weekly usage limit') as never
       store.chats[0].retry = { ...pending('you have reached your weekly usage limit'), schedule_id: 's1' }
       await flushPromises()
-      ;(wrapper.findAll('.retry-state-actions button')[1].element as HTMLElement).focus()
-      store.chats[0].retry = undefined
+      await stopButton(wrapper).trigger('click')
       await flushPromises()
       expect(document.activeElement?.classList.contains('injected-card-toggle')).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('keeps focus in the pane where Stop trying was pressed when two panes are open', async () => {
+      const first = await mountPanel({ attach: true })
+      const { store, pinia } = first
+      stopRetryBy(store)
+      store.chats.push(makeChat('chat-2', { retry: { ...pending('strange failure 42'), schedule_id: 's2' } }))
+      store.messages['chat-1'] = failed('Error: strange failure 42') as never
+      store.messages['chat-2'] = failed('Error: strange failure 42') as never
+      // The first pane shows the same row index as a plain error with its own Fix button.
+      const second = await mountPanel({ attach: true, pinia, chatId: 'chat-2' })
+      await flushPromises()
+      expect(document.querySelectorAll('.retry-state')).toHaveLength(1)
+      expect(first.wrapper.find('.fix-btn').exists()).toBe(true)
+      await stopButton(second.wrapper).trigger('click')
+      await flushPromises()
+      const active = document.activeElement as HTMLElement
+      expect(second.wrapper.element.contains(active)).toBe(true)
+      expect(first.wrapper.element.contains(active)).toBe(false)
+      expect(active.textContent).toBe('Fix this error')
+      first.wrapper.unmount()
+      second.wrapper.unmount()
+    })
+
+    it('does not move focus when the retry clears without a confirmed stop', async () => {
+      const { wrapper, store } = await mountPanel({ attach: true })
+      store.messages['chat-1'] = failed('Error: strange failure 42') as never
+      store.chats[0].retry = { ...pending('strange failure 42'), schedule_id: 's1' }
+      await flushPromises()
+      const runNow = wrapper.findAll('.retry-state-actions button')[0].element as HTMLElement
+      runNow.focus()
+      store.chats[0].retry = undefined
+      await flushPromises()
+      expect(document.activeElement).not.toBe(wrapper.get('.fix-btn').element)
+      expect(wrapper.element.contains(document.activeElement)).toBe(false)
       wrapper.unmount()
     })
 
@@ -934,7 +978,7 @@ describe('ChatPanel retry from error bubble', () => {
       store.messages['chat-1'] = failed('Error: strange failure 42') as never
       store.chats[0].retry = { ...pending('strange failure 42'), schedule_id: 's1' }
       await flushPromises()
-      const stop = wrapper.findAll('.retry-state-actions button')[1].element as HTMLElement
+      const stop = stopButton(wrapper).element as HTMLElement
       stop.focus()
       expect(document.activeElement).toBe(stop)
       store.streaming['chat-1'] = true
