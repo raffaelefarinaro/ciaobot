@@ -46,7 +46,7 @@ test.describe('Workspace care', () => {
     await open.focus()
     await page.keyboard.press('Enter')
     await expect(page).toHaveURL(/\/memory\/care$/)
-    await expect(page.getByRole('heading', { name: 'Done with 2 things for you' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Done with 4 things for you' })).toBeVisible()
     await expect(page.locator('.page-tag')).toContainText('Workspace care')
     await page.screenshot({ path: 'test-results/workspace-care-report-desktop.png' })
   })
@@ -68,8 +68,65 @@ test.describe('Workspace care', () => {
     await page.keyboard.press('Escape')
     await page.goto('/memory/care')
     await expect(page.getByRole('heading', { name: 'Did not finish: 4 of 6 steps' })).toBeVisible()
+    // Nothing needs the person, so the steps are open to show what stopped.
+    await expect(page.getByText('Nothing needs your decision. Some steps did not finish; they are below.')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Fix Hygiene with a chat' })).toBeVisible()
   })
+
+  test('what needs you leads and the steps and notes fold below it', async ({ page }) => {
+    await answerCare(page, careReports.needsYou)
+    await boot(page, '/memory/care', '.mc-need')
+    const needs = page.locator('.mc-need')
+    await expect(needs).toHaveCount(4)
+    // The buttons come from each item's path.
+    await expect(needs.nth(0).getByRole('button', { name: /^Review proposal: / })).toBeVisible()
+    await expect(needs.nth(1).getByRole('button', { name: /^Open guide: / })).toBeVisible()
+    await expect(needs.nth(2).getByRole('button', { name: /^Open Unsure: / })).toBeVisible()
+    await expect(needs.nth(3).getByRole('button', { name: /^Open report: / })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(4)
+    const steps = page.locator('details.mc-disclosure').first()
+    await expect(steps).not.toHaveAttribute('open', '')
+    await expect(page.locator('.mc-step').first()).toBeHidden()
+    const summary = steps.locator('summary')
+    await expect(summary).toHaveText(/Steps\s*5: 5 done/)
+    expect((await summary.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    // Below what needs you, in the page's reading order.
+    expect((await summary.boundingBox())!.y).toBeGreaterThan((await needs.nth(3).boundingBox())!.y)
+    await summary.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.locator('.mc-step').first()).toBeVisible()
+    // The choice holds for the session.
+    await page.reload()
+    await expect(page.locator('.mc-step').first()).toBeVisible()
+    const notes = page.locator('details.mc-disclosure').nth(1)
+    await expect(notes.locator('summary')).toHaveText(/Notes\s*4/)
+    await expect(notes.locator('.mc-notes li').first()).toBeHidden()
+  })
+})
+
+test.describe('Workspace care page states, looked at', () => {
+  const states = {
+    'needs-you': careReports.needsYou,
+    'nothing-needs-you': careReports.complete,
+    running: careReports.running,
+    'did-not-finish': careReports.blocked,
+  } as const
+  for (const [name, report] of Object.entries(states)) {
+    for (const colorScheme of ['light', 'dark'] as const) {
+      for (const width of [1280, 390]) {
+        test(`${name}, ${colorScheme}, ${width}px`, async ({ page }, testInfo) => {
+          await isolate(page, `care-look-${testInfo.workerIndex}-${name}-${colorScheme}-${width}`)
+          await page.setViewportSize({ width, height: 900 })
+          await page.emulateMedia({ colorScheme })
+          await answerCare(page, report)
+          await boot(page, '/memory/care', '.mc-summary-title')
+          const { overflow, culprits } = await horizontalOverflow(page)
+          expect(overflow, JSON.stringify(culprits)).toBeLessThanOrEqual(0)
+          await page.screenshot({ path: `test-results/care-look/${name}-${colorScheme}-${width}.png`, fullPage: true })
+        })
+      }
+    }
+  }
 })
 
 test.describe('Workspace care under reduced motion', () => {

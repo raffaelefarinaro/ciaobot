@@ -11,7 +11,7 @@
 - The `ciao:memory` and `ciao:profile` regions of the workspace `AGENTS.md`; a learned-at stamp `[YYYY-MM-DD]` helps find an entry a pass's list names.
 
 ## Procedure
-Read at most 10 passes and 15 notes, newest first, in about 40 tool calls; anything left over is a `needs you` count in the done line, not a block. Most writes are fine and stay as they are.
+Read at most 10 passes and 15 notes, newest first, in about 40 tool calls; anything left over is a `note:` in the done line, not a block. Most writes are fine and stay as they are.
 
 **What you may judge.** Only a line a pass you read wrote: a line its change list names, or an undo-log entry `by: memory pass <its chat id>`. A line or region entry no read pass names may be the person's or another care step's (unsure, drain, closed-tasks, regions, learnings): leave it. A changed note no pass names is read only for rule 1 and is never edited. Never judge an entry or note line that already has an undo-log entry `by: care second-look` or `by: care unsure`: if it is there now, a person chose that.
 
@@ -25,6 +25,6 @@ Fix only these:
 Leave a line you have no contrary evidence against, including an attribution the evidence supports; it does not go on the Unsure list. Anything you genuinely doubt is one Unsure line in the `- [ ]` format from `unsure-and-proposals.md`, never a silent edit. Leave `updated:` alone and never add a `[verified: …]` stamp.
 
 ## Done when
-Every pass and note within the caps was read, and each line you may judge was left, fixed or put on the Unsure list. Finish with `done: read N passes and M notes, checked L lines, fixed X (<each fix: kind, note path or region>), unsure Y, left Z`, adding `needs you: P passes and Q notes not read` when the caps left any.
+Every pass and note within the caps was read, and each line you may judge was left, fixed or put on the Unsure list. Finish with `done: read N passes and M notes, checked L lines, fixed X (<each fix: kind, note path or region>), unsure Y, left Z`, adding `note: P memory passes and Q notes were not re-read this time; the next run continues.` when the caps left any (P and Q as numbers).
 
 Verify: for each removal or move the done line names, `grep -F` a distinctive phrase (for a credential, its name, never its value) finds it in `<vault>/Workspace/Memory-Consolidations.md` and not where it came from; for each move, merge or put-back, re-read the destination and quote the line found there; run `ciao proposal-check` on each proposal it names (each prints `ok`). Tick only with these outputs. With `fixed 0`, the archived rows since the date in the same paged `ciao chat list --project <memory project id> --limit 200` must number N + P.
