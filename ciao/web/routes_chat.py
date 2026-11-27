@@ -601,6 +601,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
     - `chat_actions_changed`    {chat_id, actions}  (the whole list; [] = none)
     - `chat_title`              {chat_id, title}
+    - `chat_shells`             {chat_id, project_id, running_shells}  (background shells running now)
     - `server_restarting`       {message}  (restart drain began; show overlay)
 
     On connect, sends a snapshot of currently-active streams so a fresh client
@@ -645,6 +646,9 @@ async def ws_events(websocket: WebSocket) -> None:
             "chat_pins": pcm.chat_pin_states,
             # Sparse and COMPLETE: the map replaces the client's cache, so a chat missing from it has no actions.
             "chat_actions": pcm.chat_action_states,
+            # Sparse and COMPLETE, like chat_actions: chat id -> background shells running now, read
+            # from the live sessions. A chat missing from it runs none (an engine restart empties it).
+            "running_shells": pcm.running_shells_by_chat(),
             "keyboard_shortcuts": (
                 websocket.app.state.app_settings.settings.keyboard_shortcuts or {}
                 if getattr(websocket.app.state, "app_settings", None) is not None else {}

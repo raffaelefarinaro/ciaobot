@@ -60,6 +60,8 @@ _WATCH_FAST_INTERVAL = 0.25
 _WATCH_SLOW_INTERVAL = 3.0
 _KILL_SETTLE_TIMEOUT = 3.0
 _EXIT_POLL_INTERVAL = 0.05
+# How often a live connection checks that its agent is still running (``wait_exited``).
+_LIFETIME_EXIT_POLL_INTERVAL = 1.0
 # How often a launch re-checks an adapter whose install is running.
 _INSTALL_POLL_S = 1.0
 # When a launch waited the whole cap, the install holding the lock is stuck (npm itself is killed
@@ -505,6 +507,10 @@ class AcpConnection:
         """
         return self._flushed.arm(count)
 
+    async def wait_exited(self) -> int:
+        """The agent's exit code, once its process has exited. Polled once a second: it runs for the connection's life."""
+        return await _wait_child_exit(self._process, _LIFETIME_EXIT_POLL_INTERVAL)
+
     def stderr_tail(self, lines: int = 20) -> str:
         return self._stderr.tail(lines)
 
@@ -537,7 +543,7 @@ class AcpConnection:
             task.exception()
 
 
-async def _wait_child_exit(process: asyncio.subprocess.Process) -> int:
+async def _wait_child_exit(process: asyncio.subprocess.Process, interval: float = _EXIT_POLL_INTERVAL) -> int:
     """Return this process's exit code once the process itself has exited.
 
     Python 3.12 wakes ``Process.wait`` only from ``_call_connection_lost``,
@@ -551,7 +557,7 @@ async def _wait_child_exit(process: asyncio.subprocess.Process) -> int:
         code = process.returncode
         if code is not None:
             return code
-        await asyncio.sleep(_EXIT_POLL_INTERVAL)
+        await asyncio.sleep(interval)
 
 
 async def _drain_stderr(stream: asyncio.StreamReader, ring: StderrRing, agent_id: str) -> None:

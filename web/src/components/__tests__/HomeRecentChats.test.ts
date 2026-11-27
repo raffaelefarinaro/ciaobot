@@ -133,6 +133,28 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(wrapper.findAll('.home-chat-item')).toHaveLength(2)
   })
 
+  // A chat whose turn ended but whose background shells still run is alive: it sits
+  // in Working with the shell mark and a counted sub-line, not in Earlier.
+  it('files a chat with only background shells running under Working', async () => {
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.runningShells = { quiet: 3 }
+    await nextTick()
+    const working = wrapper.find('.home-tier--working')
+    expect(working.find('.home-chat-title').text()).toBe('A quiet chat')
+    expect(working.find('.home-chat-status').text()).toBe('3 shells running')
+    expect(working.find('.chat-signal--shells').attributes('aria-label')).toBe('3 shells running')
+    expect(wrapper.find('.home-tier--quiet').exists()).toBe(false)
+    // Attention is unchanged: the needs-you tier still holds only the question.
+    expect(wrapper.findAll('.home-tier--needsYou .home-chat-item')).toHaveLength(1)
+
+    store.runningShells = {}
+    await nextTick()
+    expect(wrapper.find('.home-tier--working').exists()).toBe(false)
+    expect(wrapper.find('.home-tier--quiet .home-chat-title').text()).toBe('A quiet chat')
+    wrapper.unmount()
+  })
+
   it('gives every row a project and status sub-line read from its tier', async () => {
     const wrapper = await mountHome()
     const needs = wrapper.find('.home-tier--needsYou .home-chat-item')

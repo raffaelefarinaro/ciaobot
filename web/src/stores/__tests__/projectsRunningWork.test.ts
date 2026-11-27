@@ -20,11 +20,26 @@ describe('projects store runningWorkFor (history rows)', () => {
       { role: 'system', content: 'Subagent: Old', tool_name: '_subagent', subagent: { tool_use_id: 'a2', agent_type: '', description: 'Old', state: 'done', step_count: 0, steps: [] } },
       { role: 'system', content: 'ls', tool_name: '_shell', shell: { tool_use_id: 's2', command: 'ls', background: false, state: 'running', exit_code: null, output_tail: '' } },
     ] as ChatMessage[]
+    store.runningShells = { c1: 1 }
 
     const work = store.runningWorkFor('c1')
     expect(work.agents.map(row => row.tool_use_id)).toEqual(['a1'])
     expect(work.shells.map(row => row.tool_use_id)).toEqual(['s1'])
     expect(work.agents[0].started_at).toBeUndefined()
+  })
+
+  // The cards name the shells; the engine's count says whether any runs. A card a reload
+  // still reads as running, after a restart or a closed session, must not light the chip.
+  it('drops shell rows when the engine reports no shell running for the chat', () => {
+    const store = useProjectStore()
+    store.messages['c1'] = [
+      { role: 'system', content: 'npm run dev', tool_name: '_shell', shell: { tool_use_id: 's1', command: 'npm run dev', background: true, state: 'running', exit_code: null, output_tail: '' } },
+      { role: 'system', content: 'Subagent: Explore', tool_name: '_subagent', subagent: { tool_use_id: 'a1', agent_type: 'Explore', description: 'Explore', state: 'running', step_count: 0, steps: [] } },
+    ] as ChatMessage[]
+
+    const work = store.runningWorkFor('c1')
+    expect(work.shells).toEqual([])
+    expect(work.agents.map(row => row.tool_use_id)).toEqual(['a1'])
   })
 
   it('is empty for a chat with no rows', () => {

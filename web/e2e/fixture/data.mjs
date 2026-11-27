@@ -415,6 +415,9 @@ export function snapshotFrame(activeStreams) {
     // The needs-you action map, complete the same way. Empty in the base
     // frame; the fixture server fills it from the session's actions.
     chat_actions: {},
+    // Background shells running per chat, sparse and complete. Empty in the
+    // base frame; the fixture server fills it from POST /__fixture__/shells.
+    running_shells: {},
   }
 }
 

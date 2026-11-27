@@ -109,6 +109,27 @@ describe('ProjectView chat rows', () => {
     expect(wrapper.find('.spinner-dot').exists()).toBe(false)
   })
 
+  it('marks a chat whose background shells run after its turn, and says how many', async () => {
+    const store = seed()
+    store.runningShells = { 'chat-read': 1 }
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.chat-signal--shells').attributes('aria-label')).toBe('1 shell running')
+    const subs = wrapper.findAll('.chat-row-sub').map(sub => sub.text())
+    expect(subs).toContain('1 shell running')
+  })
+
+  it('says new reply before shells running, as Home files it under Unread', async () => {
+    const store = seed()
+    store.runningShells = { 'chat-unread': 2 }
+    const wrapper = await mountView()
+    const row = wrapper.findAll('.chat-row-sub').map(sub => sub.text())
+    expect(row).toContain('new reply')
+    expect(row).not.toContain('2 shells running')
+    // The mark is still the shells glyph: the unread eye sits beside it.
+    expect(wrapper.find('.chat-signal--shells').attributes('aria-label')).toBe('2 shells running')
+  })
+
   it('hues the marks from the project workspace, not the active accent', async () => {
     const store = seed()
     store.activeWorkspace = 'personal'

@@ -409,6 +409,7 @@ import { api } from '../lib/api'
 import { useModalFocus } from '../composables/useModalFocus'
 import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
+import { runningShellsLabel } from '../lib/runningWork'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
 import TitleRail from './TitleRail.vue'
@@ -510,7 +511,10 @@ function chatActivity(chat: ChatInfo): string {
 function chatStatusPhrase(chat: ChatInfo): string {
   if (store.chatNeedsInput(chat.chat_id)) return 'waiting for you'
   if (store.chatIsWorking(chat.chat_id)) return 'agent is working'
+  // After unread, as on Home: a fresh reply files a chat under Unread there too.
   if (store.chatUnread(chat.chat_id) > 0) return 'new reply'
+  const shells = store.chatRunningShells(chat.chat_id)
+  if (shells > 0) return runningShellsLabel(shells)
   return 'no new activity'
 }
 

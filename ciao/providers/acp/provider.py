@@ -250,6 +250,8 @@ class AcpProvider(BaseProvider):
         self._broker: PermissionBroker | None = None
         self._key: tuple[str, str, str] | None = None
         self._last_activity: float | None = None
+        # Watches the agent process: when it exits, the running-shell count (now 0) is reported.
+        self._exit_watch: asyncio.Task[None] | None = None
 
     # -- extension hooks (neutral, empty by default) ---------------------------
 
@@ -376,6 +378,13 @@ class AcpProvider(BaseProvider):
         )
         self._client.connection = self._connection
         self._key = key
+        self._exit_watch = asyncio.create_task(self._report_exit(self._connection))
+
+    async def _report_exit(self, connection: AcpConnection) -> None:
+        """A dead agent runs no shell we can still see end: report the count (0) when it exits."""
+        await connection.wait_exited()
+        if self._connection is connection:
+            self._shells_changed()
 
     async def _session_for(
         self, connection: AcpConnection, request: AgentRequest
@@ -413,6 +422,7 @@ class AcpProvider(BaseProvider):
             self._client.broker = None
             raise
         opened.continuation_hook = self._continuation_notice
+        opened.shells_hook = self._shells_changed
         self._session = opened
         self._broker = broker
         self._client.session = opened
@@ -484,6 +494,19 @@ class AcpProvider(BaseProvider):
         hook = self.continuation_hook
         return hook(ended) if hook is not None else None
 
+    def _shells_changed(self) -> None:
+        hook = self.shells_hook
+        if hook is not None:
+            hook()
+
+    @property
+    def running_shells(self) -> int:
+        # A dead agent process runs no shells we can still see end: count none rather than a stale set.
+        session = self._session
+        if session is None or not self.is_connected:
+            return 0
+        return session.running_shells
+
     async def abort_session(self, session_id: str) -> ResultEvent | None:
         """Cancel the live session's turn, late turns included (Stop on a background chat)."""
         session = self._session
@@ -540,6 +563,9 @@ class AcpProvider(BaseProvider):
                 await session.close()
 
     async def disconnect(self) -> None:
+        watch, self._exit_watch = self._exit_watch, None
+        if watch is not None:
+            watch.cancel()
         connection, self._connection = self._connection, None
         self._key = None
         self._client.connection = None

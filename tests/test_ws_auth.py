@@ -33,6 +33,7 @@ def _events_app() -> Starlette:
         get_chat=lambda _cid: None,
         chat_pin_states={},
         chat_action_states={},
+        running_shells_by_chat=lambda: {},
         events=SimpleNamespace(attach=_IdleSubscription),
     )
     return app
@@ -139,6 +140,7 @@ def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> Non
         get_chat=lambda _cid: None,
         chat_pin_states={},
         chat_action_states={},
+        running_shells_by_chat=lambda: {},
         events=hub,
     )
     with _signed_client(app).websocket_connect(
@@ -162,6 +164,7 @@ def test_snapshot_failure_detaches_the_events_subscription() -> None:
         get_chat=lambda _cid: None,
         chat_pin_states={},
         chat_action_states={},
+        running_shells_by_chat=lambda: {},
         events=hub,
     )
     with pytest.raises(KeyError):
@@ -287,3 +290,84 @@ def test_events_snapshot_carries_no_terminal_offers(tmp_path: Path) -> None:
     assert snapshot["type"] == "snapshot"
     assert "chat_terminal_offers" not in snapshot
     assert snapshot["chat_actions"] == {}
+
+
+class _ShellsService:
+    """A chat's provider service reduced to the one figure the rows read: shells running now."""
+
+    def __init__(self, count: int) -> None:
+        self.running_shells = count
+
+
+def test_events_snapshot_carries_running_shells_read_from_live_providers(tmp_path: Path) -> None:
+    """The snapshot's map is sparse and complete, and read from the providers held right now.
+
+    A chat with no provider (the state after an engine restart) or one whose provider runs no
+    shell is absent, so a reconnecting client drops a mark it still showed.
+    """
+    app = _real_events_app(tmp_path)
+    manager = app.state.project_chat_manager
+    project = manager.create_project("Shells", workspace="work")
+    running = manager.create_chat(project.project_id, title="Running")
+    idle = manager.create_chat(project.project_id, title="Idle")
+    manager.create_chat(project.project_id, title="No provider")
+    manager._providers[running.chat_id] = _ShellsService(3)
+    manager._providers[idle.chat_id] = _ShellsService(0)
+
+    with _signed_client(app).websocket_connect(
+        "/ws/events", headers={"Origin": "http://testserver"}
+    ) as ws:
+        snapshot = ws.receive_json()
+
+    assert snapshot["running_shells"] == {running.chat_id: 3}
+
+
+def test_running_shells_publish_on_change_only_and_drop_to_zero_with_the_provider(tmp_path: Path) -> None:
+    app = _real_events_app(tmp_path)
+    manager = app.state.project_chat_manager
+    project = manager.create_project("Shells", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Running")
+    service = _ShellsService(2)
+    manager._providers[chat.chat_id] = service
+
+    published: list[dict] = []
+    original = manager._events.publish
+    manager._events.publish = lambda payload: (published.append(payload), original(payload))  # type: ignore[method-assign]
+
+    manager._publish_running_shells(chat.chat_id)
+    manager._publish_running_shells(chat.chat_id)  # unchanged: no second event
+    service.running_shells = 1
+    manager._publish_running_shells(chat.chat_id)
+    manager._pop_provider(chat.chat_id)  # the provider goes: the row loses the mark now
+
+    shells = [p for p in published if p["type"] == "chat_shells"]
+    assert shells == [
+        {"type": "chat_shells", "chat_id": chat.chat_id, "project_id": project.project_id, "running_shells": 2},
+        {"type": "chat_shells", "chat_id": chat.chat_id, "project_id": project.project_id, "running_shells": 1},
+        {"type": "chat_shells", "chat_id": chat.chat_id, "project_id": project.project_id, "running_shells": 0},
+    ]
+    assert manager.running_shells_by_chat() == {}
+
+
+def test_a_provider_shell_count_change_publishes_through_the_chat_provider(tmp_path: Path) -> None:
+    """The host wiring: the provider a chat gets from ``_get_provider`` reports to ``chat_shells``."""
+    app = _real_events_app(tmp_path)
+    manager = app.state.project_chat_manager
+    project = manager.create_project("Shells", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Running")
+    service = manager._get_provider(chat.chat_id)
+    provider = service.ensure_provider(chat.provider or "claude")
+
+    published: list[dict] = []
+    original = manager._events.publish
+    manager._events.publish = lambda payload: (published.append(payload), original(payload))  # type: ignore[method-assign]
+
+    provider._session = SimpleNamespace(running_shells=2)
+    provider._connection = SimpleNamespace(alive=True)
+    provider._shells_changed()  # what the session's hook calls
+
+    assert [p for p in published if p["type"] == "chat_shells"] == [
+        {"type": "chat_shells", "chat_id": chat.chat_id, "project_id": project.project_id, "running_shells": 2},
+    ]
+    provider._session = None
+    provider._connection = None
