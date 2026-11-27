@@ -61,7 +61,7 @@
           type="button"
           class="home-intake-chip home-intake-project"
           :disabled="!hasProjects"
-          :aria-label="`Choose a project for the new chat — default ${defaultProjectLabel}`"
+          :aria-label="`Choose a project for the new chat — default ${defaultProjectLabel}${defaultProjectCode}`"
           aria-haspopup="dialog"
           @click="chooseProject"
         >
@@ -69,6 +69,7 @@
             <path d="M3.5 7.5h6l2-2h9v13h-17z" />
           </svg>
           <span class="home-intake-chip-label">{{ defaultProjectLabel }}</span>
+          <CodeMark :repo="defaultProject?.repo" />
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m7 9 5 5 5-5" />
           </svg>
@@ -159,6 +160,8 @@ import { useTaskStore } from '../stores/tasks'
 import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 import { isApplePlatform } from '../lib/platform'
 import { isMemoryProject } from '../lib/memoryPass'
+import { inCodeMode, projectCodeTitle } from '../lib/repo'
+import CodeMark from './CodeMark.vue'
 import type { ModelSection } from '../lib/modelSections'
 import { chosenRuntimeFor, newChatModelView } from '../lib/newChatModel'
 import ModelSelector from './ModelSelector.vue'
@@ -206,6 +209,11 @@ watch(
 )
 onBeforeUnmount(() => { homeNewChatProjectId.value = '' })
 const defaultProjectLabel = computed(() => defaultProject.value?.name || 'Choose a project')
+// The chip's glyph is decorative; the repository joins the accessible name.
+const defaultProjectCode = computed(() => {
+  const repo = defaultProject.value?.repo
+  return inCodeMode(repo) ? `, ${projectCodeTitle(repo)}` : ''
+})
 
 // The provider the workspace starts new chats on; empty means no filter.
 const defaultProvider = computed(() => store.workspaceOptions.find(

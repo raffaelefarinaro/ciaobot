@@ -55,6 +55,20 @@ describe('useProjectRail', () => {
     expect(b.mark).toBeNull()
   })
 
+  it('puts the code glyph on a project in code mode and names the repository in its label', () => {
+    const store = useProjectStore()
+    store.projects = [
+      project('a', 0, { repo: { path: '/r/app', branch: 'main', dirty: false, missing: false } }),
+      project('b', 1, { repo: { path: '/r/gone', branch: '', dirty: false, missing: true } }),
+      project('c', 2),
+    ] as never
+    const [a, b, c] = useProjectRail(() => 'a').items.value
+    expect(a.codeTitle).toBe('Linked to a repository: app')
+    expect(a.label).toBe('name a, no chats, Linked to a repository: app')
+    expect(b.codeTitle).toBeUndefined()
+    expect(c.codeTitle).toBeUndefined()
+  })
+
   it('steps by routing to the neighbour and records the side it came from', async () => {
     useProjectStore().projects = [project('a', 0), project('b', 1)] as never
     const rail = useProjectRail(() => 'a')

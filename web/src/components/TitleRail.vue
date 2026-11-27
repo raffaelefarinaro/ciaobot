@@ -35,12 +35,15 @@
           class="chat-title-shimmer"
           aria-hidden="true"
         />
-        <span
-          v-else
-          class="title-rail-title"
-          :class="{ 'pane-title chat-title': entry.id === currentId }"
-          :title="entry.title"
-        >{{ entry.title }}</span>
+        <span v-else class="title-rail-line">
+          <span
+            class="title-rail-title"
+            :class="{ 'pane-title chat-title': entry.id === currentId }"
+            :title="entry.title"
+          >{{ entry.title }}</span>
+          <!-- Decorative: the repository is in the item's accessible name. -->
+          <span v-if="entry.codeTitle" class="title-rail-code" aria-hidden="true" :title="entry.codeTitle">›_</span>
+        </span>
         <span class="title-rail-project">{{ entry.subtitle }}</span>
       </button>
     </div>
@@ -376,7 +379,9 @@ onBeforeUnmount(() => {
   padding: 0 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 0; background: none; color: var(--fg);
   font: inherit; text-align: center; cursor: default; }
 .title-rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-xs); }
-.title-rail-title { flex: none; display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-lg); font-weight: 600; line-height: 1.25; }
+.title-rail-line { flex: none; display: flex; align-items: center; justify-content: center; gap: 6px; max-width: 100%; min-width: 0; }
+.title-rail-code { flex: none; color: var(--fg3); font: 700 calc(11px * var(--font-scale))/1 var(--font-mono); letter-spacing: -0.04em; }
+.title-rail-title { flex: 0 1 auto; min-width: 0; display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-lg); font-weight: 600; line-height: 1.25; }
 /* The shared header shimmer sizes itself with `flex-basis: 10rem` for a row; the rail's
    items are columns, where that basis is a height. Keep it a 10rem by 12px bar on the
    title line. */

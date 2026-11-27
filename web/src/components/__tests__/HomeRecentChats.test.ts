@@ -836,7 +836,7 @@ describe('delegated task chats on Home', () => {
     ['linked', { path: '/repos/app', branch: 'main', dirty: false, missing: false }, true],
     ['linked to a missing folder', { path: '/repos/app', branch: '', dirty: false, missing: true }, false],
     ['unlinked', undefined, false],
-  ])('tags a chat in a %s project with the code badge as in the sidebar', async (_label, repo, tagged) => {
+  ])('marks the project line of a chat in a %s project, not the chat', async (_label, repo, tagged) => {
     seedChats()
     const store = useProjectStore()
     const project = store.projectFor('quiet')!
@@ -844,11 +844,16 @@ describe('delegated task chats on Home', () => {
     const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
     const wrapper = mount(HomeRecentChats, { attachTo: document.body })
     await nextTick()
-    const tag = rowFor(wrapper, 'A quiet chat').find('.home-chat-code')
+    const row = rowFor(wrapper, 'A quiet chat')
+    const tag = row.find('.code-mark')
     expect(tag.exists()).toBe(tagged)
+    expect(row.find('.home-chat-code').exists()).toBe(false)
     if (tag.exists()) {
       expect(tag.text()).toBe('›_')
-      expect(tag.attributes('aria-label')).toBe('Code mode')
+      expect(tag.attributes('aria-hidden')).toBe('true')
+      expect(row.text()).toContain('Linked to a repository: app')
+    } else {
+      expect(row.text()).not.toContain('Linked to a repository')
     }
     wrapper.unmount()
   })

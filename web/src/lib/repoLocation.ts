@@ -21,13 +21,11 @@ export function chatLocationDiffers(repo: Repo, loc: Loc): boolean {
 }
 
 /**
- * The tooltip and accessible name of the sidebar's `code` badge. The badge
- * itself is one short word, so the facts live here: the repository, the branch
- * the chat really works on and the folder it works in. Full values, never the
- * shortened branch the visible tag would show. Without a location the chat
- * works in the linked repository's own checkout.
+ * A chat's code facts, shown in its sidebar row's tooltip: the repository, the
+ * branch the chat really works on and the folder it works in. Full values.
+ * Without a location the chat works in the linked repository's own checkout.
  */
-export function sidebarCodeBadgeTitle(repo: ProjectRepo, loc: Loc): string {
+export function chatCodeFacts(repo: ProjectRepo, loc: Loc): string {
   if (!hasLocation(loc)) {
     return `Code mode · ${repoName(repo.path)} · branch ${branchLabel(repo.branch)} · path: ${repo.path}`
   }

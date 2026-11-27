@@ -18,6 +18,8 @@ export interface RailItem {
   mark: RailMark | null
   titlePending: boolean
   label: string
+  /** A project in code mode: its tooltip, which puts the `›_` after the title. */
+  codeTitle?: string
 }
 
 /**

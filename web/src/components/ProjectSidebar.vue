@@ -593,9 +593,13 @@
                   :data-drag-primary="isReorderable(project) ? '' : undefined"
                   v-if="editingProject !== project.project_id"
                   @click="openProject(project.project_id)"
-                  title="Open project page"
+                  :title="projectRowTitle(project)"
                 >
                   <span class="project-name-text">{{ project.name }}</span>
+                  <!-- Code mode is the project's, not each chat's: one quiet glyph
+                       after the name, the repository named in text for AT. -->
+                  <CodeMark :repo="project.repo" />
+                  <span v-if="inCodeMode(project.repo)" class="sr-only">, {{ projectCodeTitle(project.repo) }}</span>
                   <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
                   <!-- Only a collapsed project summarises its chats: expanded,
                        each chat row already carries its own signal. One static
@@ -744,13 +748,6 @@
                          qualifier also travels as text: the row title for a
                          pointer, a hidden line for a screen reader. -->
                     <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
-                    <span
-                      v-if="inCodeMode(project.repo)"
-                      class="chat-code-tag"
-                      role="img"
-                      :title="codeBadgeTitle(chat, project.repo)"
-                      :aria-label="codeBadgeTitle(chat, project.repo)"
-                    >›_</span>
                     <ChatSignals
                       :chat-id="chat.chat_id"
                       density="row"
@@ -1006,8 +1003,9 @@ import { useDragSort, type DragCommit } from '../composables/useDragSort'
 import { useMenuFocusReturn } from '../composables/useMenuFocusReturn'
 import ActivityGlyph from './ActivityGlyph.vue'
 import TaskGlyph from './TaskGlyph.vue'
-import { sidebarCodeBadgeTitle } from '../lib/repoLocation'
-import { inCodeMode } from '../lib/repo'
+import { chatCodeFacts } from '../lib/repoLocation'
+import { inCodeMode, projectCodeTitle } from '../lib/repo'
+import CodeMark from './CodeMark.vue'
 import BrandMark from './BrandMark.vue'
 import NotificationBell from './NotificationBell.vue'
 import ChatSearchDialog from './ChatSearchDialog.vue'
@@ -1175,12 +1173,20 @@ function projectAttentionLabel(projectId: string): string {
   return parts.join(', ')
 }
 
-// The `code` badge's facts: the repository, the branch the chat works on and
-// the folder it works in. Undefined outside code mode, which is also when the
-// badge does not render.
+// A chat's code facts for its row tooltip: the repository, the branch the chat
+// works on and the folder it works in. Undefined outside code mode. The row has
+// no mark of its own: the project row carries the glyph.
 function codeBadgeTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string | undefined {
   if (!inCodeMode(repo)) return undefined
-  return sidebarCodeBadgeTitle(repo, chat.repo_location)
+  return chatCodeFacts(repo, chat.repo_location)
+}
+
+// The project row's tooltip: the action, then the repository when the project's
+// chats work in code mode.
+function projectRowTitle(project: ProjectInfo): string {
+  return inCodeMode(project.repo)
+    ? `Open project page\n${projectCodeTitle(project.repo)}`
+    : 'Open project page'
 }
 
 // Which relation the task badge stands for: the board task is delegated to
@@ -2607,6 +2613,7 @@ async function confirmDeleteChat(chatId: string) {
    same 6px .badge already gives itself. Scoped here on purpose: the workspace
    pill puts the same marks in a flex row with a gap, where a margin would
    double up. */
+.project-name .code-mark,
 .project-name .rollup-needs-dot,
 .project-name .project-working {
   margin-left: var(--space-2);
@@ -2721,20 +2728,14 @@ async function confirmDeleteChat(chatId: string) {
   white-space: nowrap;
 }
 
-/* The task and code marks are glyphs (code `›_`, task checkbox); the names
-   live in title/aria. They never shrink; the title truncates first. */
-.chat-task-tag,
-.chat-code-tag {
+/* The task mark is a glyph (checkbox); its name lives in title/aria. It never
+   shrinks; the title truncates first. */
+.chat-task-tag {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
   height: 16px;
   color: var(--fg3);
-}
-
-.chat-code-tag {
-  font: 700 calc(11px * var(--font-scale))/1 var(--font-mono);
-  letter-spacing: -0.04em;
 }
 
 /* Unread is full-strength text plus the row's dot, not bold: bold chat
@@ -2982,9 +2983,9 @@ async function confirmDeleteChat(chatId: string) {
   }
   /* The button takes the place of the row's trailing marks while it shows,
      rather than half-covering them; they keep their space so nothing shifts. */
-  .chat-item:hover :is(.chat-task-tag, .chat-code-tag, .chat-signals, .remote-chip),
-  .chat-item:focus-within :is(.chat-task-tag, .chat-code-tag, .chat-signals, .remote-chip),
-  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-code-tag, .chat-signals, .remote-chip) {
+  .chat-item:hover :is(.chat-task-tag, .chat-signals, .remote-chip),
+  .chat-item:focus-within :is(.chat-task-tag, .chat-signals, .remote-chip),
+  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-signals, .remote-chip) {
     visibility: hidden;
   }
 }

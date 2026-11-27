@@ -1489,26 +1489,32 @@ describe('ProjectSidebar accessible context menus', () => {
     wrapper.unmount()
   })
 
-  it('tags every chat of a linked project with a quiet code marker', async () => {
+  it('marks the linked project, not its chats, with a quiet code glyph', async () => {
     const store = useProjectStore()
     store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
     const wrapper = await mountSidebar()
     await flushPromises()
-    expect(wrapper.findAll('.chat-code-tag')).toHaveLength(1)
-    expect(wrapper.get('.chat-code-tag').text()).toBe('›_')
-    expect(wrapper.get('.chat-code-tag').attributes('role')).toBe('img')
+    const mark = wrapper.get('.project-name .code-mark')
+    expect(mark.text()).toBe('›_')
+    expect(mark.attributes('aria-hidden')).toBe('true')
+    // The glyph is decorative: the repository is in the row's name and tooltip.
+    expect(wrapper.get('.project-name').text()).toContain('Linked to a repository: app')
+    expect(wrapper.get('.project-name').attributes('title')).toBe('Open project page\nLinked to a repository: app')
+    expect(wrapper.find('.chat-item .code-mark').exists()).toBe(false)
+    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
     wrapper.unmount()
 
     store.projects[0].repo = null
     const unlinked = await mountSidebar()
     await flushPromises()
-    expect(unlinked.find('.chat-code-tag').exists()).toBe(false)
+    expect(unlinked.find('.code-mark').exists()).toBe(false)
+    expect(unlinked.get('.project-name').attributes('title')).toBe('Open project page')
     unlinked.unmount()
 
     store.projects[0].repo = { path: '/r/app', branch: '', dirty: false, missing: true }
     const missing = await mountSidebar()
     await flushPromises()
-    expect(missing.find('.chat-code-tag').exists()).toBe(false)
+    expect(missing.find('.code-mark').exists()).toBe(false)
     missing.unmount()
   })
 
@@ -1518,31 +1524,15 @@ describe('ProjectSidebar accessible context menus', () => {
     store.chats[0].repo_location = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
   }
 
-  it('names the worktree branch and folder in the code badge', async () => {
+  it('keeps a chat\'s worktree branch and folder in its row title, with no mark on the row', async () => {
     worktreeChat()
     const wrapper = await mountSidebar()
     await flushPromises()
-    const code = wrapper.get('.chat-code-tag')
-    expect(code.text()).toBe('›_')
-    expect(code.attributes('role')).toBe('img')
-    expect(code.attributes('title')).toContain('feat-x')
-    expect(code.attributes('title')).toContain('/r/app-wt')
-    expect(code.attributes('aria-label')).toContain('feat-x')
-    expect(code.attributes('aria-label')).toContain('/r/app-wt')
-    wrapper.unmount()
-  })
-
-  it('keeps the repository facts in the row title, where a hidden badge cannot hide them', async () => {
-    worktreeChat()
-    const wrapper = await mountSidebar()
-    await flushPromises()
-    const badge = wrapper.get('.chat-code-tag')
-    // A fine pointer hides the row's marks while its actions show, so the
-    // facts the badge carries live in the row's own title too.
-    expect(wrapper.get('.chat-item').attributes('title'))
-      .toBe(`Menu chat\nDrag to move to another project\n${badge.attributes('title')}`)
-    expect(wrapper.get('.chat-item').attributes('title')).toContain('feat-x')
-    expect(wrapper.get('.chat-item').attributes('title')).toContain('/r/app-wt')
+    expect(wrapper.find('.chat-item .code-mark').exists()).toBe(false)
+    expect(wrapper.get('.chat-item').attributes('title')).toBe(
+      'Menu chat\nDrag to move to another project\n'
+      + 'Code mode · app · branch feat-x · worktree: /r/app-wt',
+    )
     wrapper.unmount()
   })
 })
