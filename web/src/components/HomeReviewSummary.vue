@@ -4,16 +4,23 @@
     <!-- Only what needs a look: an up-to-date queue is not news, so it drops
          out instead of holding a row that says "nothing here". -->
     <div v-if="visibleItems.length || careLine" class="home-review-list">
-      <!-- Workspace care: always one quiet line once its report is read. The
-           Needs you list carries the signal; this line only states the fact. -->
+      <!-- Workspace care: one line once its report is read, only while this
+           rail sits beside the request column. There it is the single care
+           signal and opens the report; when the rail has dropped below the
+           column, the Needs you row carries it and this line is not drawn. -->
       <button
         v-if="careLine"
         type="button"
         class="docked-row home-review-item home-review-item--care"
-        :class="{ 'home-review-item--care-running': careLine.running }"
+        :class="{
+          'home-review-item--care-running': careLine.running,
+          'home-review-item--care-attention': careLine.tone === 'attention',
+          'home-review-item--care-error': careLine.tone === 'error',
+        }"
+        :aria-label="careLine.label"
         @click="openCare"
       >
-        <span class="docked-row-title home-review-title home-review-care-title"><CareGlyph :kind="careLine.glyph" />Workspace care</span>
+        <span class="docked-row-title home-review-title home-review-care-title"><CareGlyph :kind="careLine.glyph" />{{ careLine.title }}</span>
         <span class="docked-row-detail home-review-detail">{{ careLine.detail }}</span>
       </button>
       <button
@@ -48,7 +55,8 @@ import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWo
 import HomeTodayStats from './HomeTodayStats.vue'
 import CareGlyph from './CareGlyph.vue'
 import DockedWindow from './DockedWindow.vue'
-import { careGlyph, careRailDetail, careState } from '../lib/careReport'
+import { careGlyph, careRailDetail, careRailLabel, careRailTitle, careRailTone, careState } from '../lib/careReport'
+import { useHomeRail } from '../composables/useHomeRail'
 import { useCareReportStore } from '../stores/careReport'
 import { memorySectionPath } from '../stores/memoryMap'
 
@@ -152,11 +160,23 @@ let releaseCare: () => void = () => {}
 onMounted(() => { releaseCare = care.attach() })
 onBeforeUnmount(() => releaseCare())
 
+const homeRail = useHomeRail()
 const careLine = computed(() => {
   const report = care.report
+  if (!homeRail.beside.value) return null
   if (!report || report.workspace !== projects.activeWorkspace) return null
   const state = careState(report)
-  return { glyph: careGlyph(state), detail: careRailDetail(report), running: state === 'running' }
+  const tone = careRailTone(report)
+  return {
+    // A run that left something for the person wears the ring-and-exclamation
+    // shape; the report page keeps the tick for "done with things for you".
+    glyph: tone ? 'blocked' as const : careGlyph(state),
+    title: careRailTitle(report),
+    detail: careRailDetail(report),
+    label: careRailLabel(report),
+    running: state === 'running',
+    tone,
+  }
 })
 
 function openCare(): void {
@@ -195,7 +215,11 @@ function openItem(key: ReviewItem['key']) {
 }
 
 /* The care line is quiet in every state: the glyph's shape and the detail's
-   words carry the status, and Needs you carries the call to act. */
+   words carry the status. When care needs the person the docked row is the
+   only signal, so its title says so in words (*Care did not finish*) beside the
+   ring glyph, in the warning colour (error colour for did not finish); hover
+   and focus are the other rows'. The selector keeps the specificity that lets
+   the flex title (glyph beside text) beat DockedWindow's clamped box. */
 .home-review-item .home-review-care-title {
   display: inline-flex;
   align-items: center;
@@ -203,6 +227,11 @@ function openItem(key: ReviewItem['key']) {
   color: var(--fg2);
 }
 .home-review-item--care-running .home-review-care-title { color: var(--fg); }
+.home-review-item--care-attention .home-review-care-title { color: var(--warning); }
+.home-review-item--care-error .home-review-care-title { color: var(--error-text); }
+.home-review-item--care-error .home-review-care-title :deep(.care-glyph) { color: var(--error-text); }
+.home-review-item--care-attention .home-review-detail,
+.home-review-item--care-error .home-review-detail { color: var(--fg); }
 
 .home-review-item--loading .home-review-title {
   color: var(--fg2);

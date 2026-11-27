@@ -12,6 +12,7 @@ import { api } from '../../lib/api'
 import type { Schedule, Task } from '../../lib/types'
 import type { CareReport } from '../../lib/careReport'
 import { careReports } from '../../lib/careReportFixture'
+import { setHomeRailBeside } from '../../composables/useHomeRail'
 
 const router = {
   push: vi.fn(() => Promise.resolve()),
@@ -44,6 +45,8 @@ function schedule(id: string, workspace: string, overrides: Partial<Schedule> = 
 describe('HomeReviewSummary', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    // The rail is docked beside the request column unless a test drops it.
+    setHomeRailBeside(true)
     router.push.mockClear()
     get.mockReset()
     get.mockImplementation(() => Promise.resolve({}))
@@ -150,23 +153,28 @@ describe('HomeReviewSummary', () => {
     }
 
     it.each([
-      ['complete', 'done', /^Done .* · 5 of 5 steps$/],
-      ['needsYou', 'done', /^Done .* · 5 of 5 steps$/],
-      ['blocked', 'blocked', /^4 of 6 steps · 2 blocked$/],
-      ['interrupted', 'blocked', /^Interrupted · 2 of 6 steps$/],
-      ['running', 'running', /^Running now · step 3 of 6: Learnings$/],
-      ['never', 'open', /^Not run yet\. It runs every day\.$/],
-    ] as const)('shows one quiet line for %s with its glyph and words', async (state, glyph, detail) => {
+      ['complete', 'done', 'Workspace care', /^Done .* · 5 of 5 steps$/],
+      ['needsYou', 'blocked', 'Care needs you', /^4 things need you$/],
+      ['blocked', 'blocked', 'Care did not finish', /^4 of 6 steps · 2 blocked$/],
+      ['interrupted', 'blocked', /^Care was cut off/, /^Interrupted · 2 of 6 steps$/],
+      ['running', 'running', 'Workspace care', /^Running now · step 3 of 6: Learnings$/],
+      ['never', 'open', 'Workspace care', /^Not run yet\. It runs every day\.$/],
+    ] as const)('shows one line for %s with its glyph, title and words', async (state, glyph, title, detail) => {
       serveCare(careReports[state])
       useTaskStore().schedules = []
       const wrapper = mount(HomeReviewSummary)
       await flushPromises()
       const line = wrapper.get('.home-review-item--care')
-      expect(line.get('.home-review-care-title').text()).toBe('Workspace care')
+      const shown = line.get('.home-review-care-title').text()
+      if (typeof title === 'string') expect(shown).toBe(title)
+      else expect(shown).toMatch(title)
       expect(line.find(`.care-glyph--${glyph}`).exists()).toBe(true)
       expect(line.get('.home-review-detail').text()).toMatch(detail)
-      // Quiet: never the warning colour a failing automation takes.
+      // The care line has its own attention class, never the automations' one.
       expect(line.classes()).not.toContain('home-review-item--attention')
+      // Warning tone for needs you and cut off, error tone for did not finish, none otherwise.
+      expect(line.classes().includes('home-review-item--care-attention')).toBe(['needsYou', 'interrupted'].includes(state))
+      expect(line.classes().includes('home-review-item--care-error')).toBe(state === 'blocked')
       // The care line stands in for "Nothing to review.".
       expect(wrapper.find('.home-review-clear').exists()).toBe(false)
       wrapper.unmount()
@@ -178,6 +186,43 @@ describe('HomeReviewSummary', () => {
       await flushPromises()
       await wrapper.get('.home-review-item--care').trigger('click')
       expect(router.push).toHaveBeenCalledWith('/memory/care')
+      wrapper.unmount()
+    })
+
+    it.each([
+      ['needsYou', /^Care needs you\. 4 things need you\. Open the care report\.$/],
+      ['blocked', /^Care did not finish\. 4 of 6 steps · 2 blocked\. Open the care report\.$/],
+      ['complete', /^Workspace care\. Done .* · 5 of 5 steps\. Open the care report\.$/],
+    ] as const)('names the %s state once, in the visible words, on a keyboard-reachable row', async (state, label) => {
+      serveCare(careReports[state])
+      const wrapper = mount(HomeReviewSummary, { attachTo: document.body })
+      await flushPromises()
+      const line = wrapper.get('.home-review-item--care')
+      expect(line.element.tagName).toBe('BUTTON')
+      expect(line.attributes('type')).toBe('button')
+      expect(line.attributes('tabindex')).toBeUndefined()
+      expect(line.attributes('aria-label')).toMatch(label)
+      ;(line.element as HTMLElement).focus()
+      expect(document.activeElement).toBe(line.element)
+      wrapper.unmount()
+    })
+
+    it('draws no care line when the rail has dropped below the column', async () => {
+      setHomeRailBeside(false)
+      serveCare(careReports.blocked)
+      useTaskStore().schedules = []
+      const wrapper = mount(HomeReviewSummary)
+      await flushPromises()
+      expect(wrapper.find('.home-review-item--care').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('Workspace care')
+      expect(wrapper.text()).toContain('Nothing to review.')
+      // Following the layout live: docking the rail brings the line back.
+      setHomeRailBeside(true)
+      await nextTick()
+      expect(wrapper.find('.home-review-item--care').exists()).toBe(true)
+      setHomeRailBeside(false)
+      await nextTick()
+      expect(wrapper.find('.home-review-item--care').exists()).toBe(false)
       wrapper.unmount()
     })
 

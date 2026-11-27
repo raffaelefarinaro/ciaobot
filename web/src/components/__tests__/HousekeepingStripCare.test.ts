@@ -6,6 +6,7 @@ import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import HousekeepingStrip from '../HousekeepingStrip.vue'
 import { resetHomeNoticeWindows } from '../../composables/useHomeNoticeWindows'
+import { setHomeRailBeside } from '../../composables/useHomeRail'
 import { api } from '../../lib/api'
 import type { CareReport } from '../../lib/careReport'
 import { careReports, CARE_WORKSPACE } from '../../lib/careReportFixture'
@@ -44,6 +45,7 @@ async function mountStrip() {
 describe('HousekeepingStrip — Workspace care', () => {
   beforeEach(() => {
     resetHomeNoticeWindows()
+    setHomeRailBeside(false)
     setActivePinia(createPinia())
     useProjectStore().activeWorkspace = CARE_WORKSPACE
     const housekeeping = useHousekeepingStore()
@@ -71,6 +73,27 @@ describe('HousekeepingStrip — Workspace care', () => {
     expect(row.get('.sr-only').text()).toBe(spoken)
     expect(leadLabels(row)).toEqual(['Open report'])
     expect(await menuLabels(row)).toEqual(['Run care again', 'Hide for now'])
+  })
+
+  it.each(['needsYou', 'blocked', 'interrupted'] as const)('raises no row for %s while At a glance sits beside the column', async state => {
+    setHomeRailBeside(true)
+    serve(careReports[state])
+    const wrapper = await mountStrip()
+    expect(titles(wrapper)).toEqual([])
+    expect(wrapper.find('section.needs-you').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('follows the rail across the 940px drop live, once in each layout', async () => {
+    serve(careReports.blocked)
+    const wrapper = await mountStrip()
+    expect(titles(wrapper)).toEqual(['Care did not finish'])
+    setHomeRailBeside(true)
+    await nextTick()
+    expect(titles(wrapper)).toEqual([])
+    setHomeRailBeside(false)
+    await nextTick()
+    expect(titles(wrapper)).toEqual(['Care did not finish'])
   })
 
   it('says a cut-off run in its own words', async () => {

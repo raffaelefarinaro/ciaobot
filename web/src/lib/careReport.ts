@@ -209,12 +209,32 @@ export function careRailDetail(report: CareReport, now: Date = new Date()): stri
       return `Interrupted · ${closed(report)} of ${total} steps`
     case 'blocked':
       return `${done} of ${total} steps · ${blocked} blocked`
+    case 'needs_you': {
+      // Only the items still open: a rejected or applied proposal no longer counts.
+      const n = openNeeds(report).length
+      return `${plural(n, 'thing')} ${n === 1 ? 'needs' : 'need'} you`
+    }
     default: {
       const when = whenWords(report.modified_at, now)
       const lead = when ? `Done ${when}` : 'Done'
       return total ? `${lead} · ${done} of ${total} steps` : `${lead} · nothing was due`
     }
   }
+}
+
+/** The At a glance line's title: the Needs you row's own words when care needs the owner, else the feature's name. */
+export function careRailTitle(report: CareReport, now: Date = new Date()): string {
+  return careNeedsYouRow(report, now)?.title ?? 'Workspace care'
+}
+
+/** How the docked line wears a run that needs the owner (null: it stays quiet). */
+export function careRailTone(report: CareReport): CareRow['tone'] | null {
+  return careNeedsYouRow(report)?.tone ?? null
+}
+
+/** The At a glance line's spoken name: what it shows, then where it goes. */
+export function careRailLabel(report: CareReport, now: Date = new Date()): string {
+  return `${careRailTitle(report, now)}. ${careRailDetail(report, now)}. Open the care report.`
 }
 
 export interface CareRow {

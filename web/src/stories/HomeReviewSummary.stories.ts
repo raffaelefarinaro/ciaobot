@@ -9,6 +9,7 @@ import { assertFenceQuiet } from './homeWindowsFixture'
 import { renderSeeded } from './homeIntakeFixture'
 import type { CareReport } from '../lib/careReport'
 import { careReports, careRoute } from './careFixture'
+import { setHomeRailBeside } from '../composables/useHomeRail'
 
 /** Synthetic workspace only: no real names, paths or tokens. */
 const WORKSPACE = 'storybook-alpha'
@@ -45,6 +46,8 @@ const meta = {
   title: 'Home intake and review/HomeReviewSummary',
   component: HomeReviewSummary,
   tags: ['!autodocs'],
+  // The rail is docked beside the request column unless a story drops it.
+  beforeEach: () => { setHomeRailBeside(true); return () => setHomeRailBeside(false) },
   parameters: {
     docs: { disable: true, story: { inline: false } },
     controls: { disable: true },
@@ -135,7 +138,7 @@ export const AutomationAttention: Story = {
 
 // ── Workspace care: one quiet line per state ───────────────────────────────
 
-function careStory(report: CareReport, detail: RegExp, glyph: string): Story {
+function careStory(report: CareReport, detail: RegExp, glyph: string, title = 'Workspace care'): Story {
   return {
     parameters: { fixture: { routes: [...statsRoutes('default'), careRoute(report)] } },
     render: () => renderSeeded(HomeReviewSummary, {
@@ -144,7 +147,8 @@ function careStory(report: CareReport, detail: RegExp, glyph: string): Story {
     }),
     play: async ({ canvas, canvasElement }) => {
       await assertFenceQuiet(canvas)
-      const line = await waitFor(() => canvas.getByRole('button', { name: /Workspace care/ }))
+      const line = await waitFor(() => canvas.getByRole('button', { name: new RegExp(`^${title}\\b`) }))
+      expect(line.textContent).toContain(title)
       expect(line.textContent).toMatch(detail)
       expect(canvasElement.querySelector(`.care-glyph--${glyph}`)).not.toBeNull()
       expect(line.className).not.toContain('home-review-item--attention')
@@ -153,8 +157,24 @@ function careStory(report: CareReport, detail: RegExp, glyph: string): Story {
 }
 
 export const CareComplete: Story = careStory(careReports.complete, /Done .* · 5 of 5 steps/, 'done')
-export const CareNeedsYou: Story = careStory(careReports.needsYou, /Done .* · 5 of 5 steps/, 'done')
-export const CareBlocked: Story = careStory(careReports.blocked, /4 of 6 steps · 2 blocked/, 'blocked')
-export const CareInterrupted: Story = careStory(careReports.interrupted, /Interrupted · 2 of 6 steps/, 'blocked')
+export const CareNeedsYou: Story = careStory(careReports.needsYou, /4 things need you/, 'blocked', 'Care needs you')
+export const CareBlocked: Story = careStory(careReports.blocked, /4 of 6 steps · 2 blocked/, 'blocked', 'Care did not finish')
+export const CareInterrupted: Story = careStory(careReports.interrupted, /Interrupted · 2 of 6 steps/, 'blocked', 'Care was cut off')
 export const CareRunning: Story = careStory(careReports.running, /Running now · step 3 of 6: Learnings/, 'running')
 export const CareNeverRun: Story = careStory(careReports.never, /Not run yet\. It runs every day\./, 'open')
+
+// The rail dropped below the request column: Needs you carries care, so this
+// rail draws no care line.
+export const CareRailDropped: Story = {
+  beforeEach: () => { setHomeRailBeside(false) },
+  parameters: { fixture: { routes: [...statsRoutes('default'), careRoute(careReports.blocked)] } },
+  render: () => renderSeeded(HomeReviewSummary, {
+    label: 'Synthetic review summary below the request column',
+    seed: seedReview({ automations: { loaded: true } }),
+  }),
+  play: async ({ canvas }) => {
+    await assertFenceQuiet(canvas)
+    await waitFor(() => expect(canvas.getByText('Nothing to review.')).toBeTruthy())
+    expect(canvas.queryByRole('button', { name: /Workspace care|Care did not finish/ })).toBeNull()
+  },
+}
