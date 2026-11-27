@@ -459,7 +459,7 @@ final class HostFleetTests: XCTestCase {
         let fleet = makeFleet(
             hosts: [record(oldPort, "127.0.0.1:8445"), record(remote, "Remote")],
             status: status, registry: registry, chatTransport: transport,
-            eventTransport: FleetEventTransport(), localEngineAvailable: true
+            eventTransport: FleetEventTransport(), localEngineAvailable: true, ownPorts: [61190, 8445]
         )
         fleet.start()
 
@@ -468,6 +468,26 @@ final class HostFleetTests: XCTestCase {
         XCTAssertEqual(fleet.feeds.first?.label, "This Mac")
         XCTAssertFalse(transport.calls.contains { $0.origin.canonicalKey == oldPort.canonicalKey },
                        "The taken-over origin is the same engine and is never polled")
+    }
+
+    func testADevEngineOnAnotherLoopbackPortKeepsItsFeedAndAddressLabel() throws {
+        let (registry, _) = try makeRegistry()
+        let privatePort = Origin("https://127.0.0.1:61190")!
+        let dev = Origin("http://127.0.0.1:8543")!
+        let status = AppSessionStatus()
+        status.reportConnected(privatePort, dataStore: WKWebsiteDataStore.nonPersistent())
+        let transport = FleetChatTransport()
+
+        let fleet = makeFleet(
+            hosts: [record(dev, "127.0.0.1:8543")],
+            status: status, registry: registry, chatTransport: transport,
+            eventTransport: FleetEventTransport(), localEngineAvailable: true, ownPorts: [61190, 8445]
+        )
+        fleet.start()
+
+        XCTAssertEqual(fleet.feeds.map(\.label), ["This Mac", "127.0.0.1:8543"])
+        XCTAssertTrue(waitUntil { transport.calls.contains { $0.origin.canonicalKey == dev.canonicalKey } },
+                      "A different loopback server is still polled")
     }
 
     func testThisMacAloneIsOneFeedNamedThisMac() throws {
@@ -479,7 +499,7 @@ final class HostFleetTests: XCTestCase {
         let fleet = makeFleet(
             hosts: [record(Origin("http://127.0.0.1:8445")!, "127.0.0.1:8445")],
             status: status, registry: registry, chatTransport: FleetChatTransport(),
-            eventTransport: FleetEventTransport(), localEngineAvailable: true
+            eventTransport: FleetEventTransport(), localEngineAvailable: true, ownPorts: [61190, 8445]
         )
         fleet.start()
 
@@ -517,7 +537,8 @@ final class HostFleetTests: XCTestCase {
         eventTransport: FleetEventTransport,
         cookieFactory: FleetCookieFactory? = nil,
         stores: FleetStoreFactory? = nil,
-        localEngineAvailable: Bool = false
+        localEngineAvailable: Bool = false,
+        ownPorts: Set<Int> = []
     ) -> HostFleetModel {
         let cookieFactory = cookieFactory ?? FleetCookieFactory()
         let stores = stores ?? FleetStoreFactory()
@@ -531,7 +552,8 @@ final class HostFleetTests: XCTestCase {
             persistentStoreFactory: { stores.store(for: $0) },
             ephemeralStoreFactory: { stores.ephemeral() },
             now: { self.now },
-            localEngineAvailable: localEngineAvailable
+            localEngineAvailable: localEngineAvailable,
+            ownPorts: { ownPorts }
         )
     }
 

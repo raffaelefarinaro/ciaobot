@@ -665,7 +665,7 @@ final class EngineTakeover: ObservableObject {
         }
         // The old engine's origin is This Mac now. A host saved for it would list
         // every chat twice, so it is not offered again.
-        hosts?.removeLoopbackHosts(port: plan.port)
+        hosts?.removeLoopbackHosts(ports: [plan.port])
         return .done(left: left)
     }
 

@@ -54,12 +54,14 @@ protocol HostListStoring: AnyObject {
 }
 
 extension HostListStoring {
-    /// Removes every saved loopback host on `port`: the origin a taken-over 1.x
-    /// engine served on. A host on another machine (Tailscale, LAN) is another
-    /// server even when it reaches this Mac, so only loopback spellings count.
-    func removeLoopbackHosts(port: Int) {
+    /// Removes every saved loopback host on one of `ports`: the origins of the
+    /// bundled engine itself, or of the 1.x engine it took over. A host on
+    /// another machine (Tailscale, LAN) or on another loopback port is another
+    /// server, so only loopback spellings on exactly these ports count.
+    /// Idempotent.
+    func removeLoopbackHosts(ports: Set<Int>) {
         for record in hosts {
-            guard let origin = Origin(record.origin), origin.isLoopback, origin.portNumber == port else { continue }
+            guard let origin = Origin(record.origin), origin.isLoopback, ports.contains(origin.portNumber) else { continue }
             remove(origin)
         }
     }
