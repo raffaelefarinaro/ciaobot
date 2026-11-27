@@ -397,6 +397,15 @@ After PWA changes, rebuild and either restart the service or use the **Deploy** 
 
 Restart requests made through the running server enter a drain phase: existing chats finish before shutdown, and new turns are not admitted during that window. Directly killing the process bypasses this protection. A drain that is cancelled (an update whose drain timed out) replays the background-run and CLI-task wakes it deferred instead of losing them, since no restart follows to deliver them.
 
+On a first launch (or after an adapter pin changes) the ACP adapters install in the
+background while the engine is already up. A chat, one-shot or startup job (error triage,
+schedule catch-up, memory pass, care) that opens an adapter in that window waits for the
+install, up to the 300 s npm timeout, behind a "Setting up Claude, one moment." status line;
+a failed install ends the wait with the installer's reason in the error card. Startup error
+triage after a Ciaobot for Mac takeover reads only the records logged after the handover
+(`mac_takeover.handed_over_at()`), so the 1.x engine's old `server_errors.log` does not open
+a triage chat.
+
 ## Local PWA dev
 
 The installed-app share target is a service-worker-intercepted multipart POST

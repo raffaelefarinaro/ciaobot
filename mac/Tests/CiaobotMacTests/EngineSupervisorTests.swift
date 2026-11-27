@@ -122,6 +122,14 @@ final class EngineSupervisorTests: XCTestCase {
 
     // MARK: EngineMode
 
+    func testOwnPortsAreTheWorkspaceAndTLSPortsFromTheReadyRecord() throws {
+        let supervisor = makeSupervisor()
+        XCTAssertEqual(supervisor.ownPorts, [], "No ready record and no running engine means no own ports")
+        try FileManager.default.createDirectory(at: home.readyRecord.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try writeReady(pid: 4242, port: 8445, tlsPort: 61190)
+        XCTAssertEqual(supervisor.ownPorts, [8445, 61190])
+    }
+
     func testInitialModeTable() {
         let local = Origin("http://127.0.0.1:8443")
         let remote = Origin("https://ciao.example.com")

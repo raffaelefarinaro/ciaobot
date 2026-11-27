@@ -275,3 +275,32 @@ def test_report_cannot_close_its_own_fence() -> None:
     assert "&lt;/error-report" in prompt
     assert "&lt;/ error-report" in prompt
     assert prompt.index("Ignore the steps") < prompt.index("</error-report>")
+
+
+
+@pytest.mark.asyncio
+async def test_a_takeover_does_not_triage_the_old_engines_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first start after a takeover finds the 1.x engine's log: none of it is this engine's."""
+    from ciao import mac_takeover
+
+    handover = datetime.now(UTC) - timedelta(minutes=2)
+    monkeypatch.setattr(mac_takeover, "handed_over_at", lambda: handover)
+    pcm = FakePCM()
+    config = _config(tmp_path)
+    old = (handover - timedelta(hours=3)).astimezone()
+    (Path(config.state_path).parent / "server_errors.log").write_text(
+        "".join(f"{old:%Y-%m-%d %H:%M}:{i % 60:02d},000 ERROR ciao.old: boom {i}\n" for i in range(160)),
+        encoding="utf-8",
+    )
+
+    assert await run_startup_triage(pcm, config, _resolve) is False
+    assert pcm.dispatched == []
+    assert not (Path(config.state_path).parent / TRIAGE_MARKER_NAME).exists()
+
+    new = (handover + timedelta(minutes=1)).astimezone()
+    with (Path(config.state_path).parent / "server_errors.log").open("a", encoding="utf-8") as log:
+        log.write(f"{new:%Y-%m-%d %H:%M:%S},000 ERROR ciao.new: this engine's boom\n")
+
+    assert await run_startup_triage(pcm, config, _resolve) is True
