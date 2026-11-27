@@ -93,7 +93,7 @@ export function careLastRunWords(report: CareReport): string {
   const stamp = stampWords(report.modified_at)
   if (!stamp) return ''
   const n = openNeeds(report).length
-  return `Last run: ${stamp}: ${n ? `${plural(n, 'thing')} needed you` : 'nothing needed you'}`
+  return `Last run: ${stamp} · ${n ? `${plural(n, 'thing')} needed you` : 'nothing needed you'}`
 }
 
 /** One state, in priority order: a live run, then what the file says. */

@@ -157,7 +157,7 @@ what it may reach; nothing else is reachable.
 - `npm run test-storybook` runs the browser interaction runner (@storybook/addon-vitest,
   vitest browser mode with the Playwright provider): every story renders in headless
   Chromium and its `play` functions execute there. Chromium must be installed locally
-  (`npx playwright install chromium`).
+  (`npx playwright install chromium webkit`).
 - Node tests check data and filters, not Vue interactions or manager links.
 
 **Visual check.** Filtering, keyboard access, narrow and zoom layouts and story links
@@ -878,7 +878,7 @@ Ground rules, so the suite stays worth blocking CI on:
   parallel cannot see each other's.
 
 ```bash
-npx playwright install chromium   # first time only, ~95 MB, outside node_modules
+npx playwright install chromium webkit   # first time only, ~170 MB, outside node_modules
 npm run test:e2e                  # prehook builds the PWA and terminal harness, then runs the suite
 npm run test:e2e -- --headed      # watch it
 npm run test:e2e -- --ui          # pick and step through a spec

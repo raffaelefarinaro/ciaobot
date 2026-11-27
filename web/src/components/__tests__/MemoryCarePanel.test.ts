@@ -209,7 +209,7 @@ describe('MemoryCarePanel', () => {
     expect(wrapper.get('.mc-summary-title').text()).toBe('Running now')
     expect(wrapper.find('.care-glyph--running').exists()).toBe(true)
     expect(wrapper.get('.mc-calm').text()).toBe('Care is starting. Results appear here as steps finish.')
-    expect(wrapper.get('.mc-last-run').text()).toMatch(/^Last run: .*: 1 thing needed you$/)
+    expect(wrapper.get('.mc-last-run').text()).toMatch(/^Last run: .* · 1 thing needed you$/)
     // No items, no steps, no notes, no blocked or done segment: every segment is the dashed wait mark.
     expect(wrapper.find('.mc-need').exists()).toBe(false)
     expect(wrapper.find('details.mc-disclosure').exists()).toBe(false)

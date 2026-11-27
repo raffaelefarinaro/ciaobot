@@ -31,7 +31,7 @@ Checkbox lines appear only in the checklist above the first `##` heading; every 
 
 ## What needs you, and Notes
 
-Each item under `## What needs you` follows the standard in `step-preamble.md`: one decision, at most two short sentences in everyday words (the situation, the recommendation, how to act), ending in `(path: …)` when there is a file to open. The app reads the path to pick the button: a proposal opens a review with Approve and Reject, `Workspace/Unsure.md` opens Unsure, `AGENTS.md` opens the guide, another vault file opens that file. Every item also offers "Fix with a chat".
+Each item under `## What needs you` follows the standard in `step-preamble.md`: one decision, at most two short sentences in everyday words (the situation, the recommendation, how to act), ending in `(path: …)` when there is a file to open. The app reads the path to pick the button: a proposal opens a review with Approve and Reject, `Workspace/Unsure.md` opens Unsure, `AGENTS.md` opens the guide, another vault file opens that file. A proposal, `Workspace/Unsure.md` and `AGENTS.md` each get that one button only; an item that names another vault file also offers "Fix with a chat", as does an item with no path.
 
 - Open Unsure lines are one item for the whole list: "N suggestions are waiting in Unsure", naming at most the first 3, then "Open Memory > Unsure and approve or reject them.", with `(path: Workspace/Unsure.md)`.
 - Hygiene fixes what a rule settles and leaves at most one item for skills that are too long (pointing at the first open proposal) and one for findings that need a decision, never one item per finding.

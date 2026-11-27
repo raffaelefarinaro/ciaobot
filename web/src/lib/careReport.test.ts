@@ -201,8 +201,8 @@ describe('the report page words', () => {
 
   it('words the previous run for the quiet line while a run starts', () => {
     const stamp = stampWords(careReports.runningStale.modified_at)
-    expect(careLastRunWords(careReports.runningStale)).toBe(`Last run: ${stamp}: 1 thing needed you`)
-    expect(careLastRunWords({ ...careReports.runningStale, needs_you: [] })).toBe(`Last run: ${stamp}: nothing needed you`)
+    expect(careLastRunWords(careReports.runningStale)).toBe(`Last run: ${stamp} · 1 thing needed you`)
+    expect(careLastRunWords({ ...careReports.runningStale, needs_you: [] })).toBe(`Last run: ${stamp} · nothing needed you`)
     expect(careLastRunWords(careReports.never)).toBe('')
   })
 
