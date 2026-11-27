@@ -181,16 +181,22 @@ def is_hidden_continuation(content: str) -> bool:
 #: saves such a resource as two text blocks of the user message: this link, then the capsule
 #: wrapped in a ``<context ref="...">`` element.
 CONTEXT_URI = "ciaobot://context"
-_CONTEXT_REF_RE = re.compile(
-    r'\s*<context ref="' + re.escape(CONTEXT_URI) + r'">.*?</context>\s*', re.DOTALL
-)
+_CONTEXT_REF_OPEN = f'<context ref="{CONTEXT_URI}">'
+_CONTEXT_REF_CLOSE = "</context>"
 # Context the CLI injects into a user message, which a replay can carry as a block of its own.
 _INJECTED_BLOCK_RE = re.compile(r"^\s*<system-reminder>")
 
 
 def _replayed_block(block: str) -> str:
-    """One text block of a replayed user message as typed, or "" when nobody typed it."""
-    text = remove_injected_context(_CONTEXT_REF_RE.sub("\n", block).strip()).strip()
+    """One text block of a replayed user message as typed, or "" when nobody typed it.
+
+    The capsule's ``<context ref>`` block goes only when the whole block is that element: the
+    capsule can itself hold ``</context>``, and a person can quote the tag in a sentence.
+    """
+    text = block.strip()
+    if text.startswith(_CONTEXT_REF_OPEN) and text.endswith(_CONTEXT_REF_CLOSE):
+        return ""
+    text = remove_injected_context(text).strip()
     if (
         text == CONTEXT_URI
         or is_cli_envelope(text)

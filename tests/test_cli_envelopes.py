@@ -452,3 +452,42 @@ def test_native_task_run_keeps_an_unexplained_summary_on_one_line() -> None:
     )
     assert run is not None
     assert "\n" not in run.error
+
+
+
+_REF = '<context ref="ciaobot://context">'
+
+
+def test_replayed_prompt_drops_a_context_ref_block_that_holds_a_closing_tag() -> None:
+    """The capsule can hold ``</context>`` (a handover, inlined repo instructions): the whole
+    block is the adapter's element, so none of it is kept."""
+    capsule = (
+        "[CIAO_CONTEXT_BEGIN]\n[HANDOVER] user said </context> once\n"
+        "SECRET-TAIL /secret/ws\n[CIAO_CONTEXT_END]\n\n"
+    )
+    blocks = ["/review", "ciaobot://context", f"\n{_REF}\n{capsule}\n</context>"]
+    assert cli_envelopes.replayed_prompt(blocks) == "/review"
+
+
+def test_replayed_prompt_keeps_a_context_ref_tag_the_person_quoted() -> None:
+    typed = f"the adapter writes {_REF}X</context> around it, why?"
+    assert cli_envelopes.replayed_prompt([typed]) == typed
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        " " * 400_000 + "<context ref=",
+        "\n" + _REF + " " * 400_000,
+        "\n" + _REF + "<context ref=" * 30_000,
+        "[CIAO_CONTEXT_BEGIN]\n" + " " * 400_000,
+        " " * 400_000 + "<task-notification",
+    ],
+    ids=["whitespace-then-tag", "unclosed-ref", "repeated-opens", "unclosed-capsule", "whitespace-envelope"],
+)
+def test_replayed_prompt_is_linear_on_a_large_block(block: str) -> None:
+    import time
+
+    started = time.perf_counter()
+    cli_envelopes.replayed_prompt([block, block])
+    assert time.perf_counter() - started < 1.0
