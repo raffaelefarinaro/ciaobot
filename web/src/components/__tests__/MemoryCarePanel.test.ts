@@ -214,6 +214,7 @@ describe('MemoryCarePanel', () => {
     expect(wrapper.find('.mc-need').exists()).toBe(false)
     expect(wrapper.find('details.mc-disclosure').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('blocked')
+    expect(wrapper.text()).not.toContain('Weekly checks')
     const segs = wrapper.findAll('.mc-seg')
     expect(segs.length).toBeGreaterThan(0)
     expect(segs.every(s => s.classes().includes('mc-seg--wait'))).toBe(true)

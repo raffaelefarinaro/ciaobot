@@ -127,7 +127,7 @@
       </details>
 
       <div class="mc-foot">
-        <span class="mc-foot-note">{{ weeklyWords }}</span>
+        <span v-if="!stale" class="mc-foot-note">{{ weeklyWords }}</span>
         <span class="mc-foot-actions">
           <button
             v-if="report.schedule"
@@ -212,7 +212,7 @@ const calmWords = computed(() => {
 })
 const stepsCount = computed(() => (report.value ? stepsCountWords(report.value) : ''))
 const weeklyWords = computed(() => {
-  const day = report.value && !stale.value ? dayWords(report.value.weekly_done) : ''
+  const day = report.value ? dayWords(report.value.weekly_done) : ''
   return day ? `Weekly checks last done ${day}` : 'Weekly checks not done yet'
 })
 
