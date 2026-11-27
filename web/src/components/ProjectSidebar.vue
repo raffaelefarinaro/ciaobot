@@ -106,7 +106,8 @@
             class="nav-item"
             :class="{ 'nav-item--active': mode === 'memory' }"
             title="memory"
-            aria-label="memory"
+            :data-count="unsureWaiting || undefined"
+            :aria-label="unsureWaiting ? `memory — ${unsureWaiting} waiting on Unsure` : 'memory'"
           >
             <!-- Book/tray: rectilinear like the rest of the rail, which the
                  organic-curve brain never was. -->
@@ -999,6 +1000,7 @@ import { useHousekeepingStore } from '../stores/housekeeping'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
 import { useTaskSignalsStore } from '../stores/taskSignals'
+import { useUnsureStore } from '../stores/unsure'
 import ChatSignals from './ChatSignals.vue'
 import { useDragSort, type DragCommit } from '../composables/useDragSort'
 import { useMenuFocusReturn } from '../composables/useMenuFocusReturn'
@@ -1062,6 +1064,14 @@ const housekeeping = useHousekeepingStore()
 const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
 const taskSignals = useTaskSignalsStore()
+const unsure = useUnsureStore()
+// The Unsure list is one small file read per workspace switch (and after each
+// row action, which answers the list as written), so its count is live.
+watch(() => store.activeWorkspace, ws => unsure.show(ws), { immediate: true })
+/** Unsure lines waiting for the person in the selected workspace; 0 while unknown. */
+const unsureWaiting = computed(() => (
+  unsure.list && unsure.list.workspace === store.activeWorkspace ? unsure.list.counts.waiting : 0
+))
 
 // Memory's sections. Scoped counts come from the stores so they use the same
 // workspace rule as each page's list — a count that disagreed with the rows
@@ -1069,8 +1079,8 @@ const taskSignals = useTaskSignalsStore()
 type MemoryNavItem = { section: MemorySection; label: string }
 const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
   { items: [
-    // The list of what Ciaobot could not settle: a Markdown file, so no count —
-    // reading it for a number would put a file read on every page.
+    // The list of what Ciaobot could not settle; its count is the lines still
+    // waiting (not the approved ones the next care run applies).
     { section: 'unsure', label: 'Unsure' },
     // The last daily care run, read from its report file: no count either.
     { section: 'care', label: 'Workspace care' },
@@ -1089,7 +1099,7 @@ function memoryNavCount(section: MemorySection): number | null {
     // ask for attention no click can clear, and the map's own note count already
     // says how much of the vault there is.
     case 'categories': return null
-    case 'unsure': return null
+    case 'unsure': return unsureWaiting.value || null
     case 'care': return null
   }
 }
@@ -1097,6 +1107,7 @@ function memoryNavLabel(item: MemoryNavItem): string {
   const count = memoryNavCount(item.section)
   if (count === null) return item.label
   if (item.section === 'map') return `${item.label}, ${count} notes`
+  if (item.section === 'unsure') return `${item.label}, ${count} waiting`
   return `${item.label}, ${count}`
 }
 const hasBlockingHousekeeping = computed(() => housekeeping.actions.some(action => action.blocking))

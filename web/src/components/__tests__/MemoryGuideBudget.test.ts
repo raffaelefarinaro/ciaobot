@@ -123,12 +123,48 @@ describe('MemoryGuideBudget', () => {
     expect(wrapper.find('.guide-card-title').text()).toContain('personal/AGENTS.md')
   })
 
-  it('falls back to the bare basename only when the qualified path is missing', async () => {
+  it('never reads a bare basename: a workspace with no guide says so', async () => {
     const fetchMock = stubWorkspaceFile({ 'AGENTS.md': guideFile('Root note') })
     const wrapper = await mountBudget()
 
-    expect(guidePaths(fetchMock).slice(0, 2)).toEqual(['work/AGENTS.md', 'work/CLAUDE.md'])
-    expect(wrapper.find('.guide-card-title').text()).toContain('AGENTS.md')
+    expect(guidePaths(fetchMock)).toEqual(['work/AGENTS.md', 'work/CLAUDE.md'])
+    expect(wrapper.text()).toContain('No guide file found for this workspace.')
+    expect(wrapper.get('button.guide-budget-link').attributes('disabled')).toBeDefined()
+  })
+
+  it('is the docked Always loaded window, with the plain line and the whole-file total', async () => {
+    stubWorkspaceFile({ 'work/AGENTS.md': guideFile('A note') })
+    const wrapper = await mountBudget()
+
+    const root = wrapper.get('.docked-window')
+    expect(root.get('.docked-window-head #guide-budget-title').text()).toBe('Always loaded')
+    expect(root.get('.docked-window-head-end').text()).toMatch(/tokens$/)
+    expect(root.text()).toContain('Loaded into every chat; keep it short.')
+    expect(root.text()).toContain('Trim these with a chat. Ciaobot asks before changing anything.')
+  })
+
+  it('puts Optimize forward only when a region is at 85% or more', async () => {
+    stubWorkspaceFile({ 'work/AGENTS.md': guideFile('short') })
+    const quiet = await mountBudget()
+    const quietButton = quiet.findAll('button').find(b => b.text() === 'Optimize')!
+    expect(quietButton.classes()).toContain('guide-budget-link')
+    quiet.unmount()
+
+    // 2,600 of the default 3,000 characters: 86.7%, under the cap.
+    stubWorkspaceFile({ 'work/AGENTS.md': guideFile('x'.repeat(2599)) })
+    const full = await mountBudget()
+    const fullButton = full.findAll('button').find(b => b.text() === 'Optimize')!
+    expect(fullButton.classes()).toContain('btn-small')
+    expect(full.find('.guide-budget-actions--trim').exists()).toBe(true)
+  })
+
+  it('Optimize starts the trim chat with the guide it read', async () => {
+    const optimize = await import('../../lib/memoryOptimize')
+    const spy = vi.spyOn(optimize, 'startMemoryOptimizeChat').mockResolvedValue(null)
+    stubWorkspaceFile({ 'work/AGENTS.md': guideFile('A note') })
+    const wrapper = await mountBudget()
+    await wrapper.findAll('button').find(b => b.text() === 'Optimize')!.trigger('click')
+    expect(spy).toHaveBeenCalledWith(expect.anything(), { guidePath: 'work/AGENTS.md' })
   })
 
   it('counts region bars from entry text and the token line from the whole file', async () => {
@@ -177,11 +213,11 @@ describe('MemoryGuideBudget', () => {
     expect(profileCount.startsWith(`${profileChars.toLocaleString()} /`)).toBe(true)
     expect(memoryCount.startsWith(`${content.length.toLocaleString()} /`)).toBe(false)
 
-    const note = wrapper.get('.rail-note').text()
-    expect(note).toContain(wholePhrase)
-    expect(note).not.toContain(regionPhrase)
-    expect(note).toContain('entry text inside the markers')
-    expect(note).toContain('whole file')
+    const note = wrapper.get('.guide-budget-tokens')
+    expect(note.text()).toContain(wholePhrase)
+    expect(note.text()).not.toContain(regionPhrase)
+    expect(note.attributes('title')).toContain('entry text inside the markers')
+    expect(note.attributes('title')).toContain('whole file')
   })
 
   it('counts an impossible calendar date as malformed, not valid', async () => {

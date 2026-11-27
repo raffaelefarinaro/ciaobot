@@ -11,7 +11,7 @@ Take at most 5 notes, oldest first, skipping any with a `.care-stale-checked` li
 2. Judge each fact bullet against real sources (the related notes, the files and projects it names). Fix what the sources plainly contradict, citing the source, directly in the note. Re-read the note after every write before judging a second fact.
 3. Add `[verified: <today>]` to a bullet only after checking that exact sentence (a fixed bullet after checking its new text). Never stamp on save or merge.
 4. When every fact bullet of the note now carries `[verified: <today>]`, set its frontmatter `updated:` to today: the note was re-checked in full, which is what `updated:` means. A note with any bullet unchecked or sent to the Unsure list, or with its facts only in prose, keeps its `updated:`. Change nothing else in the frontmatter.
-5. Anything doubtful, and any conflict between two sources (quote both), goes on `Workspace/Unsure.md` (skip a line already there). New advice that supersedes a stored line replaces it; the note keeps one instruction with its source and date.
+5. Anything doubtful, and any conflict between two sources (quote both after the first sentence), goes on `Workspace/Unsure.md` as one line in the format of `unsure-and-proposals.md`, its first sentence a plain question (skip a line already there). New advice that supersedes a stored line replaces it; the note keeps one instruction with its source and date.
 6. Never retire or delete a note: write a `note-retire` proposal file (`unsure-and-proposals.md` in this folder) and run `ciao proposal-check` on it.
 7. Record the note in `.care-stale-checked` with today's date, replacing its older line, whatever the outcome.
 

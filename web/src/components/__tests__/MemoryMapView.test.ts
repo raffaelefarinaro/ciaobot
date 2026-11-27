@@ -594,34 +594,42 @@ describe('MemoryMapView sections', () => {
     wrapper.unmount()
   })
 
-  it('shows the Unsure list on /memory/unsure, read from the vault file', async () => {
-    const list = [
-      '# Unsure',
-      '',
-      '- [ ] memory: prefers tea — unsure because one mention; 2026-11-01',
-      '- [x] people: Ada is a client — source: chat-1; 2026-11-02',
-    ].join('\n')
-    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => list }) as unknown as Response)
-    vi.stubGlobal('fetch', fetchMock)
+  it('shows the Unsure list on /memory/unsure, read through /api/memory/unsure', async () => {
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/memory/unsure')) {
+        return Promise.resolve({
+          workspace: 'personal', path: 'memory-vault/personal/Workspace/Unsure.md', found: true,
+          counts: { waiting: 1, ticked: 1 },
+          items: [
+            { id: 'a'.repeat(16), checked: false, kind: '', qualifier: '', title: 'Do you prefer tea?', text: 'Do you prefer tea?', reason: 'one mention', source: 'chat-1', date: '2026-11-01', raw: '- [ ] Do you prefer tea? — unsure because one mention; source: chat-1; 2026-11-01', malformed: false },
+            { id: 'b'.repeat(16), checked: true, kind: '', qualifier: '', title: 'Ada is a client.', text: 'Ada is a client.', reason: 'two notes disagree', source: 'chat-2', date: '2026-11-02', raw: '- [x] Ada is a client. — unsure because two notes disagree; source: chat-2; 2026-11-02', malformed: false },
+          ],
+        })
+      }
+      return base(url)
+    })
     const { wrapper, mm } = await mountSection('unsure')
     expect(mm.section).toBe('unsure')
-    const url = new URL(String((fetchMock.mock.calls[0] as unknown[])[0]), 'http://localhost')
-    expect(url.searchParams.get('path')).toBe('/tmp/vault/Workspace/Unsure.md')
-    expect(url.searchParams.get('exact')).toBe('1')
+    expect(apiGet).toHaveBeenCalledWith('/api/memory/unsure?workspace=personal')
     const panel = wrapper.get('.mu')
-    expect(panel.text()).toContain('1 item waiting.')
-    expect(panel.findAll('.mu-item').map(li => li.text())).toEqual([
-      'memory: prefers tea — unsure because one mention; 2026-11-01',
-    ])
-    expect(panel.text()).toContain('Open Unsure.md')
+    expect(panel.findAll('.mu-row-title').map(t => t.text())).toEqual(['Do you prefer tea?', 'Ada is a client.'])
+    expect(panel.text()).toContain('Approved: applied by the next care run.')
+    // The rail: how it works, with the counts, and the Always loaded window.
+    const rail = wrapper.get('.mm-review-rail')
+    expect(rail.findAll('.docked-window').length).toBe(2)
+    expect(rail.get('.unsure-rail').text()).toContain('Waiting for you1')
     wrapper.unmount()
   })
 
   it('says so when the workspace has no Unsure list yet', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, text: async () => '' }) as unknown as Response))
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((url: string) => (url.startsWith('/api/memory/unsure')
+      ? Promise.resolve({ workspace: 'personal', path: 'memory-vault/personal/Workspace/Unsure.md', found: false, items: [], counts: { waiting: 0, ticked: 0 } })
+      : base(url)))
     const { wrapper } = await mountSection('unsure')
-    expect(wrapper.get('.mu').text()).toContain('Nothing is on the list for this workspace.')
-    expect(wrapper.find('.mu-item').exists()).toBe(false)
+    expect(wrapper.get('.mu').text()).toContain('Nothing is waiting. Care adds a line here only when it is not sure enough to write something down.')
+    expect(wrapper.find('.mu-row').exists()).toBe(false)
     wrapper.unmount()
   })
 

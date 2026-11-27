@@ -9,7 +9,7 @@
 
 export type CareStepState = 'done' | 'blocked' | 'open'
 /** What a needs-you item's button does, read from its explicit path, never from its words. */
-export type CareNeedAction = 'proposal' | 'unsure' | 'guide' | 'report' | 'file' | 'none'
+export type CareNeedAction = 'proposal' | 'unsure' | 'optimize' | 'report' | 'file' | 'none'
 
 export interface CareStep {
   id: string
@@ -348,7 +348,8 @@ export function isProposalPath(path: string): boolean {
 /** What an item's one button does, from its path alone. */
 export function needAction(item: CareNeed): CareNeedAction {
   if (!item.path) return 'none'
-  if (item.path === 'AGENTS.md') return 'guide'
+  // The workspace guide's item is its bounded regions filling up: the trim chat.
+  if (item.path === 'AGENTS.md') return 'optimize'
   if (isProposalPath(item.path)) return 'proposal'
   if (!item.open_path) return 'none'
   if (item.path === 'Workspace/Unsure.md') return 'unsure'
@@ -359,7 +360,7 @@ export function needAction(item: CareNeed): CareNeedAction {
 const ACTION_LABELS: Record<Exclude<CareNeedAction, 'none'>, string> = {
   proposal: 'Review proposal',
   unsure: 'Open Unsure',
-  guide: 'Open guide',
+  optimize: 'Optimize',
   report: 'Open report',
   file: 'Open file',
 }

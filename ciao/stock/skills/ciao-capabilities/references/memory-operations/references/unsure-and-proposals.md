@@ -7,27 +7,51 @@ Memory is written directly, by the memory pass after a chat and by the care run 
 Anything you could not settle goes on one plain Markdown list, `<vault>/Workspace/Unsure.md`. Create it with a `# Unsure` heading when it is missing. One line per item:
 
 ```
-- [ ] [<kind> <qualifier>:] <one-line text> — unsure because <reason>; source: <chat id or note path>; <YYYY-MM-DD>
+- [ ] [<kind> <qualifier>:] <plain first sentence> [<detail>] — unsure because <short reason>; source: <chat id or note path>; <YYYY-MM-DD>
 ```
+
+The person reads this list in Memory · Unsure, where each line is a row: its first sentence is the row's title, the reason is the line under it, and the source and date sit beside the reason. So write the line for them:
+
+- **The first sentence** is one plain sentence that says what you are asking or suggesting, so that someone who has never opened the vault understands it: "Should I remember that Mo now works at Acme?", "Remove the reminder about the staging password from what every chat loads?". End it with `?` or `.`. No internal words in it: no region, entry, vault, kind, care step, note path or chat id. Use the person's own names for people and projects.
+- **The detail**, only when the line needs it, follows the first sentence: the exact entry in quotes for `drop`, `restore to` and `rule flip` lines (a care run copies it from here), `old -> new` for a rule flip, `seen in: <chat id>, …` for an observation.
+- **The reason** is one short clause after ` — unsure because ` (` — removed because ` on a `restore to` line): why you did not write it yourself.
+- Then `; source: <chat id or note path>` and `; <YYYY-MM-DD>`.
 
 A line with no kind is a fact or change to a note, project doc or region. These kinds are allowed, and no others:
 
 | Line starts with | Meaning | A ticked line, in an unattended run |
 |---|---|---|
 | (no kind) | a fact or change whose destination or truth you doubted | write it to its destination, then delete the line |
-| `observation:` `… — seen in: <chat id>, …` | a pattern seen in fewer than three chats | write it to its profile or people destination, then delete the line |
-| `drop <region>: "<entry>"` | remove a region entry you were not sure about | copy the entry into `Workspace/Memory-Consolidations.md`, remove it, delete the line |
-| `restore to <region>: "<entry>"` | a region entry a care step removed, offered back | add the entry back with `ciao memory update`, delete the line; never offered for a permission, address, credential or instruction |
+| `observation:` `<sentence> — seen in: <chat id>, …` | a pattern seen in fewer than three chats | write it to its profile or people destination, then delete the line |
+| `drop <region>: <sentence> "<entry>"` | remove a region entry you were not sure about | copy the entry into `Workspace/Memory-Consolidations.md`, remove it, delete the line |
+| `restore to <region>: <sentence> "<entry>"` | a region entry a care step removed, offered back | add the entry back with `ciao memory update`, delete the line; never offered for a permission, address, credential or instruction |
 | `category:` | a thing no category in VOCABULARY.md covers | not yours to add (categories belong to Settings): leave the line, report it as a `needs you` item: "add the category, then ask me to file the note" |
 | `repo <path>:` | a fact for a linked repository's AGENTS.md | leave the line and report it as a `needs you` item; an attended chat applies it, because an unattended run writes only under the vault |
-| `rule flip <memory\|task>/<key>:` | a change to a decision rule | leave the line and report it; an attended chat applies it with `ciao decision-rules-write` |
+| `rule flip <memory\|task>/<key>: <sentence> <old> -> <new>` | a change to a decision rule | leave the line and report it; an attended chat applies it with `ciao decision-rules-write` |
 
 - Flatten to one line, present tense. Never put a credential value on it; name the credential.
+- A line written before this format (its text starting with the entry or a run of notes, with no plain first sentence) is still read and acted on as the table says; do not rewrite it only to change its wording.
 - Search the list before adding: do not add a line that is already there.
+- Re-read `Unsure.md` immediately before each edit to it, and change only the lines you mean to: the person ticks, unticks and removes lines from the Memory · Unsure page at any time.
 - The person ticks `[x]` to approve an item and deletes a line to reject it. On the next run (or when asked), act on each ticked line as the table says. Never act on an unticked line. A ticked line you leave in place stays ticked; mention it once per run, not as a new item.
 - An observation line collects distinct chat ids: append each new one to the same line. At three distinct chats write the fact to its profile or people destination and delete the line.
 - A stale note you cannot settle against its sources, a conflict between two sources (quote both), and anything else you doubt belong here.
 - Count the lines you add in your done line. They are not `needs you` items one by one: the care run lists every open line once, as one item pointing at `Workspace/Unsure.md`.
+- The person approves or rejects from the Memory · Unsure page or by editing the file; both leave the same file. The page ticks `[x]`, unticks, or deletes the one line.
+
+A worked example, one line of each shape:
+
+```
+# Unsure
+
+- [ ] Should I remember that Mo now works at Acme? He mentioned leaving last month. — unsure because two notes disagree and neither has a date; source: People/Mo.md; 2026-11-26
+- [ ] observation: You prefer a short status update before a long explanation. — seen in: chat-1a2b3c4d, chat-5e6f7a8b — unsure because it has shown up in two chats so far; source: chat-5e6f7a8b; 2026-11-25
+- [ ] drop memory: Remove the reminder about the staging password from what every chat loads? "Staging credentials rotate every Friday; ask before rotating" — unsure because the rotation may still be in place; source: care run; 2026-11-25
+- [ ] restore to profile: Put back that you work from Lisbon on Mondays? "Works from the Lisbon office on Mondays" — removed because no message of yours said it; source: chat-9c8d7e6f; 2026-11-24
+- [ ] category: Add a category for recipes? Three cooking notes fit none of the current ones. — unsure because no category in VOCABULARY.md covers them; source: chat-0f1e2d3c; 2026-11-24
+- [ ] repo ~/repos/app: Run the API tests with `uv run pytest -n auto`? — unsure because only one chat used that command; source: chat-4b5c6d7e; 2026-11-23
+- [ ] rule flip memory/stale-days: Re-check notes every 45 days instead of every 30? 30 -> 45 — unsure because the operator has not approved the change; source: care run; 2026-11-23
+```
 
 ## Proposal files
 

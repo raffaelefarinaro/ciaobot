@@ -6,18 +6,26 @@ A person ticks a line to approve it or deletes it to reject it. The format and
 what a ticked line means are in the stock memory guide
 (`references/unsure-and-proposals.md`).
 
-This module is the only code that appends to it. It holds the file lock, writes
-atomically, skips a line the list already carries (compared on kind and text, so
-a retry or a second run adds nothing) and never writes credential-shaped text.
+This module is the only engine code that writes it. Appends hold the file lock,
+write atomically, skip a line the list already carries (compared on kind and
+text, so a retry or a second run adds nothing) and never write credential-shaped
+text. The Memory · Unsure page reads the list parsed (:func:`read_list`) and
+ticks, unticks or removes one line (:func:`change_line`) under the same lock,
+naming the line by a hash of its exact text so a page showing an older copy of
+the list cannot act on a line that has changed since.
 """
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import stat as stat_module
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ciao.file_kernel import queue_lock, write_queue_atomically
 from ciao.redact import redact_text
@@ -145,3 +153,265 @@ def append_unsure(
             base += "\n"
         write_queue_atomically(path, base + "\n".join(added) + "\n")
     return added
+
+
+# ── The page's reads and single-line edits ────────────────────────────────────
+
+# A real list is a few kilobytes; past this the page shows nothing and refuses
+# to write, so one huge file cannot be read into memory or rewritten.
+MAX_FILE_BYTES = 256 * 1024
+# The page's writes wait this long for the lock, not the 30 s a care run's
+# append may wait: a person clicking gets "busy, try again" quickly.
+PAGE_LOCK_TIMEOUT_S = 2.0
+
+_ITEM = re.compile(r"^(\s*[-*]\s*\[)([ xX])(\]\s+)(.*?)\s*$")
+# A plain bullet under the heading: not something a care run acts on, but it is
+# still on the list, so the page shows it rather than hiding it.
+_BULLET = re.compile(r"^\s*[-*]\s+(?!\[[ xX]\]\s)(\S.*?)\s*$")
+_FENCE = re.compile(r"^\s*(```|~~~)")
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# The kinds the stock guide allows (unsure-and-proposals.md), written in lower case.
+_KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("observation", re.compile(r"^observation:\s*")),
+    ("drop", re.compile(r"^drop\s+(\S+?):\s*")),
+    ("restore", re.compile(r"^restore to\s+(\S+?):\s*")),
+    ("category", re.compile(r"^category:\s*")),
+    ("rule", re.compile(r"^rule flip\s+(\S+?):\s*")),
+    ("repo", re.compile(r"^repo\s+(.+?):\s+")),
+)
+# The tail every writer adds after the item: " — unsure because …" (" — removed
+# because …" on a restore line).
+_TAIL = re.compile(r"\s+—\s+(?=(?:unsure|removed) because\b)", re.IGNORECASE)
+_SENTENCE_END = re.compile(r"[.?!](?=\s+[\"'“(A-Z0-9]|\s*$)")
+_ID = re.compile(r"^[0-9a-f]{16}-\d{1,5}$")
+
+
+class UnsureError(RuntimeError):
+    """The list could not be read or changed; `status` is the HTTP answer, `code` its kind."""
+
+    def __init__(self, message: str, status: int, code: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+def line_id(line: str, occurrence: int = 0) -> str:
+    """The id the page names a line by: a hash of its exact text, and which copy it is.
+
+    Two identical lines get `<hash>-0` and `<hash>-1`, so an action never
+    touches both, and an id whose copy is gone no longer matches.
+    """
+    return f"{hashlib.sha256(line.encode('utf-8')).hexdigest()[:16]}-{occurrence}"
+
+
+def is_line_id(value: str) -> bool:
+    return bool(_ID.match(value))
+
+
+def _split(text: str) -> list[str]:
+    """The file's lines, split on `\\n` only (one trailing `\\r` stays on its line).
+
+    `str.splitlines` also breaks on U+2028, NEL, VT, FF and the file
+    separators; the reader and the writer must cut the file at the same places,
+    or an id read from one line would name another.
+    """
+    return text.split("\n")
+
+
+def _bare(piece: str) -> str:
+    return piece[:-1] if piece.endswith("\r") else piece
+
+
+def _listed(pieces: list[str]) -> list[tuple[int, str, str]]:
+    """`(index, line, id)` for every item line: tick lines and plain bullets outside fenced code."""
+    found: list[tuple[int, str, str]] = []
+    seen: dict[str, int] = {}
+    fenced = False
+    for index, piece in enumerate(pieces):
+        line = _bare(piece)
+        if _FENCE.match(line):
+            fenced = not fenced
+            continue
+        if fenced or not line.strip():
+            continue
+        if _ITEM.match(line) or _BULLET.match(line):
+            occurrence = seen.get(line, 0)
+            seen[line] = occurrence + 1
+            found.append((index, line, line_id(line, occurrence)))
+    return found
+
+
+def _title(text: str) -> str:
+    """The first sentence of an item's text, or all of it when it has no end."""
+    head = text.split(" — ", 1)[0].strip()
+    match = _SENTENCE_END.search(head)
+    return head[: match.end()].strip() if match else head
+
+
+def parse_item(line: str, item_id: str | None = None) -> dict[str, Any]:
+    """One line of the list as the page shows it. Never raises.
+
+    A plain bullet, or a tick line with no text, is returned with
+    `malformed: true` and its raw text, so it is shown, never dropped.
+    """
+    raw = _bare(line)
+    item: dict[str, Any] = {
+        "id": item_id or line_id(raw),
+        "raw": raw.strip(),
+        "checked": False,
+        "kind": "",
+        "qualifier": "",
+        "title": "",
+        "text": "",
+        "reason": "",
+        "source": "",
+        "date": "",
+        "malformed": False,
+    }
+    match = _ITEM.match(raw)
+    if match is None:
+        bullet = _BULLET.match(raw)
+        body = bullet.group(1) if bullet else raw.strip()
+        item.update({"malformed": True, "title": body, "text": body})
+        return item
+    item["checked"] = match.group(2) != " "
+    body = match.group(4)
+    parts = _TAIL.split(body, maxsplit=1)
+    head = parts[0].strip()
+    if len(parts) == 2:
+        # Read from the end: the date, then the source; a reason may hold "; " itself.
+        fields = [f.strip() for f in parts[1].split(";")]
+        if len(fields) > 1 and _DATE.match(fields[-1]):
+            item["date"] = fields.pop()
+        if len(fields) > 1 and re.match(r"^sources?:", fields[-1], re.IGNORECASE):
+            item["source"] = fields.pop().split(":", 1)[1].strip()
+        reason = "; ".join(fields)
+        item["reason"] = re.sub(r"^(?:unsure|removed) because\s+", "", reason, flags=re.IGNORECASE)
+    for kind, pattern in _KINDS:
+        kind_match = pattern.match(head)
+        if kind_match is not None:
+            item["kind"] = kind
+            item["qualifier"] = kind_match.group(1) if kind_match.groups() else ""
+            head = head[kind_match.end():]
+            break
+    item["text"] = head
+    item["title"] = _title(head)
+    if not item["title"]:
+        item["malformed"] = True
+        item["title"] = body
+    return item
+
+
+def parse_list(text: str) -> list[dict[str, Any]]:
+    """Every item on the list in file order; headings, prose and fenced code are skipped."""
+    return [parse_item(line, item_id) for _, line, item_id in _listed(_split(text))]
+
+
+def _is_link(info: os.stat_result) -> bool:
+    if stat_module.S_ISLNK(info.st_mode):
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _not_plain() -> UnsureError:
+    return UnsureError("Workspace/Unsure.md is not a plain file in the vault, so the page will not read or change it", 422, "not_plain_file")
+
+
+def _too_large() -> UnsureError:
+    return UnsureError("Workspace/Unsure.md is too large to show here; open the file instead", 413, "too_large")
+
+
+def _changed() -> UnsureError:
+    return UnsureError("the list changed; reload it", 409, "line_changed")
+
+
+def _checked_read(vault_root: Path) -> str | None:
+    """The list's text, or None when there is no list. Raises :class:`UnsureError`.
+
+    Neither `Workspace` nor the file may be a link, the file must be one regular
+    file (one hard link) under the size cap and inside the vault, and the file
+    opened must be the one checked, so a swap in between is refused. (The write
+    side re-checks the folder itself: :func:`ciao.file_kernel.write_queue_atomically`.)
+    """
+    root = Path(vault_root).resolve()
+    folder = root / Path(UNSURE_RELATIVE).parent
+    path = unsure_path(root)
+    try:
+        folder_info = os.lstat(folder)
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if _is_link(folder_info) or not stat_module.S_ISDIR(folder_info.st_mode):
+        raise _not_plain()
+    if _is_link(info) or not stat_module.S_ISREG(info.st_mode) or info.st_nlink > 1:
+        raise _not_plain()
+    if not path.resolve().is_relative_to(root):
+        raise _not_plain()
+    if info.st_size > MAX_FILE_BYTES:
+        raise _too_large()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or not stat_module.S_ISREG(opened.st_mode):
+            raise _not_plain()
+        raw = os.read(fd, MAX_FILE_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_FILE_BYTES:
+        raise _too_large()
+    return raw.decode("utf-8", errors="replace")
+
+
+def _payload(text: str | None) -> dict[str, Any]:
+    items = parse_list(text or "")
+    ticked = sum(1 for i in items if i["checked"])
+    return {
+        "found": text is not None,
+        "items": items,
+        "counts": {"waiting": len(items) - ticked, "ticked": ticked},
+    }
+
+
+def read_list(vault_root: Path) -> dict[str, Any]:
+    """The parsed list: `{found, items, counts: {waiting, ticked}}`. Raises :class:`UnsureError`."""
+    return _payload(_checked_read(vault_root))
+
+
+def change_line(
+    vault_root: Path, op: str, target: str, *, lock_timeout_s: float = PAGE_LOCK_TIMEOUT_S
+) -> dict[str, Any]:
+    """Tick, untick or remove the item line whose id is `target`.
+
+    Only a line :func:`parse_list` lists can be named, so the heading, prose and
+    fenced code are never changed. Done under the list's file lock (the one
+    :func:`append_unsure` takes, waiting at most `lock_timeout_s`) and written
+    atomically, so a concurrent append is never lost. Raises :class:`UnsureError`
+    (`line_changed` when no line has that id any more, `bad_request` for an
+    unknown action or a tick on a plain bullet) or
+    :class:`ciao.file_kernel.QueueLockError`. Returns the list after the write.
+    """
+    if op not in ("tick", "untick", "remove") or not is_line_id(target):
+        raise UnsureError("op and id are required", 400, "bad_request")
+    path = unsure_path(Path(vault_root).resolve())
+    with queue_lock(path, timeout_s=lock_timeout_s):
+        text = _checked_read(vault_root)
+        if text is None:
+            raise _changed()
+        pieces = _split(text)
+        found = [(index, line) for index, line, item_id in _listed(pieces) if item_id == target]
+        if not found:
+            raise _changed()
+        index, line = found[0]
+        if op == "remove":
+            del pieces[index]
+        else:
+            match = _ITEM.match(line)
+            if match is None:
+                raise UnsureError("this line has no tick box", 400, "bad_request")
+            mark = "x" if op == "tick" else " "
+            pieces[index] = f"{match.group(1)}{mark}{pieces[index][match.end(2):]}"
+        updated = "\n".join(pieces)
+        write_queue_atomically(path, updated)
+    return _payload(updated)

@@ -169,10 +169,10 @@ test.describe('Workspace care', () => {
     await expect(needs).toHaveCount(4)
     // The buttons come from each item's path.
     await expect(needs.nth(0).getByRole('button', { name: /^Review proposal: / })).toBeVisible()
-    await expect(needs.nth(1).getByRole('button', { name: /^Open guide: / })).toBeVisible()
+    await expect(needs.nth(1).getByRole('button', { name: /^Optimize: / })).toBeVisible()
     await expect(needs.nth(2).getByRole('button', { name: /^Open Unsure: / })).toBeVisible()
     await expect(needs.nth(3).getByRole('button', { name: /^Open report: / })).toBeVisible()
-    await expect(page.getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(4)
+    await expect(page.getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(3)
     const steps = page.locator('details.mc-disclosure').first()
     await expect(steps).not.toHaveAttribute('open', '')
     await expect(page.locator('.mc-step').first()).toBeHidden()
@@ -184,7 +184,9 @@ test.describe('Workspace care', () => {
     await summary.focus()
     await page.keyboard.press('Enter')
     await expect(page.locator('.mc-step').first()).toBeVisible()
-    // The choice holds for the session.
+    // The choice holds for the session. The toggle event writes it a moment
+    // after `open` flips, so wait for the write before reloading.
+    await expect.poll(() => page.evaluate(() => sessionStorage.getItem('ciao.care.stepsOpen'))).toBe('open')
     await page.reload()
     await expect(page.locator('.mc-step').first()).toBeVisible()
     const notes = page.locator('details.mc-disclosure').nth(1)

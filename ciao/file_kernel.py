@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import secrets
+import stat as stat_module
 import tempfile
 import threading
 from collections.abc import Callable
@@ -66,36 +68,145 @@ def lock_path_for(resolved_key: str) -> Path:
     return root / f"{digest}.lock"
 
 
+def _process_umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+# Read once, at import: reading the umask means setting it, which is not safe
+# to do while other threads create files.
+_DEFAULT_FILE_MODE = 0o666 & ~_process_umask()
+_DIR_FD_WRITES = all(fn in os.supports_dir_fd for fn in (os.open, os.stat, os.rename, os.unlink))
+
+
+class FolderChangedError(OSError):
+    """The folder a write was staged in is no longer the folder at its path."""
+
+
 def write_queue_atomically(
     path: Path,
     text: str,
     *,
     publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> None:
-    """Replace a proposal queue via a temp file and ``os.replace``.
+    """Replace a vault file via a fresh temp file and a rename in the same folder.
 
     In-place ``write_text`` truncates before it writes, so a partial write or an
-    error mid-write can lose unrelated proposals permanently. A same-directory
-    temp file plus an atomic rename means a reader (or a crash) sees either the
-    complete old file or the complete new one. Callers must hold
-    :func:`queue_lock` for the path.
+    error mid-write can lose unrelated lines permanently. A temp file plus an
+    atomic rename means a reader (or a crash) sees either the complete old file
+    or the complete new one. Callers must hold :func:`queue_lock` for the path.
+
+    Nothing on the way follows a link planted in the vault: the folder is opened
+    with ``O_NOFOLLOW`` and everything after happens relative to that open
+    folder; the temp file gets a fresh random name created with
+    ``O_CREAT | O_EXCL | O_NOFOLLOW`` (mode 0600 while it is written); and just
+    before the rename the folder at the path must still be the folder that was
+    opened, so a folder swapped for a link meanwhile refuses the write
+    (:class:`FolderChangedError`). The replaced file keeps its permission bits;
+    a new file gets the process default. The data is fsynced before the rename.
 
     ``publish_guard``, when given, is entered after the new bytes are staged and
     wraps only the replacement itself. Raising from it refuses the write: the
-    staged file is removed and the old queue stays exactly as it was.
+    staged file is removed and the old file stays exactly as it was.
     """
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.write.tmp")
+    data = text.encode("utf-8")
+    temp_name = f".{path.name}.{secrets.token_hex(8)}.tmp"
+    guard = publish_guard if publish_guard is not None else nullcontext
+    if not _DIR_FD_WRITES:
+        _write_by_path(path, temp_name, data, guard)
+        return
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
     try:
-        tmp.write_text(text, encoding="utf-8", newline="")
-        with publish_guard() if publish_guard is not None else nullcontext():
-            os.replace(tmp, path)
-    except BaseException:
-        # Clean the staged file on a refusal too, without masking the error.
+        folder = os.fstat(dir_fd)
+        mode = _existing_mode(lambda: os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False))
+        fd = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=dir_fd,
+        )
+        staged = True
         try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+            try:
+                _write_all(fd, data)
+                os.fchmod(fd, mode)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            with guard():
+                now = os.stat(path.parent, follow_symlinks=False)
+                if (now.st_dev, now.st_ino) != (folder.st_dev, folder.st_ino):
+                    raise FolderChangedError(f"{path.parent} changed while {path.name} was written")
+                os.rename(temp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                staged = False
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                pass
+        except BaseException:
+            if staged:
+                try:
+                    os.unlink(temp_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+            raise
+    finally:
+        os.close(dir_fd)
+
+
+def _existing_mode(stat_call: Callable[[], os.stat_result]) -> int:
+    try:
+        info = stat_call()
+    except FileNotFoundError:
+        return _DEFAULT_FILE_MODE
+    return stat_module.S_IMODE(info.st_mode) if stat_module.S_ISREG(info.st_mode) else _DEFAULT_FILE_MODE
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+
+
+def _write_by_path(
+    path: Path,
+    temp_name: str,
+    data: bytes,
+    guard: Callable[[], AbstractContextManager[object]],
+) -> None:
+    """Windows (no ``dir_fd``): the same steps by path, checking the folder with ``lstat``."""
+    folder_path = path.parent
+    folder = os.lstat(folder_path)
+    if stat_module.S_ISLNK(folder.st_mode) or getattr(folder, "st_file_attributes", 0) & 0x400:
+        raise FolderChangedError(f"{folder_path} is a link")
+    mode = _existing_mode(lambda: os.lstat(path))
+    temp = folder_path / temp_name
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    staged = True
+    try:
+        try:
+            _write_all(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(temp, mode)
+        with guard():
+            now = os.lstat(folder_path)
+            if (now.st_dev, now.st_ino) != (folder.st_dev, folder.st_ino):
+                raise FolderChangedError(f"{folder_path} changed while {path.name} was written")
+            os.replace(temp, path)
+            staged = False
+    except BaseException:
+        if staged:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise
 
 

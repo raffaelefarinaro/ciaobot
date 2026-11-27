@@ -2,6 +2,7 @@
   <section class="docked-window" :aria-labelledby="headingId">
     <div class="docked-window-head">
       <h2 :id="headingId" class="rail-title">{{ title }}</h2>
+      <span v-if="$slots.head" class="docked-window-head-end"><slot name="head" /></span>
     </div>
     <slot />
   </section>
@@ -9,8 +10,8 @@
 
 <script setup lang="ts">
 /*
- * A page rail's docked window: Home's *At a glance* and the Automations
- * *Recent runs*. The Chat details window's vocabulary without its close (a
+ * A page rail's docked window: Home's *At a glance*, the Automations
+ * *Recent runs*, and Memory · Unsure's *How this works* and *Always loaded*. The Chat details window's vocabulary without its close (a
  * rail window is part of the page, not a dismissible panel): the tonal --bg2
  * surface, a 1px border, the 14px radius, the docked shadow, and a 44px title
  * bar with 16px insets over hairline rows.
@@ -21,6 +22,8 @@
  * - prop `id` (optional): the heading's id, for a caller or test that needs a
  *   stable one; otherwise one is generated;
  * - default slot: the window's body, anything at all;
+ * - `head` slot (optional): a quiet value at the right end of the title bar,
+ *   such as a mono total (Memory's *Always loaded* shows its tokens there);
  * - optional row classes for the body: `docked-row` (a link or button row)
  *   holding `docked-row-title` (two lines at most) over `docked-row-detail`;
  *   `docked-row--static` for a row that opens nothing; a `docked-list--end`
@@ -59,6 +62,8 @@ const headingId = props.id || `docked-${useId()}`
 .docked-window-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
   min-height: 44px;
   margin: -16px -16px 6px;
   padding: 0 16px;
@@ -67,6 +72,16 @@ const headingId = props.id || `docked-${useId()}`
 
 .docked-window-head .rail-title {
   margin: 0;
+}
+
+.docked-window-head-end {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 </style>

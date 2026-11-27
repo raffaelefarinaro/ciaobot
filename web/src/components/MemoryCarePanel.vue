@@ -54,7 +54,9 @@
                   :data-path="item.path"
                   @click="act(item)"
                 >{{ needActionLabel(needAction(item)) }}</button>
+                <!-- Optimize already opens a chat about the guide; a second one would repeat it. -->
                 <button
+                  v-if="needAction(item) !== 'optimize'"
                   type="button"
                   class="mc-link mc-fix"
                   :disabled="fixing !== ''"
@@ -157,7 +159,7 @@ import {
   stepWord, type CareNeed, type CareStep,
 } from '../lib/careReport'
 import { startFileDiscussion } from '../lib/fileDiscussion'
-import { fetchWorkspaceGuide } from '../lib/workspaceGuide'
+import { startMemoryOptimizeChat } from '../lib/memoryOptimize'
 import { useCareReportStore } from '../stores/careReport'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { memorySectionPath } from '../stores/memoryMap'
@@ -308,10 +310,10 @@ async function act(item: CareNeed): Promise<void> {
     void router.push(memorySectionPath('unsure'))
     return
   }
-  if (action === 'guide') {
-    const guide = await fetchWorkspaceGuide(current.workspace)
-    if (guide.path) void fileViewer.open(guide.path)
-    else status.value = guide.error || 'This workspace has no guide yet.'
+  // The guide's regions are nearly full: the same trim chat as Memory's Always
+  // loaded window (a draft with the guide pinned; nothing changes unasked).
+  if (action === 'optimize') {
+    await startMemoryOptimizeChat(store, { workspace: current.workspace })
     return
   }
   if (item.open_path) await openChecked(item.open_path)

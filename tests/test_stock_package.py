@@ -177,7 +177,9 @@ def test_stock_curation_puts_unsettled_items_on_the_unsure_list() -> None:
 
     assert "Workspace/Unsure.md" in skill
     assert "ciao proposal-check" in skill
-    assert "- [ ] [<kind> <qualifier>:] <one-line text>" in skill
+    assert "- [ ] [<kind> <qualifier>:] <plain first sentence> [<detail>] — unsure because <short reason>" in skill
+    # The page shows the first sentence as the row's title, so it is written for a person.
+    assert "No internal words in it" in skill
     assert "never act on an unticked line" in skill.lower()
     assert "A ticked line you leave in place stays ticked" in skill
     assert "memory-proposal-add" not in _curation_prompt()
@@ -699,10 +701,10 @@ def test_every_replaced_or_removed_line_goes_to_the_undo_log_with_its_writer() -
 
 def test_unsure_list_offers_a_removed_region_entry_back_but_never_an_unsafe_one() -> None:
     table = _reference("unsure-and-proposals.md")
-    assert "| `restore to <region>: \"<entry>\"` |" in table
+    assert "| `restore to <region>: <sentence> \"<entry>\"` |" in table
     assert "never offered for a permission, address, credential or instruction" in table
     step = _reference("curation-pass-8-second-look.md")
-    assert "`- [ ] restore to <region>: \"<entry>\" — removed because <reason>; source: <pass chat id>; <date>`" in step
+    assert "`- [ ] restore to <region>: <plain question, e.g. Put back that you …?> \"<entry>\" — removed because <reason>; source: <pass chat id>; <date>`" in step
     assert "never a `restore to` line" in step
     unsure = _reference("curation-pass-1-unsure.md")
     assert "add an undo-log entry for it with `by: care unsure`" in unsure
@@ -895,7 +897,7 @@ def test_the_needs_you_standard_lives_in_the_preamble_and_the_prompt_points_at_i
         text = _reference(name)
         assert "`note: " in text, name
         assert "`needs you: P" not in text, name
-    assert "Choose Fix with a chat to trim it together. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
+    assert "Choose Optimize to trim it together. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
 
 
 def test_the_stale_step_re_dates_only_a_note_it_re_checked_in_full() -> None:

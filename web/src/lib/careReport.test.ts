@@ -155,14 +155,14 @@ describe('the report page words', () => {
 
   it('picks each button from the item\'s path, never from its words', () => {
     const [proposal, guide, unsure, report] = careReports.needsYou.needs_you
-    expect([proposal, guide, unsure, report].map(needAction)).toEqual(['proposal', 'guide', 'unsure', 'report'])
+    expect([proposal, guide, unsure, report].map(needAction)).toEqual(['proposal', 'optimize', 'unsure', 'report'])
     expect(needAction(need('A note looks out of date.', '', 'People/Rae.md'))).toBe('file')
     // Words that used to pick a button no longer do: no path, no file button.
     expect(needAction(need('Review the guide and the Unsure list.', ''))).toBe('none')
     // A proposal-looking path that is not a proposal slug is an ordinary file.
     expect(needAction(need('x', '', 'Workspace/Proposals/Odd Name.md'))).toBe('file')
-    expect(['proposal', 'unsure', 'guide', 'report', 'file', 'none'].map(a => needActionLabel(a as never))).toEqual([
-      'Review proposal', 'Open Unsure', 'Open guide', 'Open report', 'Open file', '',
+    expect(['proposal', 'unsure', 'optimize', 'report', 'file', 'none'].map(a => needActionLabel(a as never))).toEqual([
+      'Review proposal', 'Open Unsure', 'Optimize', 'Open report', 'Open file', '',
     ])
   })
 

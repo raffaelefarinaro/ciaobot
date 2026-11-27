@@ -108,10 +108,10 @@ describe('MemoryCarePanel', () => {
     const titles = wrapper.findAll('.mc-need-title').map(n => n.text())
     expect(titles).toHaveLength(4)
     expect(titles[0]).toBe('A proposal would trim your guide: it removes an outdated status section and a repeated folder path.')
-    // The buttons come from each item's path: proposal, guide, Unsure, report.
+    // The buttons come from each item's path: proposal, guide (Optimize, no second chat link), Unsure, report.
     const primaries = wrapper.findAll('.mc-need').map(row => row.findAll('.mc-action, .mc-fix').map(b => b.text()))
     expect(primaries).toEqual([
-      ['Review proposal', 'Fix with a chat'], ['Open guide', 'Fix with a chat'],
+      ['Review proposal', 'Fix with a chat'], ['Optimize'],
       ['Open Unsure', 'Fix with a chat'], ['Open report', 'Fix with a chat'],
     ])
     // Each button names the item it acts on.
@@ -137,7 +137,7 @@ describe('MemoryCarePanel', () => {
     expect(wrapper.get('.mc-foot-note').text()).toBe('Weekly checks last done Nov 27')
   })
 
-  it('opens what each item names: the Unsure page, the guide, the report', async () => {
+  it('opens what each item names: the Unsure page, the trim chat for the guide, the report', async () => {
     serve(careReports.needsYou)
     const wrapper = await mountPanel()
     const button = (row: number) => wrapper.findAll('.mc-need')[row].findAll('.mc-action')[0]
@@ -148,8 +148,13 @@ describe('MemoryCarePanel', () => {
     await flushPromises()
     await button(1).trigger('click')
     await flushPromises()
+    // The guide's item is Optimize: the same trim chat as Memory's Always loaded window.
     expect(fetchWorkspaceGuide).toHaveBeenCalledWith(CARE_WORKSPACE)
-    expect(open).toHaveBeenLastCalledWith('storybook-alpha/AGENTS.md')
+    expect(startFileDiscussion).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      path: 'storybook-alpha/AGENTS.md', title: 'Trim always-loaded memory', workspace: CARE_WORKSPACE,
+      seed: expect.stringContaining('wait for my approval'),
+    }))
+    expect(open).not.toHaveBeenCalledWith('storybook-alpha/AGENTS.md')
     // A file item opens only once the engine serves it; a gone one gets a calm line.
     const reads: string[] = []
     let gone = false

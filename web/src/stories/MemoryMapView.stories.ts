@@ -8,7 +8,7 @@ import { mapNoteIds, mapRoutes, mountMapFixture } from './memoryMapFixture'
  * The MemoryMapView composition over the fail-closed fixture boundary. Every
  * story mounts the production component (whose own imports own its children)
  * with the synthetic storybook vault. The Unsure section reads its list from
- * the declared vault file.
+ * the declared `/api/memory/unsure` route (thirteen synthetic lines).
  */
 
 /** Which seeded note the tile shows; the tile reads the note's own file. */
@@ -32,12 +32,15 @@ function noteFilesFor(state: MapState): string[] {
 }
 
 type MapState =
-  | 'default' | 'unsure' | 'loading' | 'error'
+  | 'default' | 'unsure' | 'unsure-empty' | 'unsure-error' | 'unsure-many' | 'loading' | 'error'
   | 'detail-plain' | 'detail-stale' | 'detail-facts'
 
 const stateDescription: Record<MapState, string> = {
   default: 'the store default section (the map): toolbar over the drawing',
-  unsure: 'the Unsure section: the list read from its Markdown file',
+  unsure: 'the Unsure section: thirteen lines, one approved, with the rail windows',
+  'unsure-empty': 'the Unsure section with nothing waiting',
+  'unsure-error': 'the Unsure section when the list cannot be read',
+  'unsure-many': 'the Unsure section with sixty lines',
   loading: 'a held vault graph read behind the graph skeleton',
   error: 'a failed vault graph read',
   'detail-plain': 'a selected note with no callout, neighbours swappable in play',
@@ -47,8 +50,8 @@ const stateDescription: Record<MapState, string> = {
 
 function mountState(host: HTMLElement, state: MapState) {
   return mountMapFixture(host, MemoryMapView, {
-    section: state === 'unsure' ? 'unsure' : undefined,
-    view: state === 'default' || state === 'unsure' ? undefined : 'graph',
+    section: state.startsWith('unsure') ? 'unsure' : undefined,
+    view: state === 'default' || state.startsWith('unsure') ? undefined : 'graph',
     selectedId: selectedIdFor(state),
   })
 }
@@ -110,17 +113,54 @@ export const Default: Story = {
   },
 }
 
-// The Unsure section: the open lines of the list, the file one click away.
+// The Unsure section: one row per line, the rail's two docked windows, and
+// Approve writing the tick through the one route.
 export const Unsure: Story = {
   parameters: { fixture: { routes: mapRoutes({ graph: 'loaded' }) } },
   render: () => renderState('unsure'),
-  play: async ({ canvas }) => {
-    await waitFor(() => expect(canvas.getByText('1 item waiting.')).toBeTruthy())
+  play: async ({ canvas, userEvent }) => {
+    await waitFor(() => expect(canvas.getByRole('heading', { name: /Waiting for you/ })).toBeTruthy())
     expect(canvas.getByText('Memory · Unsure')).toBeTruthy()
-    expect(canvas.getByText(/memory: Storybook prefers short briefs/)).toBeTruthy()
-    expect(canvas.queryByText(/Storybook colleague works on the project/)).toBeNull()
-    expect(canvas.getByRole('button', { name: 'Open Unsure.md' })).toBeTruthy()
-    expect(canvas.getByRole('complementary', { name: 'Always loaded' })).toBeTruthy()
+    expect(canvas.getByText('Is the live Northwind deployment unaffected by the December 11 model retirement?')).toBeTruthy()
+    expect(canvas.getByRole('heading', { name: 'How this works' })).toBeTruthy()
+    expect(canvas.getByRole('heading', { name: 'Always loaded' })).toBeTruthy()
+    // The repository item cannot be applied unattended: its Approve opens a chat.
+    expect(canvas.getByRole('button', { name: /^Approve in a chat: Run the API tests/ })).toBeTruthy()
+    const approve = canvas.getByRole('button', { name: 'Approve: Is the live Northwind deployment unaffected by the December 11 model retirement?' })
+    await userEvent.click(approve)
+    await waitFor(() => expect(canvas.getAllByText('Approved: applied by the next care run.')).toHaveLength(2))
+    expect(canvas.getByRole('button', { name: /^Undo approval: Is the live Northwind/ })).toBeTruthy()
+    await assertSettled(canvas)
+  },
+}
+
+export const UnsureEmpty: Story = {
+  parameters: { fixture: { routes: mapRoutes({ graph: 'loaded', unsure: 'empty' }) } },
+  render: () => renderState('unsure-empty'),
+  play: async ({ canvas }) => {
+    await waitFor(() => expect(canvas.getByText(/Nothing is waiting\. Care adds a line here only when/)).toBeTruthy())
+    expect(canvas.getByRole('button', { name: 'Open Unsure.md' }).getAttribute('disabled')).not.toBeNull()
+    await assertSettled(canvas)
+  },
+}
+
+export const UnsureError: Story = {
+  parameters: { fixture: { routes: mapRoutes({ graph: 'loaded', unsure: 'error' }) } },
+  render: () => renderState('unsure-error'),
+  play: async ({ canvas }) => {
+    await waitFor(() => expect(canvas.getByRole('alert')).toBeTruthy())
+    expect(canvas.getByText(/Could not read the list\./)).toBeTruthy()
+    expect(canvas.getByRole('button', { name: 'Try again' })).toBeTruthy()
+    await assertSettled(canvas)
+  },
+}
+
+export const UnsureMany: Story = {
+  parameters: { fixture: { routes: mapRoutes({ graph: 'loaded', unsure: 'many' }) } },
+  render: () => renderState('unsure-many'),
+  play: async ({ canvas, canvasElement }) => {
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Waiting for you 60' })).toBeTruthy())
+    expect(canvasElement.querySelectorAll('.mu-row')).toHaveLength(60)
     await assertSettled(canvas)
   },
 }
