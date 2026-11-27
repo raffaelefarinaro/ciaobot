@@ -54,8 +54,8 @@ export const NeedsYou: Story = {
     expect(canvas.getByRole('button', { name: /^Review proposal: A proposal would trim your guide/ })).toBeTruthy()
     expect(canvas.getByRole('button', { name: /^Optimize: Your always-loaded memory/ })).toBeTruthy()
     expect(canvas.getByRole('button', { name: /^Open Unsure: 13 suggestions/ })).toBeTruthy()
-    // The guide's item opens the trim chat itself, so it has no Fix with a chat.
-    expect(canvas.getAllByRole('button', { name: /^Fix with a chat: / })).toHaveLength(3)
+    // A proposal, the guide and Unsure each have one destination, so only the report file's item keeps a chat.
+    expect(canvas.getAllByRole('button', { name: /^Fix with a chat: / })).toHaveLength(1)
     // Steps and Notes are folded: the step words are not shown until opened.
     const steps = canvas.getByText('Steps').closest('details') as HTMLDetailsElement
     expect(steps.open).toBe(false)
@@ -138,6 +138,20 @@ export const Interrupted: Story = {
   play: async ({ canvas }) => {
     await summary(canvas, 'Cut off after 2 of 6 steps')
     expect(canvas.getAllByText('not done')).toHaveLength(4)
+  },
+}
+
+export const RunningStale: Story = {
+  ...story(careReports.runningStale),
+  play: async ({ canvas }) => {
+    await summary(canvas, 'Running now')
+    expect(canvas.getByText('Care is starting. Results appear here as steps finish.')).toBeTruthy()
+    expect(canvas.getByText(/^Previous run: .* · 1 thing needed you$/)).toBeTruthy()
+    // Nothing from the previous report is shown as current.
+    expect(canvas.queryByRole('heading', { name: 'What needs you' })).toBeNull()
+    expect(canvas.queryByText('Steps')).toBeNull()
+    expect(canvas.queryByText('Notes')).toBeNull()
+    expect(canvas.queryByText('blocked')).toBeNull()
   },
 }
 

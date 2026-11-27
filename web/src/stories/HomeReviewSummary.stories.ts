@@ -160,7 +160,9 @@ export const CareComplete: Story = careStory(careReports.complete, /Done .* · 5
 export const CareNeedsYou: Story = careStory(careReports.needsYou, /4 things need you/, 'blocked', 'Care needs you')
 export const CareBlocked: Story = careStory(careReports.blocked, /4 of 6 steps · 2 blocked/, 'blocked', 'Care did not finish')
 export const CareInterrupted: Story = careStory(careReports.interrupted, /Interrupted · 2 of 6 steps/, 'blocked', 'Care was cut off')
-export const CareRunning: Story = careStory(careReports.running, /Running now · step 3 of 6: Learnings/, 'running')
+export const CareRunning: Story = careStory(careReports.running, /Running now · step 3 of 6: Learnings/, 'running', 'Care is running')
+// The run has not rewritten the report yet: the previous run's results stay out of the line.
+export const CareRunningStale: Story = careStory(careReports.runningStale, /Running now/, 'running', 'Care is running')
 export const CareNeverRun: Story = careStory(careReports.never, /Not run yet\. It runs every day\./, 'open')
 
 // The rail dropped below the request column: Needs you carries care, so this

@@ -53,7 +53,7 @@ def test_linux_e2e_storybook_steps_are_gated_and_ordered() -> None:
     # before the e2e suite.
     assert [step["run"] for step in web_steps[2:]] == [
         "npm ci",
-        "npx playwright install --with-deps chromium",
+        "npx playwright install --with-deps chromium webkit",
         "npm run build-storybook",
         "npm run test-storybook",
         "npm run test:e2e",

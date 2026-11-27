@@ -157,7 +157,9 @@ describe('HomeReviewSummary', () => {
       ['needsYou', 'blocked', 'Care needs you', /^4 things need you$/],
       ['blocked', 'blocked', 'Care did not finish', /^4 of 6 steps · 2 blocked$/],
       ['interrupted', 'blocked', /^Care was cut off/, /^Interrupted · 2 of 6 steps$/],
-      ['running', 'running', 'Workspace care', /^Running now · step 3 of 6: Learnings$/],
+      ['running', 'running', 'Care is running', /^Running now · step 3 of 6: Learnings$/],
+      // The previous run's blocked step and open item are not shown while the new run starts.
+      ['runningStale', 'running', 'Care is running', /^Running now$/],
       ['never', 'open', 'Workspace care', /^Not run yet\. It runs every day\.$/],
     ] as const)('shows one line for %s with its glyph, title and words', async (state, glyph, title, detail) => {
       serveCare(careReports[state])

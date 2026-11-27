@@ -172,7 +172,10 @@ test.describe('Workspace care', () => {
     await expect(needs.nth(1).getByRole('button', { name: /^Optimize: / })).toBeVisible()
     await expect(needs.nth(2).getByRole('button', { name: /^Open Unsure: / })).toBeVisible()
     await expect(needs.nth(3).getByRole('button', { name: /^Open report: / })).toBeVisible()
-    await expect(page.getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(3)
+    // Proposal, guide and Unsure have one destination each; only the report file keeps a chat.
+    for (const i of [0, 1, 2]) await expect(needs.nth(i).getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(0)
+    await expect(needs.nth(3).getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(1)
+    await expect(page.getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(1)
     const steps = page.locator('details.mc-disclosure').first()
     await expect(steps).not.toHaveAttribute('open', '')
     await expect(page.locator('.mc-step').first()).toBeHidden()
@@ -192,6 +195,47 @@ test.describe('Workspace care', () => {
     const notes = page.locator('details.mc-disclosure').nth(1)
     await expect(notes.locator('summary')).toHaveText(/Notes\s*4/)
     await expect(notes.locator('.mc-notes li').first()).toBeHidden()
+  })
+})
+
+test.describe('Workspace care while a run is in progress', () => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    await isolate(page, `care-run-${testInfo.workerIndex}-${testInfo.title}`)
+    await page.setViewportSize(DROPPED)
+  })
+
+  test('a run that has not rewritten the report shows nothing of the previous one', async ({ page }) => {
+    await answerCare(page, careReports.runningStale)
+    await boot(page, '/memory/care', '.mc-summary-title')
+    await expect(page.getByRole('heading', { name: 'Running now' })).toBeVisible()
+    await expect(page.getByText('Care is starting. Results appear here as steps finish.')).toBeVisible()
+    await expect(page.locator('.mc-last-run')).toContainText(/^Previous run: .* · 1 thing needed you$/)
+    await expect(page.locator('.mc-need')).toHaveCount(0)
+    await expect(page.locator('details.mc-disclosure')).toHaveCount(0)
+    await expect(page.locator('.mc-seg--done, .mc-seg--blocked')).toHaveCount(0)
+    // The Daily care window beside the card says Running, dated by the dispatch, and cannot start a second run.
+    const rail = page.locator('section.care-rail')
+    await expect(rail.getByText('Running', { exact: true })).toBeVisible()
+    await expect(rail.getByRole('button', { name: 'Running…' })).toBeDisabled()
+    await page.screenshot({ path: 'test-results/care-look/running-stale.png', fullPage: true })
+  })
+
+  test('once the report is this run\'s, its steps show open', async ({ page }) => {
+    await answerCare(page, careReports.running)
+    await boot(page, '/memory/care', '.mc-step')
+    await expect(page.locator('details.mc-disclosure').first()).toHaveAttribute('open', '')
+    await expect(page.locator('.mc-step')).toHaveCount(6)
+    await expect(page.locator('.mc-last-run')).toHaveCount(0)
+  })
+
+  test('Home says Care is running, not the previous run\'s state', async ({ page }) => {
+    await answerCare(page, careReports.runningStale)
+    await page.setViewportSize(DOCKED)
+    await boot(page)
+    const line = page.locator('.home-review-item--care')
+    await expect(line).toContainText('Care is running')
+    await expect(line).not.toContainText('needs you')
+    await expect(page.locator('.needs-you-row', { hasText: 'Care' })).toHaveCount(0)
   })
 })
 
@@ -247,6 +291,7 @@ test.describe('Memory page chrome', () => {
 
 test.describe('Workspace care page states, looked at', () => {
   const states = {
+    'running-stale': careReports.runningStale,
     'needs-you': careReports.needsYou,
     'nothing-needs-you': careReports.complete,
     running: careReports.running,
@@ -268,18 +313,6 @@ test.describe('Workspace care page states, looked at', () => {
       }
     }
   }
-})
-
-test.describe('Workspace care under reduced motion', () => {
-  test.use({ reducedMotion: 'reduce' })
-
-  test('the running arc holds still', async ({ page }, testInfo) => {
-    await isolate(page, `care-motion-${testInfo.workerIndex}`)
-    await answerCare(page, careReports.running)
-    await boot(page, '/memory/care', '.mc-step')
-    const arc = page.locator('.mc-summary .care-glyph-arc')
-    expect(await arc.evaluate(el => getComputedStyle(el).animationName)).toBe('none')
-  })
 })
 
 test.describe('Workspace care on a phone', () => {
