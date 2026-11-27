@@ -989,17 +989,19 @@ async def test_load_replay_journals_each_replayed_prompt_in_order(tmp_path: Path
         _text("first answer"),
         _user_chunk("<task-notification><task-id>t1</task-id><status>completed</status></task-notification>"),
         _text(" noted"),
-        # One message sent as two chunks is one prompt.
-        _user_chunk("second ", "m3"),
+        # One message sent as two blocks is one prompt, its blocks joined by a newline.
+        _user_chunk("second", "m3"),
         _user_chunk("question", "m3"),
         _text("second answer"),
         _user_chunk(RELOAD_CONTINUE_PROMPT, "m4"),
         _text("continued"),
         _user_chunk("/model opus", "m5"),
         _text("Set model to opus"),
-        # A slash command with the capsule as a block of its own.
+        # Claude's slash command: the capsule went as a resource, which the adapter saved as a
+        # link block and a <context ref> block; the load replays all three.
         _user_chunk("/review", "m6"),
-        _user_chunk(_CAPSULE, "m6"),
+        _user_chunk("ciaobot://context", "m6"),
+        _user_chunk('\n<context ref="ciaobot://context">\n' + _CAPSULE + "\n</context>", "m6"),
         _text("third answer"),
         # A subagent's prompt is not the person's.
         _user_chunk("child prompt", "m7", _meta={"claudeCode": {"parentToolUseId": "call-1"}}),
@@ -1021,7 +1023,7 @@ async def test_load_replay_journals_each_replayed_prompt_in_order(tmp_path: Path
         ("user", "first question"),
         ("text_delta", "first answer"),
         ("text_delta", " noted"),
-        ("user", "second question"),
+        ("user", "second\nquestion"),
         ("text_delta", "second answer"),
         # Journaled as the live path journals it; the renderer hides it.
         ("user", RELOAD_CONTINUE_PROMPT),
@@ -1043,6 +1045,42 @@ async def test_load_replay_journals_each_replayed_prompt_in_order(tmp_path: Path
     assert between[0]["text"] == "thinking it over"
     assert between[1]["tool_use_id"] == between[2]["tool_use_id"] == "call-1"
     assert harness.replaced is False
+
+
+@pytest.mark.asyncio
+async def test_load_replay_groups_chunks_by_message_id_and_filters_each_block(tmp_path: Path) -> None:
+    """Grouping relies on messageId (both real adapters stamp it): chunks without one are one
+    message only while nothing else came between them. A CLI block in a message is dropped on
+    its own and does not take the person's block with it."""
+    replay = [
+        _user_chunk("<system-reminder>x</system-reminder>"),
+        _user_chunk("<bash-stdout>ok</bash-stdout>"),
+        _user_chunk("typed after an envelope"),
+        _text("one"),
+        _user_chunk("again"),
+        _text("two"),
+        _user_chunk("and again"),
+        _user_chunk("with an id", "m1"),
+        _user_chunk(_CAPSULE + "slash plain capsule", "m2"),
+        _text("three"),
+    ]
+    async with _started(
+        tmp_path,
+        resume="old-session",
+        initialize={"loadSession": True},
+        load_replay=replay,
+    ):
+        rows = SessionJournal.read(journal_path(tmp_path / "runtime", "fake", "old-session"))
+    assert [(row["type"], row["text"]) for row in rows] == [
+        ("user", "typed after an envelope"),
+        ("text_delta", "one"),
+        ("user", "again"),
+        ("text_delta", "two"),
+        ("user", "and again"),
+        ("user", "with an id"),
+        ("user", "slash plain capsule"),
+        ("text_delta", "three"),
+    ]
 
 
 @pytest.mark.asyncio

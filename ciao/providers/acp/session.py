@@ -667,7 +667,7 @@ class AcpSession:
         The normalizer drops ``user_message_chunk`` (live, ``_prompt`` journals the prompt), so
         the replayed prompts are taken here. Consecutive chunks of one message are one row, written
         before the next update reaches the normalizer, so it sits before its turn's events. A
-        subagent's prompt and a record nobody typed (``replayed_prompt``) are not journaled.
+        subagent's prompt and a block nobody typed (``replayed_prompt``) are not journaled.
         """
         normalizer = UpdateNormalizer(self.spec, self.session_id)
         blocks: list[str] = []
@@ -685,8 +685,10 @@ class AcpSession:
             if fields.get("sessionUpdate") == "user_message_chunk":
                 if normalizer.parent_of(fields) is not None:
                     continue
+                # A message is the chunks that share a messageId (both real adapters stamp
+                # one); chunks without one are one message only while nothing came between.
                 message_id = fields.get("messageId")
-                if message_id is not None and message_id != message:
+                if message_id != message:
                     flush()
                 message = message_id
                 text = chunk_text(fields)

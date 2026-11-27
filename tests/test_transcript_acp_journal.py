@@ -440,3 +440,43 @@ async def test_journal_rebuilt_with_prompts_numbers_every_turn_like_the_engine(
     assert [row["usage"]["tok"] for row in replies] == [str(turn) for turn in range(7)]
     assert [row["duration_ms"] for row in replies] == [1000 * (turn + 1) for turn in range(7)]
     assert heads == [False]
+
+
+@pytest.mark.asyncio
+async def test_rebuilt_claude_slash_turn_shows_only_the_command(acp_chat, monkeypatch) -> None:
+    """Claude sends a slash command with the capsule as a resource; the adapter saves it as a
+    link block and a <context ref> block, so the replay holds three blocks for the message.
+    History, and the journal row behind it, hold the command alone."""
+    from ciao.providers.acp.permissions import PermissionBroker
+    from ciao.providers.acp.session import AcpSession
+
+    capsule = '[CIAO_CONTEXT_BEGIN]\n[Chat ID: "chat-1"]\n[CONTEXT] /secret/ws\n[CIAO_CONTEXT_END]\n\n'
+    pcm, chat, config, journal = _counted_chat(acp_chat, monkeypatch, ["/review", "ok"], 2)
+
+    def chunk(text: str, message_id: str) -> dict:
+        return {"sessionUpdate": "user_message_chunk", "messageId": message_id, "content": {"type": "text", "text": text}}
+
+    def reply(text: str) -> dict:
+        return {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}
+
+    session = AcpSession(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SPEC,
+        session_id="sess-1",
+        config_options=[],
+        journal=journal,
+        broker=PermissionBroker(lambda _event: None),
+    )
+    session._rebuild([
+        chunk("/review", "m0"),
+        chunk("ciaobot://context", "m0"),
+        chunk('\n<context ref="ciaobot://context">\n' + capsule + "\n</context>", "m0"),
+        reply("reply-0"),
+        chunk(capsule + "ok", "m1"),
+        reply("reply-1"),
+    ])
+
+    assert [row["text"] for row in SessionJournal.read(journal.path) if row["type"] == "user"] == ["/review", "ok"]
+    rows = await _assemble_chat_messages(pcm, config, chat)
+    assert _user_turns(rows) == [("/review", 0), ("ok", 1)]
+    assert not any("CIAO_CONTEXT" in str(row.get("content")) or "/secret/ws" in str(row.get("content")) for row in rows)

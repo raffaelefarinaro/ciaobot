@@ -177,25 +177,44 @@ def is_hidden_continuation(content: str) -> bool:
     return " ".join(strip_injected_context(content).split()) in _HIDDEN_CONTINUATIONS
 
 
-def replayed_prompt(blocks: Sequence[str]) -> str:
-    """The prompt to journal for one user message a ``session/load`` replay sent, or "" for none.
+#: The URI of the context capsule when it is sent as an embedded resource. Claude's adapter
+#: saves such a resource as two text blocks of the user message: this link, then the capsule
+#: wrapped in a ``<context ref="...">`` element.
+CONTEXT_URI = "ciaobot://context"
+_CONTEXT_REF_RE = re.compile(
+    r'\s*<context ref="' + re.escape(CONTEXT_URI) + r'">.*?</context>\s*', re.DOTALL
+)
+# Context the CLI injects into a user message, which a replay can carry as a block of its own.
+_INJECTED_BLOCK_RE = re.compile(r"^\s*<system-reminder>")
 
-    ``blocks`` are the message's text blocks in order. Each loses the context capsule, which
-    can be a block of its own (after a native slash command). What is left is what the live
-    path journals for the turn: the person's prompt, or a hidden continuation (journaled live
-    too, and hidden by the renderer). A record the CLI wrote for itself is none: an envelope, a
-    /model or /mode echo, an interrupt sentinel.
-    """
-    text = "".join(remove_injected_context(block) for block in blocks).strip()
+
+def _replayed_block(block: str) -> str:
+    """One text block of a replayed user message as typed, or "" when nobody typed it."""
+    text = remove_injected_context(_CONTEXT_REF_RE.sub("\n", block).strip()).strip()
     if (
-        not text
+        text == CONTEXT_URI
         or is_cli_envelope(text)
+        or _INJECTED_BLOCK_RE.match(text)
         or is_control_slash_command(text)
         or is_no_response_sentinel(text)
         or is_interrupted_request_sentinel(text)
     ):
         return ""
     return text
+
+
+def replayed_prompt(blocks: Sequence[str]) -> str:
+    """The prompt to journal for one user message a ``session/load`` replay sent, or "" for none.
+
+    ``blocks`` are the message's text blocks in order, each filtered on its own so a block the
+    CLI wrote never takes the person's block with it: the context capsule goes (a leading
+    capsule, Claude's capsule link block and its ``<context ref>`` block), and so does a block
+    nobody typed (a CLI envelope, a system reminder, a /model or /mode echo, an interrupt
+    sentinel). The rest is joined by newlines. That is what the live path journals for the
+    turn: the person's prompt, or a hidden continuation (journaled live too, and hidden by the
+    renderer).
+    """
+    return "\n".join(text for text in map(_replayed_block, blocks) if text).strip()
 
 
 def _flag_on(value: object, name: str) -> bool:

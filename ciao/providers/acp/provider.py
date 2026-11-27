@@ -35,6 +35,7 @@ from ciao.models import (
 )
 from ciao import adapter_install
 from ciao.adapter_install import AdapterNotReady
+from ciao.cli_envelopes import CONTEXT_URI
 from ciao.providers.acp.connection import AcpConnection, AgentStartError, AgentVersionError
 from ciao.providers.acp.normalize import UpdateNormalizer
 from ciao.providers.acp.permissions import PermissionBroker
@@ -241,7 +242,6 @@ def _runtime_dir(config: object | None) -> Path:
 
 ExtHook = Callable[[UpdateNormalizer, str, Mapping[str, Any]], list[StreamEvent]]
 
-_CAPSULE_URI = "ciaobot://context"
 
 
 def _capsule_block(capsule: str, *, embedded: bool) -> dict[str, Any]:
@@ -249,7 +249,7 @@ def _capsule_block(capsule: str, *, embedded: bool) -> dict[str, Any]:
     if embedded:
         return {
             "type": "resource",
-            "resource": {"uri": _CAPSULE_URI, "mimeType": "text/plain", "text": capsule},
+            "resource": {"uri": CONTEXT_URI, "mimeType": "text/plain", "text": capsule},
         }
     return {"type": "text", "text": capsule}
 
