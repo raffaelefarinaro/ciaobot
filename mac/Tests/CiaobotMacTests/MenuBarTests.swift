@@ -289,6 +289,17 @@ private final class FakeTicker: MenuTicking {
     }
 }
 
+/// Hands out one blank image per loop frame so a test can tell which frame
+/// the status item shows. It never draws.
+@MainActor
+private final class RecordingMarkImages: TrayMarkImageProviding {
+    let frames = (0..<TrayMarkFrames.frameCount).map { _ in NSImage(size: NSSize(width: 18, height: 18)) }
+    let ring = NSImage(size: NSSize(width: 18, height: 18))
+
+    func frame(_ index: Int) -> NSImage? { frames[index] }
+    func still() -> NSImage? { ring }
+}
+
 @MainActor
 final class MenuBarTests: XCTestCase {
     private let origin = Origin("http://127.0.0.1:8443")!
@@ -1712,6 +1723,192 @@ final class MenuBarTests: XCTestCase {
         XCTAssertFalse(otherRow.isEnabled, "This slice does not open another host's chat")
         XCTAssertEqual(otherRow.toolTip, "Switch to this host to open")
         XCTAssertEqual(opened, [])
+    }
+
+    // MARK: - Menu-bar mark working loop
+
+    func testTheMarkPlaysTheLoopWhileAChatWorksAndRestsAfterwards() throws {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let factory = FakeStatusItemFactory()
+        let activity = FakeActivity(.live(origin: origin.canonicalKey, activeChatIDs: ["working"]))
+        let markTicker = FakeTicker()
+        let images = RecordingMarkImages()
+        var uptime: TimeInterval = 1_000
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: factory,
+            image: NSImage(size: NSSize(width: 36, height: 36)),
+            openWindow: {},
+            quit: {},
+            chatList: FakeChatList(.loaded(workingSnapshot())),
+            activity: activity,
+            now: { self.now },
+            reduceMotion: { false },
+            glyphTicker: FakeTicker(),
+            menuRefreshTicker: FakeTicker(),
+            markImages: images,
+            markTicker: markTicker,
+            uptime: { uptime }
+        )
+        controller.start()
+        let item = try XCTUnwrap(factory.items.first)
+        let idleMark = try XCTUnwrap(item.image).copy() as? NSImage
+
+        XCTAssertTrue(controller.anyChatWorking)
+        XCTAssertTrue(markTicker.isRunning, "A working chat plays the loop.")
+        XCTAssertEqual(markTicker.interval, TrayMarkFrames.step)
+        XCTAssertTrue(item.image === images.frames[0], "The loop starts at the resting C.")
+        XCTAssertEqual(item.title, "2", "The attention count stays beside the animated mark.")
+
+        uptime += 5 * TrayMarkFrames.step
+        markTicker.fire()
+        XCTAssertTrue(item.image === images.frames[5])
+        XCTAssertEqual(item.title, "2")
+
+        activity.subject.send(.live(origin: origin.canonicalKey, activeChatIDs: []))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertFalse(controller.anyChatWorking)
+        XCTAssertTrue(markTicker.isRunning, "A gap shorter than the debounce does not stop the loop.")
+
+        uptime += TrayMarkAnimation.idleDebounce + TrayMarkFrames.cycle
+        markTicker.fire()
+        XCTAssertFalse(markTicker.isRunning, "Idle runs no timer.")
+        XCTAssertFalse(images.frames.contains { $0 === item.image }, "The static mark is back.")
+        XCTAssertEqual(item.image?.size, idleMark?.size)
+        XCTAssertTrue(item.image?.isTemplate ?? false)
+
+        activity.subject.send(.live(origin: origin.canonicalKey, activeChatIDs: ["working"]))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertTrue(markTicker.isRunning)
+        controller.stop()
+        XCTAssertFalse(markTicker.isRunning, "Removing the item stops its loop.")
+    }
+
+    func testTheMarkDoesNotAnimateWithoutAWorkingChat() throws {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let markTicker = FakeTicker()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 36, height: 36)),
+            openWindow: {},
+            quit: {},
+            chatList: FakeChatList(.loaded(workingSnapshot())),
+            activity: FakeActivity(.live(origin: origin.canonicalKey, activeChatIDs: [])),
+            now: { self.now },
+            reduceMotion: { false },
+            markImages: RecordingMarkImages(),
+            markTicker: markTicker,
+            uptime: { 0 }
+        )
+        controller.start()
+        defer { controller.stop() }
+        XCTAssertFalse(controller.anyChatWorking, "A live feed with no running chat is idle.")
+        XCTAssertFalse(markTicker.isRunning)
+    }
+
+    func testReducedMotionShowsTheStillRingWithoutATimer() throws {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let factory = FakeStatusItemFactory()
+        let markTicker = FakeTicker()
+        let images = RecordingMarkImages()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: factory,
+            image: NSImage(size: NSSize(width: 36, height: 36)),
+            openWindow: {},
+            quit: {},
+            chatList: FakeChatList(.loaded(workingSnapshot())),
+            activity: FakeActivity(.live(origin: origin.canonicalKey, activeChatIDs: ["working"])),
+            now: { self.now },
+            reduceMotion: { true },
+            markImages: images,
+            markTicker: markTicker,
+            uptime: { 0 }
+        )
+        controller.start()
+        defer { controller.stop() }
+        let item = try XCTUnwrap(factory.items.first)
+        XCTAssertTrue(item.image === images.ring)
+        XCTAssertFalse(markTicker.isRunning)
+    }
+
+    func testAMissingMarkKeepsTheTextFallbackStill() {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let markTicker = FakeTicker()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: nil,
+            openWindow: {},
+            quit: {},
+            chatList: FakeChatList(.loaded(workingSnapshot())),
+            activity: FakeActivity(.live(origin: origin.canonicalKey, activeChatIDs: ["working"])),
+            now: { self.now },
+            reduceMotion: { false },
+            markImages: RecordingMarkImages(),
+            markTicker: markTicker,
+            uptime: { 0 }
+        )
+        controller.start()
+        defer { controller.stop() }
+        XCTAssertTrue(controller.anyChatWorking)
+        XCTAssertFalse(markTicker.isRunning)
+    }
+
+    func testAWorkingChatOnAnyFleetHostAnimatesTheMark() {
+        let status = AppSessionStatus()
+        status.reportConnected(origin)
+        let other = Origin("https://other.example.com")!
+        let quiet = HostFleetModel.HostFeeds(
+            originKey: origin.canonicalKey,
+            label: "Home",
+            list: .loaded(workingSnapshot()),
+            activity: .inactive
+        )
+        let fleet = FakeHostFleet(feeds: [quiet], total: 2)
+        let markTicker = FakeTicker()
+        let controller = MenuBarController(
+            status: status,
+            statusItemFactory: FakeStatusItemFactory(),
+            image: NSImage(size: NSSize(width: 36, height: 36)),
+            openWindow: {},
+            quit: {},
+            fleet: fleet,
+            now: { self.now },
+            reduceMotion: { false },
+            markImages: RecordingMarkImages(),
+            markTicker: markTicker,
+            uptime: { 0 }
+        )
+        controller.start()
+        defer { controller.stop() }
+        XCTAssertFalse(controller.anyChatWorking, "Working status unavailable is not work.")
+        XCTAssertFalse(markTicker.isRunning)
+
+        var snapshot = workingSnapshot()
+        snapshot = ChatListSnapshot(
+            origin: other.canonicalKey,
+            chats: snapshot.chats,
+            attentionCount: snapshot.attentionCount,
+            fetchedAt: snapshot.fetchedAt
+        )
+        fleet.set([
+            quiet,
+            HostFleetModel.HostFeeds(
+                originKey: other.canonicalKey,
+                label: "Office",
+                list: .loaded(snapshot),
+                activity: .live(origin: other.canonicalKey, activeChatIDs: ["working"])
+            ),
+        ], total: 4)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertTrue(controller.anyChatWorking)
+        XCTAssertTrue(markTicker.isRunning)
     }
 
     // MARK: - Working glyph helpers
