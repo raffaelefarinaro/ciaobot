@@ -203,6 +203,7 @@ def test_the_board_hint_is_a_constant_and_not_a_routing_fact() -> None:
         "linked_repo",
         "shared_brain",
         "core",
+        "engine_path",
     )
     # And the hint is byte-identical in both capsules: it is a constant wearing a
     # workspace's name, not a fact about one.

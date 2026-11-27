@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from urllib.parse import quote
 
 from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE
+from ciao.tool_path import engine_path_export, engine_powershell_export
 
 
 def _field(value: str, *, limit: int = 1200) -> str:
@@ -42,6 +43,34 @@ TASK_BOARD_HINT = (
     'attended chat, and a finished turn waits for the user — only they mark a '
     'task done.'
 )
+
+def engine_ciao_line() -> str:
+    """The stable line that points every ``ciao`` command at the running engine.
+
+    The engine starts the agent with its own bin dir first on PATH, but the
+    agent's shell sources the user's rc files, which can put an older ``ciao``
+    (a stale uv-tool install in ``~/.local/bin``) back in front. Skills, step
+    files and schedules keep saying ``ciao …``; this one line is what makes that
+    word mean this engine, for the agent and the subagents it starts.
+
+    The value is the engine's own install directory (``tool_path.engine_bin_dir``),
+    never user input; it still goes through ``_field`` so a newline in an odd
+    install path cannot break the capsule into extra lines. It rides the stable
+    block, and the chat's stable digest hashes it (``context_digest(engine_path=…)``),
+    so a session started under another engine location gets the new line once.
+    On Windows a PowerShell form is added for agents whose shell is PowerShell.
+    """
+    line = (
+        f"ciao_path=`{engine_path_export()}` puts the running engine's `ciao` first. "
+        "Your shell's own PATH can list an older `ciao` before it, so in a POSIX shell "
+        "start every shell command that runs `ciao` with that line and `;`"
+    )
+    powershell = engine_powershell_export()
+    if powershell:
+        line += f" (in PowerShell, with `{powershell};`)"
+    line += ", and give the same line to any subagent that will run `ciao`."
+    return _field(line, limit=2400)
+
 
 #: Code-work rules for a chat whose project is linked to a git repository.
 #: Sent with the stable block (once per provider session), only when linked.
@@ -315,6 +344,7 @@ def build_context_capsule(
     if canonical_doc:
         stable.append(f"canonical_doc={_field(canonical_doc, limit=300)}")
     stable.append(_field(TASK_BOARD_HINT, limit=400))
+    stable.append(engine_ciao_line())
     if linked_repo_block:
         stable.append(linked_repo_block)
     if shared_brain_block:
@@ -350,6 +380,7 @@ def context_digest(
     linked_repo: str = "",
     shared_brain: str = "",
     core: str = "",
+    engine_path: str = "",
 ) -> str:
     """Return a stable digest for deciding whether routing facts changed.
 
@@ -357,7 +388,9 @@ def context_digest(
     unlinked chat keeps the digest it had before linking existed. ``shared_brain``
     is each brain's name, path and reachability, never its update date. ``core``
     follows the same rule, and is hashed as its own digest: editing the core
-    re-sends it on the next turn.
+    re-sends it on the next turn. ``engine_path`` (the capsule's ``ciao_path``
+    export) is hashed only when set, so a chat started before the line existed,
+    or under an engine that has since moved, gets the stable block once more.
     """
     parts = [workspace, project_name, project_context, canonical_doc]
     if linked_repo:
@@ -366,5 +399,7 @@ def context_digest(
         parts.append(shared_brain)
     if core:
         parts.append(hashlib.sha256(core.encode("utf-8")).hexdigest())
+    if engine_path:
+        parts.append(engine_path)
     raw = "\0".join(parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]

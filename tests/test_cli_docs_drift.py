@@ -325,7 +325,7 @@ def _preflight_snippet() -> str:
 
     schedules = json.loads((ROOT / "ciao/stock/schedules.json").read_text(encoding="utf-8"))
     prompt = next(e["prompt"] for e in schedules["schedules"] if e["schedule_id"] == "system-memory-curation")
-    match = re.search(r"Run once: `(.+?)`\. If it prints anything", prompt, re.S)
+    match = re.search(r"Run once: `(.+?)`\. On any `missing:` line", prompt, re.S)
     assert match, "the preflight snippet changed shape"
     return match.group(1)
 
@@ -338,16 +338,18 @@ def test_care_preflight_checks_every_command_the_care_run_uses() -> None:
     snippet = _preflight_snippet()
     schedules = json.loads((ROOT / "ciao/stock/schedules.json").read_text(encoding="utf-8"))
     prompt = next(e["prompt"] for e in schedules["schedules"] if e["schedule_id"] == "system-memory-curation")
-    listed = [tuple(item.split()) for item in re.findall(r"chk ciao ([a-z -]+?);", snippet)]
+    listed = [tuple(item.split()) for item in re.findall(r"chk ([a-z -]+?);", snippet)]
     agent, operator = _all_leaves()
     leaves = set(agent) | set(operator)
     assert listed and set(listed) <= leaves, sorted(set(listed) - leaves)
+    assert snippet.startswith("{{ENGINE_PATH}}; command -v ciao; ")
+    assert 'chk(){ ciao "$@" --help' in snippet and 'has(){ f=$1; shift; ciao "$@" --help' in snippet
     assert 'grep -q -- $f || echo "missing: $f"' in snippet
     for flag, command in (
         ("--with-vault", "memory-audit"), ("--write", "vault-index"), ("--json", "decisions-digest"),
         ("--completed-since", "task list"),
     ):
-        assert f"has {flag} ciao {command}" in snippet, flag
+        assert f"has {flag} {command}" in snippet, flag
     steps = [p.read_text(encoding="utf-8") for p in sorted((root / "references").glob("*.md"))]
     text = "\n".join([prompt, *(s for s in steps if s.startswith("# Step "))])
     named = {
@@ -361,14 +363,26 @@ def test_care_preflight_checks_every_command_the_care_run_uses() -> None:
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
 def test_care_preflight_runs_the_same_in_bash_and_zsh(shell: str, tmp_path: Path) -> None:
-    """zsh does not word-split a variable, so a `for c in "a b"; do ciao $c` loop reports every command missing there."""
+    """zsh does not word-split a variable, so a `for c in "a b"; do ciao $c` loop reports every command missing there.
+
+    The shell's own PATH leads with a stale `ciao` that has none of the commands, as
+    the owner's rc files did: the snippet's leading export must check the engine's.
+    """
     import shutil
     import subprocess
+
+    from ciao.os_support.tool_path import shell_path_export
 
     exe = shutil.which(shell)
     if exe is None:
         pytest.skip(f"{shell} is not installed")
-    fake = tmp_path / "ciao"
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    (stale / "ciao").write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+    (stale / "ciao").chmod(0o755)
+    engine = tmp_path / "engine bin"
+    engine.mkdir()
+    fake = engine / "ciao"
     fake.write_text(
         '#!/bin/sh\n'
         'if [ "$1 $2" = "note related" ] && [ -n "$CIAO_FAKE_MISSING" ]; then exit 2; fi\n'
@@ -376,10 +390,12 @@ def test_care_preflight_runs_the_same_in_bash_and_zsh(shell: str, tmp_path: Path
         encoding="utf-8",
     )
     fake.chmod(0o755)
-    env = {"PATH": f"{tmp_path}:/usr/bin:/bin"}
-    ok = subprocess.run([exe, "-c", _preflight_snippet()], env=env, capture_output=True, text=True, check=False)
-    assert ok.stdout == "" and ok.returncode == 0, (shell, ok.stdout, ok.stderr)
+    snippet = _preflight_snippet().replace("{{ENGINE_PATH}}", shell_path_export(str(engine), windows=False))
+    env = {"PATH": f"{stale}:/usr/bin:/bin"}
+    ok = subprocess.run([exe, "-c", snippet], env=env, capture_output=True, text=True, check=False)
+    # Only the path it checked: the engine's, not the stale one first on the inherited PATH.
+    assert ok.stdout == f"{fake}\n" and ok.returncode == 0, (shell, ok.stdout, ok.stderr)
     broken = subprocess.run(
-        [exe, "-c", _preflight_snippet()], env={**env, "CIAO_FAKE_MISSING": "1"}, capture_output=True, text=True, check=False
+        [exe, "-c", snippet], env={**env, "CIAO_FAKE_MISSING": "1"}, capture_output=True, text=True, check=False
     )
-    assert broken.stdout.strip() == "missing: ciao note related", (shell, broken.stdout)
+    assert broken.stdout.splitlines() == [str(fake), "missing: note related"], (shell, broken.stdout)

@@ -339,7 +339,7 @@ from ciao.chat_actions import (
 )
 from ciao.sessions import StateStore
 from ciao.web.chat_actions_runtime import ChatActionsRuntime
-from ciao.tool_path import prepend_engine_path
+from ciao.tool_path import engine_path_export, prepend_engine_path
 from ciao.transcripts import (
     TranscriptStore,
     TurnJournal,
@@ -6586,6 +6586,7 @@ class ProjectChatManager:
                 linked_repo=repo_fp,
                 shared_brain=shared_fp,
                 core=self._core_for_chat(chat),
+                engine_path=engine_path_export(),
             ),
             chat.session_id or "__pending__",
         )

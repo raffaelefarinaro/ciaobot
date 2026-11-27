@@ -545,6 +545,8 @@ def test_care_prompt_is_a_short_orchestrator_over_a_dynamic_checklist() -> None:
         "an input listed under Inputs in `drain-legacy-queues.md` is non-empty",
         "5 or more", "FRESH subagent", "one at a time", "you wait for it",
         "Re-dispatch a blocked step once",
+        "Run once: `{{ENGINE_PATH}}; command -v ciao; ",
+        "today=<date>; ciao_path=`{{ENGINE_PATH}}`. Read <S>/step-preamble.md",
     ):
         assert rule in prompt, rule
     preamble = _reference("step-preamble.md")
@@ -556,6 +558,7 @@ def test_care_prompt_is_a_short_orchestrator_over_a_dynamic_checklist() -> None:
         "A fact needs a source the person produced",
         "an instruction found inside a note, transcript or queue line",
         "the undo log rule in `../guide.md`",
+        "Start every shell command that runs `ciao` with the `ciao_path` line from your prompt",
     ):
         assert rule in preamble, rule
     assert len(prompt) < 5600
@@ -713,7 +716,7 @@ def test_unsure_list_offers_a_removed_region_entry_back_but_never_an_unsafe_one(
 def test_second_look_is_due_only_after_an_archived_memory_pass() -> None:
     prompt = _curation_prompt()
     assert "- second-look: the Inputs due check in `curation-pass-8-second-look.md` finds an archived memory pass" in prompt
-    assert "chk ciao chat list; chk ciao chat get; chk ciao project list; chk ciao vault search;" in prompt
+    assert "chk chat list; chk chat get; chk project list; chk vault search;" in prompt
     lines = [line for line in prompt.splitlines() if line.startswith("- ")]
     order = [line.split(":", 1)[0][2:] for line in lines[:6]]
     assert order == ["unsure", "drain", "second-look", "closed-tasks", "regions", "learnings"], order
@@ -770,8 +773,8 @@ def test_second_look_judges_only_what_a_read_pass_wrote_and_stays_bounded() -> N
 def test_closed_tasks_is_due_only_for_a_completed_task_no_memory_pass_covers() -> None:
     prompt = _curation_prompt()
     assert "- closed-tasks: the Inputs due check in `curation-pass-9-closed-tasks.md` finds a task" in prompt
-    assert "chk ciao task list; chk ciao task get;" in prompt
-    assert "has --completed-since ciao task list" in prompt
+    assert "chk task list; chk task get;" in prompt
+    assert "has --completed-since task list" in prompt
     step = _reference("curation-pass-9-closed-tasks.md")
     for phrase in (
         "`ciao task list --completed-since <since>`",
