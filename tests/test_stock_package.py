@@ -905,23 +905,28 @@ def _self_check_line() -> str:
     preamble = _reference("step-preamble.md")
     block = preamble.split("Self-check:", 1)[1].split("```\n", 2)[1]
     line = block.strip()
-    assert "\n" not in line and line.startswith("awk '") and line.endswith(" <V>/Workspace/Care-Report.md"), line
+    assert "\n" not in line and line.startswith("awk -v n=") and line.endswith(" <V>/Workspace/Care-Report.md"), line
     return line
 
 
-def _run_self_check(tmp_path: Path, report: str) -> list[str]:
+def _run_self_check(tmp_path: Path, report: str, unsure: str | None = None) -> list[str]:
     import shlex
     import shutil
     import subprocess
 
-    awk = shutil.which("awk")
-    if awk is None:
-        pytest.skip("no awk on this machine")
-    path = tmp_path / "Care-Report.md"
-    path.write_text(report, encoding="utf-8")
-    argv = shlex.split(_self_check_line().replace("<V>/Workspace/Care-Report.md", shlex.quote(str(path))))
-    assert argv[0] == "awk" and len(argv) == 3
-    result = subprocess.run([awk, argv[1], argv[2]], capture_output=True, text=True, check=True, timeout=10)
+    if shutil.which("awk") is None or shutil.which("sh") is None:
+        pytest.skip("no POSIX shell and awk on this machine")
+    workspace = tmp_path / "Workspace"
+    workspace.mkdir(exist_ok=True)
+    (workspace / "Care-Report.md").write_text(report, encoding="utf-8")
+    unsure_path = workspace / "Unsure.md"
+    if unsure is None:
+        unsure_path.unlink(missing_ok=True)
+    else:
+        unsure_path.write_text(unsure, encoding="utf-8")
+    command = _self_check_line().replace("<V>", shlex.quote(str(tmp_path)))
+    result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
@@ -949,6 +954,14 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
     assert _run_self_check(tmp_path, head + "\n".join(rewritten) + notes) == []
     # The worked example's report passes as written.
     assert _run_self_check(tmp_path, sample.split("```\n", 2)[1]) == []
+    # Open Unsure lines need their own item; a missing Unsure file needs none.
+    unsure = "# Unsure\n- [ ] Should I remember a thing?\n- [ ] Another?\n- [x] category: Done?\n"
+    proposal_only = head + rewritten[2] + "\n"
+    assert _run_self_check(tmp_path, proposal_only, unsure) == ["missing: the item for 2 open Unsure lines"]
+    assert _run_self_check(tmp_path, head + "\n".join(rewritten) + "\n", unsure) == []
+    # A long proposal path does not count against the length.
+    long_path = "1. A proposal would change a skill. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/" + "x" * 200 + ".md)"
+    assert _run_self_check(tmp_path, head + long_path + "\n") == []
     # Each rule bites on its own.
     for bad in (
         "1. Hygiene [!] stayed blocked. (path: Workspace/Care-Report.md)",
@@ -969,7 +982,8 @@ def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:
     preamble = _reference("step-preamble.md")
     for rule in (
         "Copy a step's `needs you:` text without that lead when it follows the rules above, and rewrite it when it does not",
-        "Rewrite each item it prints and run it once more",
+        "Rewrite each item it prints, add a missing item, and run it once more",
+        "never rename or move a file to pass the check",
         "No backticks or other Markdown",
         "N suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
     ):

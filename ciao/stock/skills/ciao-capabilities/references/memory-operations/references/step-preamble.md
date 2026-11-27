@@ -29,12 +29,12 @@ Anything the person need not act on is a note, written in the evidence as `note:
 
 ### Writing the section (the orchestrator)
 
-Under `## What needs you`, each item is one numbered line. Copy a step's `needs you:` text without that lead when it follows the rules above, and rewrite it when it does not. The open Unsure lines are one item, counting every open line whoever added it. An id dropped at 3 runs is one item in plain words, such as "Reviewing your guide has failed three runs in a row. Choose Fix with a chat to look at it together. (path: Workspace/Care-Report.md)".
+Under `## What needs you`, each item is one numbered line. Copy a step's `needs you:` text without that lead when it follows the rules above, and rewrite it when it does not. The open Unsure lines (`- [ ]` in `Workspace/Unsure.md`, whoever added them) are always their own item, `N suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)`, besides any step's item about lines left ticked. An id dropped at 3 runs is one item in plain words, such as "Reviewing your guide has failed three runs in a row. Choose Fix with a chat to look at it together. (path: Workspace/Care-Report.md)".
 
-Self-check: after writing the section, run this one line with the report's absolute path. It prints every item that has a backtick, a `[x]` or `[!]` marker, a retry count, a step id or field name, more than 280 characters, or no `(path: …)` at its end:
+Self-check: after writing the section, run this one line with V as the vault's absolute path. It prints every item that has a backtick, a `[x]` or `[!]` marker, a retry count, a step id or field name, more than 250 characters before its path, or no `(path: …)` at its end, and a `missing:` line when Unsure has open lines but no item says "waiting for your decision" with `(path: Workspace/Unsure.md)`:
 
 ```
-awk '/^## What needs you/{f=1;next}/^#/{f=0}f&&NF&&(/\140|\[[x!]\]|etry [0-9]|stale step|-(look|tasks|review)|updated:|pct|frontmatter|^[0-9]+[.)] [a-z-]+:/||length>280||!/\(path: [^()]+\)\.?$/)' <V>/Workspace/Care-Report.md
+awk -v n="$(grep -c '^- \[ \]' <V>/Workspace/Unsure.md 2>/dev/null)" '/^## What needs you/{f=1;next}/^#/{f=0}f&&NF{t=$0;sub(/ ?\(path: [^()]*\)\.?$/,"",t);if(t~/\140|\[[x!]\]|etry [0-9]|stale step|-(look|tasks|review)|updated:|pct|frontmatter|^[0-9]+[.)] [a-z-]+:/||length(t)>250||t==$0)print;if($0~/waiting for your decision\..*\(path: Workspace\/Unsure\.md\)/)u=1}END{if(n>0&&!u)print "missing: the item for " n " open Unsure lines"}' <V>/Workspace/Care-Report.md
 ```
 
-Rewrite each item it prints and run it once more. An item printed only because it has no path may stay when no file fits it; the page then offers Fix with a chat.
+Rewrite each item it prints, add a missing item, and run it once more. Shorten the words, never a file name: never rename or move a file to pass the check. An item printed only because it has no path may stay when no file fits it; the page then offers Fix with a chat.
