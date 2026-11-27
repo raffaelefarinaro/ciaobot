@@ -451,7 +451,7 @@ def _payload_examples(text: str) -> list[dict[str, object]]:
 
 def test_curation_report_example_names_the_deferred_section() -> None:
     sample = _reference("curation-report-example.md")
-    assert "What I did" in sample and "What needs you" in sample
+    assert "What needs you" in sample and "## Notes" in sample
     assert "curation-report-example.md" in _curation_prompt()
 
 
@@ -530,7 +530,7 @@ def test_care_prompt_is_a_short_orchestrator_over_a_dynamic_checklist() -> None:
         "plus the `ciao:memory` / `ciao:profile` regions of AGENTS.md (via `ciao memory update`)",
         "`ciao vault-index --write`, which writes INDEX.md at the vault root, outside V",
         "step-preamble.md", "Do not paste file text", "Use absolute paths",
-        "Every step except hygiene is a judgement step",
+        "Every step is a judgement step",
         "After each tick, re-read Care-Report.md, then take the next `- [ ]` line",
         "If you have no subagent tool, read both files and run the step yourself, in order, then tick it the same way; write `inline` in the evidence",
         "`Interrupted last run: <ids>`", "the last run was interrupted",
@@ -542,7 +542,7 @@ def test_care_prompt_is_a_short_orchestrator_over_a_dynamic_checklist() -> None:
         "Any section after the checklist uses plain `- ` bullets, never a checkbox",
         "an input listed under Inputs in `drain-legacy-queues.md` is non-empty",
         "5 or more", "FRESH subagent", "one at a time", "you wait for it",
-        "no subagent", "Re-dispatch a blocked step once",
+        "Re-dispatch a blocked step once",
     ):
         assert rule in prompt, rule
     preamble = _reference("step-preamble.md")
@@ -604,8 +604,8 @@ def test_care_checklist_format_is_stable_and_ticks_need_evidence() -> None:
         "run the step file's `Verify:` command yourself",
         "You may not tick without evidence and the verify output",
         "Never write the final reply while a `- [ ]` line remains",
-        "`Care complete: N/N`",
-        "`Care incomplete: N/M, blocked: <ids>`",
+        "`Care finished: N of M steps.`",
+        "Reply in 3-6 short lines",
         "A subagent reply that is not `done:` or `blocked:` is a block",
     ):
         assert exact in prompt, exact
@@ -615,7 +615,8 @@ def test_care_checklist_format_is_stable_and_ticks_need_evidence() -> None:
     assert lines and all(re.match(r"- \[[x!]\] [a-z-]+: .+ — .+", line) for line in lines), lines
     assert all("; verify: " in line for line in lines if line.startswith("- [x]")), lines
     assert "Interrupted last run:" in sample
-    assert "Care complete: N/N" in sample
+    assert "Care finished: 6 of 7 steps. 2 things need you." in sample
+    assert "tick" not in sample.split("## The final reply", 1)[1].replace("\"tick `- [x]`\"", "")
 
 
 def test_every_step_file_ends_with_a_verify_command_the_orchestrator_runs() -> None:
@@ -894,10 +895,7 @@ def test_the_needs_you_standard_lives_in_the_preamble_and_the_prompt_points_at_i
         text = _reference(name)
         assert "`note: " in text, name
         assert "`needs you: P" not in text, name
-    hygiene = _reference("curation-pass-6-hygiene.md")
-    assert "one item for all of them, never one per finding or per category" in hygiene
-    assert "(path: Workspace/Care-Report.md)" in hygiene
-    assert "Ask a chat to trim it with you. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
+    assert "Choose Fix with a chat to trim it together. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
 
 
 def test_the_stale_step_re_dates_only_a_note_it_re_checked_in_full() -> None:
@@ -916,3 +914,42 @@ def test_the_stale_step_re_dates_only_a_note_it_re_checked_in_full() -> None:
     # Steps that do not re-check a whole note still never touch it.
     for name in ("curation-pass-8-second-look.md", "curation-pass-9-closed-tasks.md"):
         assert "Leave `updated:` alone and never add a `[verified: …]` stamp" in _reference(name), name
+
+
+def test_hygiene_fixes_what_a_rule_settles_and_proposes_the_rest() -> None:
+    hygiene = _reference("curation-pass-6-hygiene.md")
+    prompt = _curation_prompt()
+    # A judgement step in a fresh subagent now, not the orchestrator's own commands.
+    assert "hygiene is mechanical" not in prompt and "except hygiene" not in prompt
+    assert "hygiene `curation-pass-6-hygiene.md`" in prompt
+    for rule in (
+        # Every category the audit emits is named, so none is fixed by guesswork.
+        "`missing_frontmatter`", "`malformed_frontmatter`", "`missing_type`", "`invalid_type`", "`unknown_type`",
+        "`missing_target`", "`outside_vault`", "`orphans`", "`duplicates`", "`skill_over_budget`", "`missing_skill_md`",
+        "about 40 tool calls and fix at most 25 notes per run",
+        "log it in the undo log with `by: care hygiene`",
+        "never delete, move, rename or trim a note", "never edit a skill or the AGENTS.md body",
+        "write one `skill-edit` proposal per skill",
+        "Skills over budget: one item for all of them",
+        "What the caps left: a `note:`, never a `needs you` item",
+        "none of the X fixed findings (same source and kind) is listed and the vault finding count fell by at least X",
+        "this step's one exception to leaving the report alone",
+    ):
+        assert rule in hygiene, rule
+    assert "Make no repair" not in hygiene
+
+
+def test_the_final_reply_is_short_and_names_the_app_not_the_files() -> None:
+    sample = _reference("curation-report-example.md")
+    reply = sample.split("## The final reply", 1)[1]
+    block = reply.split("```", 2)[1].strip().splitlines()
+    assert 2 <= len(block) <= 6
+    assert block[0].startswith("Care finished: ")
+    for line in block:
+        for jargon in ("- [x]", "updated:", "frontmatter", "verify", "blocked:"):
+            assert jargon not in line, (jargon, line)
+    assert any("Memory > Unsure" in line for line in block)
+    assert any("Memory > Workspace care" in line for line in block)
+    preamble = _reference("step-preamble.md")
+    assert "Never ask the person to edit a file by hand" in preamble
+    assert "Never hand the person a decision the run should make itself" in preamble

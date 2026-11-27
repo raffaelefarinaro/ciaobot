@@ -196,7 +196,7 @@ describe('the report page words', () => {
     const seed = careNeedFixSeed(careReports.needsYou, item)
     expect(seed).toContain('File: memory-vault/storybook-alpha/Workspace/Unsure.md')
     expect(seed).toContain('Report: memory-vault/storybook-alpha/Workspace/Care-Report.md')
-    expect(seed).toContain('````text\nTick them ``` Tick the ones you agree with.\n````')
+    expect(seed).toContain('````text\nTick them ``` Open Memory > Unsure and approve or reject them.\n````')
     expect(careNeedFixSeed(careReports.needsYou, careReports.needsYou.needs_you[1])).toContain('File: AGENTS.md')
   })
 

@@ -67,10 +67,10 @@ export const careReports = {
     steps: fiveDone,
     weekly_done: '2026-11-27',
     needs_you: [
-      need('A proposal would trim your guide: it removes an outdated status section and a repeated folder path.', 'Open the proposal and approve or reject it.', CARE_PROPOSAL_PATH, 'draft'),
-      need('Your always-loaded memory is nearly full (98% and 95%) and everything in it still matters.', 'Ask a chat to trim it with you.', 'AGENTS.md'),
-      need('13 suggestions are waiting for your tick in Unsure, such as which brief template to keep, a project\'s status and a new People page.', 'Tick the ones you agree with.', 'Workspace/Unsure.md'),
-      need('The vault index lists 63 issues, such as notes nothing links to, notes missing their details and 6 skills that are too long.', 'Open a chat to fix them with you.', 'Workspace/Care-Report.md'),
+      need('A proposal would trim your guide: it removes an outdated status section and a repeated folder path.', 'Choose Review proposal, then Approve or Reject.', CARE_PROPOSAL_PATH, 'draft'),
+      need('Your always-loaded memory is nearly full (98% and 95%) and everything in it still matters.', 'Choose Fix with a chat to trim it together.', 'AGENTS.md'),
+      need('13 suggestions are waiting in Unsure, such as which brief template to keep, a project\'s status and a new People page.', 'Open Memory > Unsure and approve or reject them.', 'Workspace/Unsure.md'),
+      need('4 notes need a decision the run cannot make alone, such as two notes for one person.', 'Choose Fix with a chat to go through them.', 'Workspace/Care-Report.md'),
     ],
     notes: [
       'Re-checking older notes did not finish; it tries again on the next run.',

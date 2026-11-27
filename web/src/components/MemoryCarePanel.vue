@@ -267,6 +267,11 @@ async function act(item: CareNeed): Promise<void> {
     void router.push({ query: { proposal: item.path } })
     return
   }
+  // The Unsure page, where each suggestion has its own Approve and Reject.
+  if (action === 'unsure') {
+    void router.push(memorySectionPath('unsure'))
+    return
+  }
   if (action === 'guide') {
     const guide = await fetchWorkspaceGuide(current.workspace)
     if (guide.path) void fileViewer.open(guide.path)

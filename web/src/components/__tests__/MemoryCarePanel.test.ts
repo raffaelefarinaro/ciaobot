@@ -136,12 +136,15 @@ describe('MemoryCarePanel', () => {
     expect(wrapper.get('.mc-foot-note').text()).toBe('Weekly checks last done Nov 27')
   })
 
-  it('opens the file each item names: Unsure, the guide, the report', async () => {
+  it('opens what each item names: the Unsure page, the guide, the report', async () => {
     serve(careReports.needsYou)
     const wrapper = await mountPanel()
     const button = (row: number) => wrapper.findAll('.mc-need')[row].findAll('.mc-action')[0]
     await button(2).trigger('click')
-    expect(open).toHaveBeenLastCalledWith('memory-vault/storybook-alpha/Workspace/Unsure.md')
+    await flushPromises()
+    expect(wrapper.router.currentRoute.value.path).toBe('/memory/unsure')
+    await wrapper.router.push('/memory/care')
+    await flushPromises()
     await button(1).trigger('click')
     await flushPromises()
     expect(fetchWorkspaceGuide).toHaveBeenCalledWith(CARE_WORKSPACE)
