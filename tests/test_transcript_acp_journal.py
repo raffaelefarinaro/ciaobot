@@ -156,8 +156,8 @@ async def test_acp_history_strips_context_capsule_from_user_rows(acp_chat) -> No
 async def test_acp_history_numbers_user_rows_by_engine_turn_when_journal_lacks_early_prompts(
     acp_chat, monkeypatch
 ) -> None:
-    """A journal rebuilt from a loadSession replay holds no user prompts for the turns it
-    replayed (``user_message_chunk`` is silent), so its first user record is not turn 0.
+    """A journal rebuilt from a loadSession replay before the rebuild journaled prompts holds
+    no user prompts for the turns it replayed, so its first user record is not turn 0.
     The rows must still carry the engine's turn index: the live ``user_echo`` of a turn is
     deduped by it, and a mismatch rendered that turn's user bubble twice and hung an older
     turn's send time and duration on its reply."""
@@ -233,7 +233,7 @@ def _counted_chat(acp_chat, monkeypatch, durable_prompts, count, errors=()):
 
 
 def _replayed(journal: SessionJournal, turns: int) -> None:
-    """Turns as a load replay rebuilt them: their replies, without their prompts."""
+    """Turns as a load replay rebuilt them before prompts were journaled: replies, no prompts."""
     for turn in range(turns):
         journal.event({"type": "text_delta", "text": f"reply-{turn}"})
         journal.event({"type": "result", "text": "", "is_error": False})
@@ -388,3 +388,55 @@ async def test_rebuilt_journal_start_with_a_wake_notice_numbers_the_prompts(
     rows = await _assemble_chat_messages(pcm, config, chat)
 
     assert _user_turns(rows) == [("c", 2), ("continue", 3)]
+
+
+
+@pytest.mark.asyncio
+async def test_journal_rebuilt_with_prompts_numbers_every_turn_like_the_engine(
+    acp_chat, monkeypatch
+) -> None:
+    """The owner-chat shape: a chat that moved to ACP after five turns, then ran two more. The
+    load replay rebuilds the five with their prompts, so history shows every prompt, each turn's
+    reply is its own row, and the journal aligns as a complete one, not by the end anchor."""
+    from ciao.providers.acp.permissions import PermissionBroker
+    from ciao.providers.acp.session import AcpSession
+    from ciao.web import transcript_service
+
+    prompts = ["start", "continue", "fix it", "continue", "ship", "continue", "done?"]
+    pcm, chat, config, journal = _counted_chat(acp_chat, monkeypatch, prompts, 7)
+    replay: list[dict] = []
+    for turn, prompt in enumerate(prompts[:5]):
+        replay.append({
+            "sessionUpdate": "user_message_chunk",
+            "messageId": f"m{turn}",
+            "content": {"type": "text", "text": f"[CIAO_CONTEXT_BEGIN]\nctx\n[CIAO_CONTEXT_END]\n\n{prompt}"},
+        })
+        replay.append({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": f"reply-{turn}"}})
+    session = AcpSession(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        SPEC,
+        session_id="sess-1",
+        config_options=[],
+        journal=journal,
+        broker=PermissionBroker(lambda _event: None),
+    )
+    session._rebuild(replay)
+    _live_turn(journal, prompts[5], 5)
+    _live_turn(journal, prompts[6], 6)
+    heads: list[bool] = []
+    align = transcript_service._align_user_turns
+
+    def spy(*args: Any, rebuilt_head: bool = False, **kwargs: Any) -> Any:
+        heads.append(rebuilt_head)
+        return align(*args, rebuilt_head=rebuilt_head, **kwargs)
+
+    monkeypatch.setattr(transcript_service, "_align_user_turns", spy)
+
+    rows = await _assemble_chat_messages(pcm, config, chat)
+
+    assert _user_turns(rows) == [(prompt, turn) for turn, prompt in enumerate(prompts)]
+    replies = [row for row in rows if row["role"] == "assistant"]
+    assert [row["content"] for row in replies] == [f"reply-{turn}" for turn in range(7)]
+    assert [row["usage"]["tok"] for row in replies] == [str(turn) for turn in range(7)]
+    assert [row["duration_ms"] for row in replies] == [1000 * (turn + 1) for turn in range(7)]
+    assert heads == [False]

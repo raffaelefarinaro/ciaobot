@@ -952,6 +952,111 @@ async def test_load_replay_rebuilds_missing_journal_but_not_live_queue(tmp_path:
         assert all(getattr(event, "text", None) != "from-before-the-switch" for event in events)
 
 
+def _user_chunk(text: str, message_id: str | None = None, **extra: Any) -> dict[str, Any]:
+    update: dict[str, Any] = {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": text}}
+    if message_id is not None:
+        update["messageId"] = message_id
+    update.update(extra)
+    return update
+
+
+_CAPSULE = '[CIAO_CONTEXT_BEGIN]\n[Chat ID: "chat-1"]\n[CONTEXT] /secret/ws\n[CIAO_CONTEXT_END]\n\n'
+_REPLAYED_TOOLS = [
+    {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "thinking it over"}},
+    {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call-1",
+        "title": "Read notes.md",
+        "kind": "read",
+        "status": "pending",
+        "rawInput": {"file_path": "notes.md"},
+    },
+    {"sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "completed"},
+]
+
+
+@pytest.mark.asyncio
+async def test_load_replay_journals_each_replayed_prompt_in_order(tmp_path: Path) -> None:
+    """A journal rebuilt from a load replay holds the prompts the person typed, one row per
+    message, in place among the replayed events, and none of the records the CLI wrote for
+    itself (an envelope, a /model echo) nor the context capsule. A hidden continuation is
+    journaled as the live path journals it."""
+    from ciao.cli_envelopes import RELOAD_CONTINUE_PROMPT
+
+    replay = [
+        _user_chunk(_CAPSULE + "first question", "m1"),
+        *_REPLAYED_TOOLS,
+        _text("first answer"),
+        _user_chunk("<task-notification><task-id>t1</task-id><status>completed</status></task-notification>"),
+        _text(" noted"),
+        # One message sent as two chunks is one prompt.
+        _user_chunk("second ", "m3"),
+        _user_chunk("question", "m3"),
+        _text("second answer"),
+        _user_chunk(RELOAD_CONTINUE_PROMPT, "m4"),
+        _text("continued"),
+        _user_chunk("/model opus", "m5"),
+        _text("Set model to opus"),
+        # A slash command with the capsule as a block of its own.
+        _user_chunk("/review", "m6"),
+        _user_chunk(_CAPSULE, "m6"),
+        _text("third answer"),
+        # A subagent's prompt is not the person's.
+        _user_chunk("child prompt", "m7", _meta={"claudeCode": {"parentToolUseId": "call-1"}}),
+        # Two messages back to back stay two prompts.
+        _user_chunk("again", "m8"),
+        _user_chunk("and again", "m9"),
+        _text("last answer"),
+    ]
+    async with _started(
+        tmp_path,
+        resume="old-session",
+        initialize={"loadSession": True},
+        load_replay=replay,
+    ) as harness:
+        rows = SessionJournal.read(journal_path(tmp_path / "runtime", "fake", "old-session"))
+
+    flow = [(row["type"], row.get("text")) for row in rows if row["type"] in ("user", "text_delta")]
+    assert flow == [
+        ("user", "first question"),
+        ("text_delta", "first answer"),
+        ("text_delta", " noted"),
+        ("user", "second question"),
+        ("text_delta", "second answer"),
+        # Journaled as the live path journals it; the renderer hides it.
+        ("user", RELOAD_CONTINUE_PROMPT),
+        ("text_delta", "continued"),
+        ("text_delta", "Set model to opus"),
+        ("user", "/review"),
+        ("text_delta", "third answer"),
+        ("user", "again"),
+        ("user", "and again"),
+        ("text_delta", "last answer"),
+    ]
+    assert all(row == {"type": "user", "text": row["text"], "turn_origin": ""} for row in rows if row["type"] == "user")
+    assert not any("CIAO_CONTEXT" in json.dumps(row) or "/secret/ws" in json.dumps(row) for row in rows)
+    # The replayed thought and tool call are journaled as before, between the first prompt and its answer.
+    kinds = [row["type"] for row in rows]
+    first_user, first_answer = kinds.index("user"), kinds.index("text_delta")
+    between = rows[first_user + 1 : first_answer]
+    assert [row["type"] for row in between] == ["thinking", "tool_use", "tool_result"]
+    assert between[0]["text"] == "thinking it over"
+    assert between[1]["tool_use_id"] == between[2]["tool_use_id"] == "call-1"
+    assert harness.replaced is False
+
+
+@pytest.mark.asyncio
+async def test_load_replay_with_no_typed_prompt_journals_only_events(tmp_path: Path) -> None:
+    async with _started(
+        tmp_path,
+        resume="old-session",
+        initialize={"loadSession": True},
+        load_replay=[_user_chunk("<bash-input>ls</bash-input>"), *_REPLAYED_TOOLS, _text("done")],
+    ):
+        rows = SessionJournal.read(journal_path(tmp_path / "runtime", "fake", "old-session"))
+    assert [row["type"] for row in rows] == ["thinking", "tool_use", "tool_result", "text_delta"]
+
+
 @pytest.mark.asyncio
 async def test_session_meta_sent_on_new_load_and_resume(tmp_path: Path) -> None:
     meta = {"claudeCode": {"options": {"disallowedTools": ["CronCreate"]}}}

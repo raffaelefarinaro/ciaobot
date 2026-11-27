@@ -1821,7 +1821,8 @@ async def _assemble_chat_messages(
         if acp_rows:
             current = pcm._transcripts.current_messages(ChatContext.for_web(chat_id), provider)
             # A journal need not hold every prompt since `turn_index_base`: one rebuilt from a
-            # loadSession replay has the replayed turns' events but not their prompts. Number
+            # loadSession replay before the rebuild journaled prompts has the replayed turns'
+            # events but not their prompts. Number
             # the user rows from the durable turns they pair with, as the session path does,
             # so a row carries the engine's turn index (the live `user_echo` is deduped by it).
             # A rebuilt start is matched against the END of the durable turns, and with no
