@@ -773,7 +773,7 @@ def test_closed_tasks_is_due_only_for_a_completed_task_no_memory_pass_covers() -
     for phrase in (
         "`ciao task list --completed-since <since>`",
         "the project whose `kind` is `memory` in `ciao project list` (never pick it by name)",
-        "`helper.task_path` equal to the task's `relative_path`",
+        "`helper.task_path` equal to its `relative_path`",
         "`helper.source_chat_id` equal to its `chat_id` or one of its `linked_chats`",
         "the last 7 days when there is no old report",
         # The memory project can hold more passes than one page: page until before `since`.
@@ -823,15 +823,17 @@ def test_closed_tasks_is_idempotent_and_verifies_the_uncovered_count() -> None:
         "Skip a task listed in `.care-closed-tasks` with the same latest completion id",
         "A task completed again has a new completion id and is read again",
         "append its line to `.care-closed-tasks`, also when it yielded nothing",
-        "whose `relative_path` and `completed_at` are not on a line of `Workspace/.care-closed-tasks`",
+        "whose `relative_path` and `completed_at` are not yet on a line of `Workspace/.care-closed-tasks`",
+        # The file gates only whether the step is due; listed tasks still count, as skipped.
+        "The file only decides whether the step is due; the step itself works on every uncovered task",
         "`.care-closed-tasks` must have a line for each of the N tasks read, with its latest completion id",
-        "Also skip a task whose `relative_path` already appears as `source:` on a line of `Unsure.md` or in an undo-log entry `by: care closed-tasks`",
         "never add a line that says what an existing line says",
         "Do not re-add a fact the undo log shows was removed by `care second-look`, `care unsure` or a person",
-        "re-run the uncovered filter from the due check",
-        "its count must equal N + S + P",
+        "without the `.care-closed-tasks` part of the due check); the count must equal N + S + P",
     ):
         assert phrase in step, phrase
+    # An old Unsure line or undo-log entry must not block reading a re-completed task.
+    assert "Also skip a task whose" not in step
 
 
 def test_the_stale_step_maps_audit_paths_to_this_workspace() -> None:
