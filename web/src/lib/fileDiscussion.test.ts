@@ -68,6 +68,16 @@ describe('startFileDiscussion', () => {
     expect(store.pinFile).toHaveBeenCalledWith('c1', `/install/${viewerPath}`)
   })
 
+  it('opens the chat without resolving or pinning a file the pin cannot hold', async () => {
+    const store = makeStore()
+    const chat = await startFileDiscussion(asStore(store), { path: 'work/Reports/q3.pdf', seed: 'hello' })
+
+    expect(chat).toEqual({ chat_id: 'c1' })
+    expect(apiGet).not.toHaveBeenCalled()
+    expect(store.createChat).toHaveBeenCalled()
+    expect(store.pinFile).not.toHaveBeenCalled()
+  })
+
   it('toasts and creates nothing when the file cannot be resolved', async () => {
     apiGet.mockRejectedValue(new Error('not found'))
     const store = makeStore()
@@ -121,6 +131,7 @@ describe('startFileDiscussion', () => {
       'Cannot start chat',
       'No General project found in the personal workspace.',
     )
+    expect(apiGet).not.toHaveBeenCalled()
   })
 
   it('stays in the current workspace when the target has no General project', async () => {

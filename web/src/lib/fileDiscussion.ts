@@ -15,6 +15,7 @@
  */
 import { api } from './api'
 import { formatFileComments } from './commentContext'
+import { isPinnableFilePath } from './pinnableFile'
 import type { useProjectStore } from '../stores/projects'
 import type { ChatInfo } from './types'
 
@@ -46,9 +47,7 @@ export async function startFileDiscussion(
   { path, seed, title, workspace }: FileDiscussionOptions,
 ): Promise<ChatInfo | null> {
   if (!path) return null
-  const previous = store.activeWorkspace
-  const previousChatId = store.activeChatId
-  const target = workspace || previous
+  const target = workspace || store.activeWorkspace
   // Resolved through the store's own lookup rather than a fourth copy of the
   // `is_auto && name === 'General'` predicate, and resolved BEFORE the switch:
   // a workspace with no General project must not drag the app out of the one
@@ -59,14 +58,21 @@ export async function startFileDiscussion(
     return null
   }
   // Resolved before the switch, with the viewer's own resolver, so a file that
-  // cannot be found costs no workspace switch and no orphan chat.
-  let identity: string
-  try {
-    identity = (await api.get<{ path: string }>(`/api/workspace-file-path?path=${encodeURIComponent(path)}`)).path
-  } catch (e) {
-    store.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e))
-    return null
+  // cannot be found costs no workspace switch and no orphan chat. A file the
+  // pin cannot hold (a PDF or Office document the viewer converts) is not
+  // resolved and not pinned: the chat still opens, as it always did.
+  let identity = ''
+  if (isPinnableFilePath(path)) {
+    try {
+      identity = (await api.get<{ path: string }>(`/api/workspace-file-path?path=${encodeURIComponent(path)}`)).path
+    } catch (e) {
+      store.pushErrorToast('Could not start discussion', e instanceof Error ? e.message : String(e))
+      return null
+    }
   }
+  // Read after the await: the user may have switched workspace or chat meanwhile.
+  const previous = store.activeWorkspace
+  const previousChatId = store.activeChatId
   if (target !== previous) {
     try {
       // A declined settings guard is the user's own Cancel: no chat, no toast.
@@ -96,7 +102,7 @@ export async function startFileDiscussion(
       draft,
     )
     // Pin it so the chat opens split-view with the file itself visible.
-    await store.pinFile(chat.chat_id, identity)
+    if (identity) await store.pinFile(chat.chat_id, identity)
     return chat
   } catch (e) {
     // The switch is committed before the POST, so a rejected creation would

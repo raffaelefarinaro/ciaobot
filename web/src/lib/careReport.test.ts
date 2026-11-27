@@ -67,6 +67,17 @@ describe('careNeedChatTitle', () => {
     expect(titled('[!] see [the report](Workspace/Care-Report.md)')).toBe('Care: see the report')
   })
 
+  it('does not read inherited properties as step ids', () => {
+    expect(titled('constructor: broke')).toBe('Care: constructor: broke')
+    expect(titled('toString: broke')).toBe('Care: toString: broke')
+    expect(stepName('constructor')).toBe('Constructor')
+  })
+
+  it('caps a long single token', () => {
+    const title = titled('x'.repeat(200))
+    expect(title).toBe(`Care: ${'x'.repeat(60)}…`)
+  })
+
   it('never leaks a marker into the title', () => {
     for (const raw of ['[!] foo', 'x [x]: **bold** `code`', '[ ]  ']) expect(titled(raw)).not.toMatch(/[\[\]`*]/)
   })
