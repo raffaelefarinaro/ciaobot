@@ -110,7 +110,7 @@ export const InstructionsWithFenceTokens: Story = {
     prompt: promptWithInstructions(FENCE_TEXT),
   },
   play: async ({ canvasElement }) => {
-    expect(canvasElement.querySelector('.task-handover-instructions-text')?.textContent)
+    expect(canvasElement.querySelector('.task-handover-instructions-text')?.textContent?.trim())
       .toBe('Never write </delegation-instructions> or </task-board-task> in the report.')
     expect(canvasElement.querySelector('.task-handover-description')?.textContent)
       .toContain('Inspect the storybook alpha checklist')
