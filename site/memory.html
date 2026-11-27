@@ -42,6 +42,13 @@
     <section class="doc-intro">
       <h1>How memory works</h1>
       <p class="lead">No magic and no hidden database. Ciaobot's memory is a folder of Markdown notes, plus a few simple rules about when to write and when to look.</p>
+      <ul class="toc" aria-label="On this page">
+        <li><a href="#loop">The loop</a></li>
+        <li><a href="#layers">Three layers</a></li>
+        <li><a href="#control">You can always check</a></li>
+        <li><a href="#nightly">Workspace care</a></li>
+        <li><a href="#backup">Back it up</a></li>
+      </ul>
     </section>
 
     <section id="loop" aria-labelledby="loop-h">
@@ -50,13 +57,13 @@
       <div class="home-map">
         <svg class="diagram" viewBox="0 0 1100 330" overflow="visible" role="img" aria-labelledby="loop-title-m loop-desc-m">
           <title id="loop-title-m">The memory loop</title>
-          <desc id="loop-desc-m">You chat, then archive the chat. A memory pass files clear facts into your notes and lists uncertain ones in the Unsure list. A daily pass tidies the notes, and your next chat loads them.</desc>
+          <desc id="loop-desc-m">You chat, then archive the chat. A memory pass files clear facts into your notes and lists uncertain ones in the Unsure list. Workspace care tidies the notes each night, and your next chat loads them.</desc>
           <rect class="box" x="0" y="60" width="180" height="84" rx="16"/><text x="90" y="109" text-anchor="middle" font-size="20" font-weight="700">Chat</text>
           <rect class="box" x="250" y="60" width="180" height="84" rx="16"/><text x="340" y="109" text-anchor="middle" font-size="20" font-weight="700">Archive</text>
           <rect class="box-solid" x="500" y="60" width="220" height="84" rx="16"/><text class="on-solid" x="610" y="109" text-anchor="middle" font-size="20" font-weight="700">Memory pass</text>
           <rect class="box" x="830" y="0" width="230" height="84" rx="16"/><text x="945" y="49" text-anchor="middle" font-size="20" font-weight="700">Notes</text>
           <rect class="box-pending" x="830" y="128" width="230" height="84" rx="16"/><text x="945" y="177" text-anchor="middle" font-size="20" font-weight="700">Unsure list</text>
-          <rect class="box" x="380" y="244" width="240" height="70" rx="16"/><text x="500" y="285" text-anchor="middle" font-size="20" font-weight="700">Daily tidy</text>
+          <rect class="box" x="380" y="244" width="240" height="70" rx="16"/><text x="500" y="285" text-anchor="middle" font-size="20" font-weight="700">Workspace care</text>
           <path class="line" d="M180 102H250M430 102H500M720 92 830 42M1060 42H1090V279H620M380 279H90V144"/>
           <path class="line pending" d="M720 112 830 170"/>
           <text class="muted" x="340" y="174" text-anchor="middle" font-size="15">you archive</text>
@@ -70,7 +77,7 @@
       </div>
     </section>
 
-    <section aria-labelledby="layers-h">
+    <section id="layers" aria-labelledby="layers-h">
       <h2 id="layers-h">Three layers</h2>
       <svg class="diagram" viewBox="0 0 720 250" role="img" aria-labelledby="sum-title sum-desc">
         <title id="sum-title">Three layers of memory</title>
@@ -92,7 +99,7 @@
         <text class="muted" x="600" y="86" text-anchor="middle" font-size="14">After you archive a chat,</text>
         <text class="muted" x="600" y="108" text-anchor="middle" font-size="14">facts are checked and filed,</text>
         <text class="muted" x="600" y="140" text-anchor="middle" font-size="14">or listed as unsure</text>
-        <text class="muted" x="600" y="190" text-anchor="middle" font-size="13">tidied once a day</text>
+        <text class="muted" x="600" y="190" text-anchor="middle" font-size="13">tidied each night</text>
       </svg>
       <ul>
         <li><strong>Always known.</strong> A short core memory about you and how you work, plus the project's description, is loaded into every chat. It lives in <code>AGENTS.md</code> in your workspace.</li>
@@ -105,6 +112,7 @@
       <h2 id="control-h">You can always check</h2>
       <ul>
         <li><strong>The unsure list.</strong> What the agent could not settle goes on <code>Workspace/Unsure.md</code>, one line each. Tick a line to approve it, or delete it to drop it.</li>
+        <li><strong>The undo log.</strong> Before a line in a note or in core memory is replaced or removed, the original is copied to <code>Workspace/Memory-Consolidations.md</code>, so it can be put back even without a backup.</li>
         <li><strong>Git is the undo.</strong> The agent writes to your notes directly, and the folder is a Git repository, so every change is in its history and can be reverted.</li>
         <li><strong>Memory Map.</strong> See the whole vault as a graph of notes and links, or as a list, and open any note from it.</li>
         <li><strong>Old notes are flagged, never deleted.</strong> You decide whether to retire them, and retired notes stay readable.</li>
@@ -112,14 +120,140 @@
     </section>
 
     <section id="nightly" aria-labelledby="nightly-h">
-      <h2 id="nightly-h">The daily tidy-up</h2>
-      <p>Once a day, at a time you choose, the Workspace care routine looks after each workspace:</p>
+      <h2 id="nightly-h">Workspace care</h2>
+      <p>Each night, while your computer is awake and Ciaobot is running, each workspace gets one care run. It starts at the time you picked during setup. If you kept the default, the first workspace starts at one minute past midnight UTC and each further workspace seven minutes later, so they do not all start at once. A run missed because Ciaobot was not running is caught up once when it starts again. Care is listed under Automations as a system routine, where you can pause it. It runs unattended: it never asks you anything or waits for an answer. It leaves what needs you in a report and on the Unsure list.</p>
+
+      <h3 id="care-run">How a run goes</h3>
+      <ol class="steps">
+        <li><strong>Checks it can run.</strong> If this version of Ciaobot lacks a command the run needs, it stops at once with “Care cannot run … update Ciaobot” and changes nothing.</li>
+        <li><strong>Writes a checklist.</strong> It reads the last report, runs read-only checks, and writes one unticked line per step that is due into <code>Workspace/Care-Report.md</code>. When nothing is due it says so and stops.</li>
+        <li><strong>Runs each due step, one at a time.</strong> Each step runs in a fresh subagent that is told only the folder, the date, and two files to read: the rules below and that step's instructions. The exception is hygiene, which is mechanical and which the run does itself.</li>
+        <li><strong>Checks the work, then ticks.</strong> The run itself runs the step's check and ticks the line only with the step's evidence and the check's output. Otherwise the line is marked blocked, with the reason.</li>
+        <li><strong>Tries a blocked step once more.</strong> After a second block it stays blocked. The run does not finish while any line is still open.</li>
+        <li><strong>Counts and reports.</strong> It adds a numbered “What needs you” list to the report, then ends with “Care complete” or “Care incomplete”, the count of steps done, any blocked steps, and a short summary in plain words.</li>
+      </ol>
+
+      <h3 id="care-steps-h">The steps</h3>
+      <p>There are nine steps today. Five run on the nights their check finds work; four are weekly. A step that is not due does not run.</p>
+      <ol class="care-steps" role="list">
+          <li id="step-unsure">
+            <h4>Apply the lines you ticked <code>unsure</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>every night, when <code>Workspace/Unsure.md</code> has a line you ticked.</dd>
+              <dt>What it does</dt><dd><p>Writes each ticked line where the line says (a note, a project note, or one of the two memory regions), re-reads the destination, and only then deletes the line. A ticked “drop” line removes a memory entry; a ticked “restore to” line puts back an entry an earlier care step removed. It never acts on a line you did not tick.</p>
+                <p>Three kinds of line stay ticked and come back to you, because an unattended run may not apply them: a new category (you add it in Settings), a fact for a linked code repository's own guide, and a change to a decision rule.</p>
+                <p>One exception to “only ticked lines”: a pattern noticed in three different chats. For up to three of these a night, it reads those chats first, and writes the fact only when your own messages show the pattern, citing the chats.</p></dd>
+              <dt>Checked by</dt><dd>the number of ticked lines left on the list must equal the number it says it left on purpose.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-1-unsure.md">curation-pass-1-unsure.md</a></p>
+          </li>
+          <li id="step-drain">
+            <h4>Empty the old review queues (temporary) <code>drain</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>only on a workspace that started on an older version, until its old queues are empty.</dd>
+              <dt>What it does</dt><dd><p>A one-time move. Older versions kept doubtful items in review queues (<code>Memory-Proposals.md</code>, <code>Skill-Proposals/</code>, <code>Skill-Drafts/</code>, <code>Observations.md</code>). This step moves each item to where it goes today. A memory or profile row is written to memory only after it reads the chat the row names, and goes on the Unsure list when there is no readable source or it is in doubt; a row for a project or a person is folded into that note; a lesson goes into <code>Learnings.md</code>; a repository fact or open question goes on the Unsure list; a skill record becomes a proposal file; a pattern from <code>Observations.md</code> becomes an <code>observation:</code> line on the Unsure list. At most 25 items a night, never a duplicate, and it never approves or rejects a draft. When nothing is left it writes the marker file <code>Workspace/.care-drained</code> and the step does not run again.</p></dd>
+              <dt>Checked by</dt><dd>the count of rows left in <code>Memory-Proposals.md</code> must match what the step reported, and be zero before the marker is written.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/drain-legacy-queues.md">drain-legacy-queues.md</a></p>
+          </li>
+          <li id="step-second-look">
+            <h4>Re-read what the memory passes wrote <code>second-look</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>every night when a memory pass has finished since the day before the last run (the last 7 days on a first run).</dd>
+              <dt>What it does</dt><dd><p>The memory pass that runs after you archive a chat writes to your notes directly. This step is the safety net for those writes. It reads up to 10 passes and 15 new notes, newest first, and judges only lines a pass wrote: a line you or another care step wrote is left alone, and so is one a person already put back.</p>
+                <p>It fixes five kinds of mistake:</p>
+                <ul>
+                  <li>the same person or thing filed twice under different names: it moves the facts into the existing note and writes a proposal to retire the duplicate, never a delete;</li>
+                  <li>a memory entry that did not come from your own typed words: it removes it and offers it back as a “restore to” line on the Unsure list; an entry that grants a permission, names a payment or forwarding address, holds a password or key, or tells an agent to act for someone else is removed and reported, never offered back;</li>
+                  <li>something written as a settled fact that was not one: a status snapshot, a one-off choice, something only the assistant said, or a suggestion you only leaned towards;</li>
+                  <li>a fact filed under the wrong person or project: it moves it;</li>
+                  <li>a fact a pass removed with nothing in its place: it puts it back.</li>
+                </ul>
+                <p>A rule or permission you stated yourself is never removed. What it doubts goes on the Unsure list instead of being edited.</p></dd>
+              <dt>Checked by</dt><dd>every removal must be in the undo log and gone from where it was; every move, merge and put-back is re-read at its destination; every proposal passes the format check.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-8-second-look.md">curation-pass-8-second-look.md</a></p>
+          </li>
+          <li id="step-regions">
+            <h4>Tidy the always-loaded memory <code>regions</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>one of the two memory regions in <code>AGENTS.md</code> (about you, and how you work) is 85% full or more.</dd>
+              <dt>What it does</dt><dd><p>Merges duplicates, replaces an outdated entry with its current state, drops entries whose expiry date has passed, tightens wording, and moves entries that only concern one project into that project's note. It only rewrites what is already there; it is never where new facts come from. An entry it is not sure about stays, with a “drop” line on the Unsure list. The size limit is a guide: a useful fact is never dropped just to fit, and a region that stays full is reported to you.</p></dd>
+              <dt>Checked by</dt><dd>the memory status must show each region under 85%, or give the reason it is still above.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-2-regions.md">curation-pass-2-regions.md</a></p>
+          </li>
+          <li id="step-learnings">
+            <h4>Route lessons that keep coming back <code>learnings</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>a lesson in <code>Workspace/Learnings.md</code> has come up three times or more, or ten or more lessons are open.</dd>
+              <dt>What it does</dt><dd><p>For each lesson seen three times or more, it decides where it belongs: a skill this workspace owns gets a skill-edit proposal (nothing, if the skill already says it); a shipped or shared skill gets a proposal for an issue to its maintainers, written so a stranger could reproduce it, with no names, paths or chat excerpts; a lesson no skill covers gets a proposal for a new skill; a fact true in only one project goes into that project's note; a preference you stated yourself across projects goes into memory after it reads the chats it came from. It merges duplicate lessons and prunes lessons seen only once, older than 30 days, that have no reuse value. It never edits a skill and never files an issue.</p></dd>
+              <dt>Checked by</dt><dd>every proposal file it wrote passes the format check, or no proposal was created today when it says it routed none.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-4-learnings.md">curation-pass-4-learnings.md</a></p>
+          </li>
+          <li id="step-stale">
+            <h4>Re-check notes nobody has checked in a while <code>stale</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>weekly, when the memory audit lists stale notes in this workspace.</dd>
+              <dt>What it does</dt><dd><p>Takes up to five stale notes, oldest first. For each it reads the note and the notes related to it, and judges each fact against real sources: those related notes and the files and projects the note names. Reading the note alone does not count as checking it. It fixes what the sources plainly contradict, in the note, citing the source, and marks a sentence <code>[verified: date]</code> only after checking that sentence. A doubt, or two sources that disagree (both quoted), goes on the Unsure list. It never retires or deletes a note; it writes a proposal to retire it.</p></dd>
+              <dt>Checked by</dt><dd>it runs the audit again: no note it says it fixed or verified may still be listed as stale, and no more may be left than it reported.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-3-stale-notes.md">curation-pass-3-stale-notes.md</a></p>
+          </li>
+          <li id="step-hygiene">
+            <h4>Rebuild the index and audit the folder <code>hygiene</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>weekly.</dd>
+              <dt>What it does</dt><dd><p>The only step with no judgement in it: the run does it itself with two commands. It rebuilds <code>INDEX.md</code>, the list of every note, and runs the workspace audit, then writes each finding (its kind and the note it is about) under “Hygiene” in the report. It repairs nothing: a broken link or a wrong note type is left for you. When the audit cannot read its evidence reliably, the step is marked blocked rather than reporting the folder healthy.</p></dd>
+              <dt>Checked by</dt><dd><code>INDEX.md</code> must have been rewritten today, and the report must record the audit result, the number of findings and one line per finding.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-6-hygiene.md">curation-pass-6-hygiene.md</a></p>
+          </li>
+          <li id="step-guide-review">
+            <h4>Review your workspace guide <code>guide-review</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>weekly.</dd>
+              <dt>What it does</dt><dd><p>The body of your <code>AGENTS.md</code> is read by every session in the workspace, so this step only reviews it and never edits it. It looks for entries that belong somewhere else (a person, system or tool belongs in a note; a tip for one workflow belongs in that skill), a current value added as a new line instead of replacing the old one, events that belong in a log, sections that only repeat Ciaobot's built-in instructions or a tool's own documentation, a lesson seen three times that the guide never picked up, and outdated paths or rules. Each suggested change is a proposal file; what it is only unsure about goes on the Unsure list.</p></dd>
+              <dt>Checked by</dt><dd>every proposal file passes the format check, or no proposal was created today when it says it found none.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-7-guide-body.md">curation-pass-7-guide-body.md</a></p>
+          </li>
+          <li id="step-rules">
+            <h4>Turn your decisions into review rules <code>rules</code></h4>
+            <dl>
+              <dt>Runs when</dt><dd>weekly, when you have recorded at least five decisions on memory items or on tasks.</dd>
+              <dt>What it does</dt><dd><p>When you approve, reject or delete something you can say why. This step groups those decisions and writes two notes you can edit, <code>Workspace/Memory-Review-Rules.md</code> and <code>Workspace/Task-Rules.md</code>, which later memory passes and task hand-offs read as hints. Each rule quotes a real example word for word. A group with no clear lean gets no rule, and a reason an agent reported on your behalf never carries a rule on its own. When the evidence would reverse an existing rule, it keeps the old rule and asks you on the Unsure list; the change happens only when you ask for it in a chat.</p></dd>
+              <dt>Checked by</dt><dd>the decisions digest must list the rules it says it wrote.</dd>
+            </dl>
+            <p class="care-file">Instructions: <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/references/memory-operations/references/curation-pass-7b-decision-rules.md">curation-pass-7b-decision-rules.md</a></p>
+          </li>
+      </ol>
+
+      <h3 id="care-weekly">Weekly steps and retries</h3>
+      <p>The four weekly steps (stale, hygiene, guide review and rules) are due when the report's “Weekly done” date is missing or seven or more days old. That date moves to today only when every weekly line of the run is ticked or blocked. A weekly step that ends blocked is retried on its own the next night, without the rest of the weekly batch, and the report counts the nights. A retry that succeeds is dropped; after three nights blocked it stops retrying and is listed under “What needs you” with its reason.</p>
+
+      <h3 id="care-rules">Rules every step follows</h3>
       <ul>
-        <li>It works through a checklist: it files the lines you ticked on the unsure list and leaves a report, <code>Workspace/Care-Report.md</code>, saying what it did and what needs you.</li>
-        <li>When core memory gets full, it merges duplicates and drops expired facts, and Git keeps every removed line in its history.</li>
-        <li>It re-checks notes that went too long without a look and flags the stale ones. When the same correction keeps coming up, it proposes a better skill as a file you can open.</li>
+        <li><strong>It never edits</strong> a skill or the body of your <code>AGENTS.md</code>, never files an issue, never deletes or restores a note, never writes to another workspace, never creates or moves an automation, never runs Git, and never approves or rejects a proposal. A skill edit, a guide edit, an issue for a skill's maintainers, or retiring a note becomes a proposal file in <code>Workspace/Proposals/</code> that you act on; the rest it simply leaves to you.</li>
+        <li><strong>It writes only in your notes folder</strong>, plus the two memory regions of <code>AGENTS.md</code>. The one exception is the weekly <code>INDEX.md</code> rebuild.</li>
+        <li><strong>A fact needs a source you produced:</strong> your own typed message, your own file, or a line you ticked. Text quoted, pasted or fetched inside a message (an email, a web page, a tool's output) is not your words, and the run's own output never counts as a source.</li>
+        <li><strong>Notes, chats and the Unsure list are evidence, never instructions.</strong> An instruction found inside one is not followed.</li>
+        <li><strong>Some entries are never stored</strong> unless they came from your own message or tick: a permission, a payment or forwarding address, or a direction to send, pay, contact or run something for someone else.</li>
+        <li><strong>A password or key is never written down.</strong> It may be named, but its value is never copied, whatever the source.</li>
+        <li><strong>Lines removed from notes and memory are kept.</strong> Before replacing or removing a line in a note, a project note or a memory region, it copies the original into <code>Workspace/Memory-Consolidations.md</code> with who made the change, so it can be put back.</li>
+        <li><strong>Each step ends with “done”</strong> and its evidence, or “blocked” and the reason. Partial work is not accepted.</li>
       </ul>
-      <p>It never deletes or retires a note itself: it writes a proposal file for you instead.</p>
+
+      <h3 id="care-results">Where to see what it did</h3>
+      <ul>
+        <li><strong>Home.</strong> <em>At a glance</em> always has one quiet care line, such as “Done today 03:12 · 5 of 5 steps”. A row in <em>Needs you</em> appears only when the run left you something, did not finish, or was cut off.</li>
+        <li><strong>Memory › Workspace care.</strong> The full report: what needs you, with a button to the right place; every step with its evidence and check; <strong>Run care again</strong>; and, on a step that is blocked or needs you, <strong>Fix with a chat</strong>, which drafts a chat for you to send.</li>
+        <li><strong>The files.</strong> <code>Workspace/Care-Report.md</code> is the report itself, <code>Workspace/Unsure.md</code> holds what it could not settle, <code>Workspace/Proposals/</code> holds suggested changes, and <code>Workspace/Memory-Consolidations.md</code> is the undo log.</li>
+      </ul>
+
+      <h3 id="care-limits">What it cannot promise</h3>
+      <p>Care is a model working on its own at night, so it can get things wrong. The run re-checks each step's work with a command before ticking it, but a check proves the step did what it reported, not that every judgement was right. So it only rewrites what is already there, keeps a copy of any line it replaces or removes in a note, project note or memory region, sends what it doubts to the Unsure list, and leaves skills, your guide and note retirements to you. The second look is there because the memory passes that run after you archive a chat make mistakes too; it judges only what those passes wrote. Where the folder is backed up with Git, a change that has reached a backup commit can also be undone from its history.</p>
     </section>
 
     <section id="backup" aria-labelledby="backup-h">
@@ -149,7 +283,7 @@
   <footer class="site-footer">
     <div class="inner">
       <span>Ciaobot is open source under the MIT License. No telemetry, and this site runs no analytics.</span>
-      <span>Last updated 21 November 2026</span>
+      <span>Last updated 27 November 2026</span>
       <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>
