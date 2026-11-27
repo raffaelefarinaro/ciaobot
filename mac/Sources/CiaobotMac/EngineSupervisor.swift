@@ -161,6 +161,20 @@ final class EngineSupervisor: ObservableObject {
         return nil
     }
 
+    /// The loopback ports this app's own engine answers on: the private TLS
+    /// port, the workspace port, and the port of a running origin. The tray
+    /// treats a loopback origin on one of them as This Mac; a loopback origin on
+    /// any other port is a different server.
+    var ownPorts: Set<Int> {
+        var ports = Set<Int>()
+        if case .running(let origin, _, _) = state { ports.insert(origin.portNumber) }
+        if let record = readRecord() {
+            if let port = record.port { ports.insert(port) }
+            if let tlsPort = record.tlsPort { ports.insert(tlsPort) }
+        }
+        return ports
+    }
+
     /// The bundled engine as the update gate reads it. Only a running engine
     /// has a port to drain. A starting or stopping engine is transitioning and
     /// never idle. Stopped, failed, and port-in-use leave nothing this app owns
@@ -433,6 +447,7 @@ final class EngineSupervisor: ObservableObject {
     private struct ReadyRecord {
         let pid: Int32?
         let port: Int?
+        let tlsPort: Int?
         let startupID: String?
     }
 
@@ -442,6 +457,7 @@ final class EngineSupervisor: ObservableObject {
         return ReadyRecord(
             pid: jsonInteger(object["pid"]).flatMap { Int32(exactly: $0) }.flatMap { $0 > 1 ? $0 : nil },
             port: jsonInteger(object["port"]).flatMap { (1...65535).contains($0) ? $0 : nil },
+            tlsPort: jsonInteger(object["tls_port"]).flatMap { (1...65535).contains($0) ? $0 : nil },
             startupID: (object["startup_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         )
     }
