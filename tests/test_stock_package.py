@@ -897,7 +897,7 @@ def test_the_needs_you_standard_lives_in_the_preamble_and_the_prompt_points_at_i
         text = _reference(name)
         assert "`note: " in text, name
         assert "`needs you: P" not in text, name
-    assert "Choose Fix with a chat to trim it together. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
+    assert "Choose Optimize to trim it together. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
 
 
 def test_the_stale_step_re_dates_only_a_note_it_re_checked_in_full() -> None:

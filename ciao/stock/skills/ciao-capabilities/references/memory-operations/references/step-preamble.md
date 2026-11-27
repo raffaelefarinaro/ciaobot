@@ -18,7 +18,7 @@ You are one step of an unattended care run. The orchestrator gave you the vault 
 
 The person reads what you leave on the Workspace care page and may never have opened these files. Put anything they must decide or do inside the evidence as `needs you: <plain sentence> (path: <vault-relative path>)`:
 
-- One item is one decision or action, in at most two short sentences: the situation, what you recommend, and how to act, naming a button the app has ("Choose Review proposal, then Approve or Reject.", "Open Memory > Unsure and approve or reject them.", "Choose Fix with a chat to trim it together.").
+- One item is one decision or action, in at most two short sentences: the situation, what you recommend, and how to act, naming a button the app has ("Choose Review proposal, then Approve or Reject.", "Open Memory > Unsure and approve or reject them.", "Choose Optimize to trim it together.").
 - Everyday words only. No step ids, command or field names (`updated:`, `pct`, frontmatter), audit or verify output, retry counters or file formats. Never ask the person to edit a file by hand (no "tick `- [x]`").
 - Never hand the person a decision the run should make itself: a step that failed or needs a rule changed is not their question. It is a `note:`, and the step is retried or fixed.
 - `path` is the one file the person opens to act, relative to the vault and without `..` (`Workspace/Unsure.md`, `Workspace/Proposals/<slug>.md`, `Workspace/Care-Report.md`), or `AGENTS.md` for the workspace guide. The app picks the button from it. Leave `(path: …)` out when there is no file to open.

@@ -95,7 +95,9 @@ test.describe('Workspace care', () => {
     await summary.focus()
     await page.keyboard.press('Enter')
     await expect(page.locator('.mc-step').first()).toBeVisible()
-    // The choice holds for the session.
+    // The choice holds for the session. The toggle event writes it a moment
+    // after `open` flips, so wait for the write before reloading.
+    await expect.poll(() => page.evaluate(() => sessionStorage.getItem('ciao.care.stepsOpen'))).toBe('open')
     await page.reload()
     await expect(page.locator('.mc-step').first()).toBeVisible()
     const notes = page.locator('details.mc-disclosure').nth(1)
