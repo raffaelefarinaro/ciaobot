@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { COMPOSER, INBOX_DIALOG, boot, isolate, openChatDetails, openInbox, seedInbox } from '../support/app'
+import { COMPOSER, INBOX_DIALOG, boot, isolate, openChatDetails, openInbox, seedInbox, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Layout claims about the phone chat header need a real engine: jsdom lays
@@ -83,7 +83,7 @@ test.describe('phone chat header', () => {
     await expect(names.filter({ hasText: 'Archive' })).toBeVisible()
     await expect(names.filter({ hasText: /^Back to/ })).toBeVisible()
     for (const item of await names.all()) {
-      expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+      expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
 
     await names.filter({ hasText: 'Notifications' }).click()

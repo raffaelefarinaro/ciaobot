@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { COMPOSER, boot, isolate } from '../support/app'
+import { COMPOSER, boot, isolate, TOUCH_FLOOR } from '../support/app'
 
 /**
  * A provider handover is drawn as the injected-turn notice card, collapsed,
@@ -30,7 +30,7 @@ test.describe('handover card', () => {
     await expect(toggle).toHaveAttribute('aria-expanded', 'false')
     const cardBox = (await card.boundingBox())!
     const toggleBox = (await toggle.boundingBox())!
-    expect(toggleBox.height).toBeGreaterThanOrEqual(44)
+    expect(toggleBox.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     expect(toggleBox.x + toggleBox.width).toBeLessThanOrEqual(cardBox.x + cardBox.width + 0.5)
     await card.screenshot({ path: test.info().outputPath('handover-collapsed.png') })
 

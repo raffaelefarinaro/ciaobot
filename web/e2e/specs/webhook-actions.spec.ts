@@ -1,21 +1,21 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
-import { boot, isolate } from '../support/app'
+import { TOUCH_FLOOR, boot, isolate } from '../support/app'
 
 // Document overflow cannot detect controls clipped by the Automations pane.
 // Check all four corners against the viewport AND the browser's hit-test tree.
 async function expectReachable(control: Locator) {
   await expect(control).toBeVisible()
-  await expect.poll(() => control.evaluate((el) => {
+  await expect.poll(() => control.evaluate((el, floor) => {
     const rect = el.getBoundingClientRect()
     const points = [
       [rect.left + 8, rect.top + 8], [rect.right - 8, rect.top + 8],
       [rect.left + 8, rect.bottom - 8], [rect.right - 8, rect.bottom - 8],
     ]
-    return rect.width >= 44 && rect.height >= 44
+    return rect.width >= floor && rect.height >= floor
       && rect.left >= 0 && rect.right <= window.innerWidth
       && rect.top >= 0 && rect.bottom <= window.innerHeight
       && points.every(([x, y]) => el.contains(document.elementFromPoint(x!, y!)))
-  }), `fully visible and hittable: ${await control.getAttribute('aria-label') ?? await control.textContent()}`).toBe(true)
+  }, TOUCH_FLOOR), `fully visible and hittable: ${await control.getAttribute('aria-label') ?? await control.textContent()}`).toBe(true)
 }
 
 async function mockTrigger(page: Page) {

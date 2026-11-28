@@ -1,5 +1,5 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test'
-import { boot, fixtureWrites, horizontalOverflow, isolate, seedInbox } from '../support/app'
+import { boot, fixtureWrites, horizontalOverflow, isolate, seedInbox, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Why this is a browser test and not a vitest one.
@@ -76,7 +76,7 @@ test.describe('mac app switch row', () => {
     await expect(link).toHaveAttribute('target', '_blank')
     const box = await link.boundingBox()
     expect(box, 'the lead link is a real tap target').not.toBeNull()
-    expect(box!.height).toBeGreaterThanOrEqual(44)
+    expect(box!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
 
     // Keyboard: Tab reaches the link and its focus ring is visible.
     let onLink = false

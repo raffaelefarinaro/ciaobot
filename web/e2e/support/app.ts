@@ -57,6 +57,17 @@ export async function boot(
     .toBeVisible(options.readyTimeout === undefined ? undefined : { timeout: options.readyTimeout })
 }
 
+/** The touch-target minimum from DESIGN.md, in CSS px. */
+export const TOUCH_MIN = 44
+
+/**
+ * What a measured box must reach to count as a `TOUCH_MIN` target. A box is
+ * laid out in fractional pixels (a zoomed or scaled layout reports 43.999999
+ * for a 44px rule), so an exact >= 44 on a measured size fails by rounding. Half
+ * a pixel is far below any real shortfall: a control built 43px tall still fails.
+ */
+export const TOUCH_FLOOR = TOUCH_MIN - 0.5
+
 /** The current workspace scope control at the top of the sidebar. */
 export function activeWorkspaceButton(page: Page) {
   return page.locator('.workspace-scope-trigger').first()

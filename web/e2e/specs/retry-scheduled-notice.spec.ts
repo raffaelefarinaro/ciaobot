@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
-import { boot, COMPOSER, isolate } from '../support/app'
+import { boot, COMPOSER, isolate, TOUCH_FLOOR } from '../support/app'
 
 type RetryMode = 'literal' | 'continue_recovery'
 const reason = 'you have reached your weekly usage limit'
@@ -61,8 +61,8 @@ for (const size of ['desktop', 'phone'] as const) {
         await expect(button).toBeEnabled()
         if (size === 'phone') {
           const box = (await button.boundingBox())!
-          expect(box.width).toBeGreaterThanOrEqual(44)
-          expect(box.height).toBeGreaterThanOrEqual(44)
+          expect(box.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+          expect(box.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
         }
       }
       const toggle = card.getByRole('button', { name: 'Retry scheduled' })
@@ -202,8 +202,8 @@ for (const size of ['desktop', 'phone'] as const) {
         const button = card.getByRole('button', { name, exact: true })
         if (size === 'phone') {
           const box = (await button.boundingBox())!
-          expect(box.width).toBeGreaterThanOrEqual(44)
-          expect(box.height).toBeGreaterThanOrEqual(44)
+          expect(box.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+          expect(box.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
         }
         await tabTo(page, button)
         await page.keyboard.press('Enter')

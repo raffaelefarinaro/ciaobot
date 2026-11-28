@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, horizontalOverflow, isolate } from '../support/app'
+import { boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../support/app'
 
 for (const mobile of [false, true]) {
   test(`provider defaults and effort remain usable on ${mobile ? 'touch' : 'desktop'}`, async ({ browser }, testInfo) => {
@@ -46,7 +46,7 @@ for (const mobile of [false, true]) {
     await expect(effort).toHaveValue('high')
     if (mobile) {
       const box = await effort.boundingBox()
-      expect(box!.height).toBeGreaterThanOrEqual(44)
+      expect(box!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
     await page.screenshot({ path: testInfo.outputPath('settings.png'), fullPage: true })
     if (!mobile) await page.setViewportSize({ width: 640, height: 450 })
@@ -102,8 +102,8 @@ for (const mobile of [false, true]) {
       const summaries = await page.locator('.provider-connections summary').all()
       for (const target of [...summaries, open, guidance.getByRole('button', { name: 'Copy sign-in command for Example (custom)' })]) {
         const box = await target.boundingBox()
-        expect(box!.width).toBeGreaterThanOrEqual(44)
-        expect(box!.height).toBeGreaterThanOrEqual(44)
+        expect(box!.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+        expect(box!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       }
     }
     await page.screenshot({ path: testInfo.outputPath('provider-screen.png'), fullPage: true })

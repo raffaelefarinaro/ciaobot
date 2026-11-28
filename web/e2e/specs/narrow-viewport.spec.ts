@@ -1,5 +1,5 @@
 import { expect, test, type Locator } from '@playwright/test'
-import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails, seedInbox, settled } from '../support/app'
+import { COMPOSER, boot, horizontalOverflow, isolate, openChatDetails, seedInbox, settled, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Why this is a browser test and not a vitest one.
@@ -57,12 +57,12 @@ async function expectQuestionSubmitVisible(page: import('@playwright/test').Page
       return { visible: b.left >= c.left - 1 && b.right <= c.right + 1 && b.top >= c.top - 1 && b.bottom <= c.bottom + 1 && b.left >= left - 1 && b.right <= right + 1 && b.top >= top - 1 && b.bottom <= bottom + 1 && hits.every(Boolean), hits, card: c.toJSON(), button: b.toJSON(), viewport: { left, top, right, bottom }, app: app.toJSON(), bodyHeight: body.clientHeight, bodyWidth: body.clientWidth, bodyScrollHeight: body.scrollHeight, bodyScrollTop: body.scrollTop, buttonWidth: b.width, buttonHeight: b.height, cancelWidth: rect(cancel).width, cancelHeight: rect(cancel).height, composer: rect(document.querySelector('textarea.chat-input')!), composerBar: rect(document.querySelector('.composer-bar')!), viewportBottom: bottom }
     })
     expect(result.visible, `Send answer must stay visible and hit-testable: ${JSON.stringify(result)}`).toBe(true)
-    expect(result.bodyHeight).toBeGreaterThanOrEqual(44)
+    expect(result.bodyHeight).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     expect(result.bodyWidth).toBeGreaterThan(0)
-    expect(result.buttonWidth).toBeGreaterThanOrEqual(44)
-    expect(result.buttonHeight).toBeGreaterThanOrEqual(44)
-    expect(result.cancelWidth).toBeGreaterThanOrEqual(44)
-    expect(result.cancelHeight).toBeGreaterThanOrEqual(44)
+    expect(result.buttonWidth).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(result.buttonHeight).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(result.cancelWidth).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(result.cancelHeight).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     expect(result.composer.top).toBeGreaterThanOrEqual(-1)
     expect(result.composer.bottom).toBeLessThanOrEqual(result.viewportBottom + 1)
     // The whole composer, send/stop included, stays on screen (#2774).
@@ -223,7 +223,7 @@ test.describe('narrow viewport', () => {
       const rowBox = (await row.boundingBox())!
       const toggle = (await row.locator('.toggle-btn').boundingBox())!
       expect(aside.x).toBe(0)
-      expect(toggle.width).toBeGreaterThanOrEqual(44)
+      expect(toggle.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       expect(toggle.x + toggle.width).toBeLessThanOrEqual(aside.x + aside.width)
       // The visible 30px face ends on the row's edge, where the cards below end.
       expect(toggle.x + toggle.width - 7).toBeLessThanOrEqual(rowBox.x + rowBox.width + 1)
@@ -530,7 +530,7 @@ test.describe('narrow viewport', () => {
     expect(boxes.length, 'no touch targets were measured').toBeGreaterThanOrEqual(2)
     expect(boxes.some((box) => box.cls.includes('chat-more-btn')), 'the ⋯ trigger is not measured').toBe(true)
 
-    const small = boxes.filter((box) => box.w < 44 || box.h < 44)
+    const small = boxes.filter((box) => box.w < TOUCH_FLOOR || box.h < TOUCH_FLOOR)
     expect(small, `controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])
   })
 
@@ -548,7 +548,7 @@ test.describe('narrow viewport', () => {
       }),
     )
     expect(boxes.length, 'no home composer controls were measured').toBeGreaterThanOrEqual(2)
-    const small = boxes.filter((box) => box.h < 44)
+    const small = boxes.filter((box) => box.h < TOUCH_FLOOR)
     expect(small, `home composer controls below the 44px touch minimum: ${JSON.stringify(small)}`).toEqual([])
   })
 
@@ -574,7 +574,7 @@ test.describe('narrow viewport', () => {
     for (const row of await rows.all()) {
       const box = await row.boundingBox()
       expect(box).not.toBeNull()
-      expect(box!.height, 'an insight row is shorter than the touch minimum').toBeGreaterThanOrEqual(44)
+      expect(box!.height, 'an insight row is shorter than the touch minimum').toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
 
     const { overflow } = await horizontalOverflow(page)
@@ -622,7 +622,7 @@ test.describe('narrow viewport', () => {
     expect(rows.length, 'no category row controls were measured').toBeGreaterThanOrEqual(4)
     // Both directions: a 44px-tall 40px-wide switch is under the minimum, so
     // height alone would call it a pass.
-    expect(rows.filter((b) => b.w < 44 || b.h < 44), `row controls below 44px: ${JSON.stringify(rows.filter((b) => b.w < 44 || b.h < 44))}`).toEqual([])
+    expect(rows.filter((b) => b.w < TOUCH_FLOOR || b.h < TOUCH_FLOOR), `row controls below 44px: ${JSON.stringify(rows.filter((b) => b.w < TOUCH_FLOOR || b.h < TOUCH_FLOOR))}`).toEqual([])
 
     // And the list must not push the document sideways.
     const { overflow, culprits } = await horizontalOverflow(page)
@@ -635,7 +635,7 @@ test.describe('narrow viewport', () => {
     await expect(drawer).toBeVisible()
     const fields = await small('.cat-drawer button:visible, .cat-drawer input:visible, .cat-drawer select:visible, .cat-drawer textarea:visible')
     expect(fields.length, 'no drawer controls were measured').toBeGreaterThanOrEqual(6)
-    expect(fields.filter((b) => b.h < 44), `drawer controls below 44px: ${JSON.stringify(fields.filter((b) => b.h < 44))}`).toEqual([])
+    expect(fields.filter((b) => b.h < TOUCH_FLOOR), `drawer controls below 44px: ${JSON.stringify(fields.filter((b) => b.h < TOUCH_FLOOR))}`).toEqual([])
   })
 })
 
@@ -730,7 +730,7 @@ test('content-driven question layout at 390, 361, and mocked 280 visual viewport
   await mockKeyboardHeight(page)
   await expect(composer).toBeFocused()
   const at280 = await measure()
-  expect(at280.body.clientHeight).toBeGreaterThanOrEqual(44)
+  expect(at280.body.clientHeight).toBeGreaterThanOrEqual(TOUCH_FLOOR)
   expect(at280.send.bottom).toBeLessThanOrEqual(at280.card.bottom + 1)
   expect(at280.column.scrollHeight).toBeGreaterThan(at280.column.clientHeight)
 
@@ -1136,7 +1136,7 @@ test('measured minimum follows wrapped header and actions', async ({ page }, tes
     const card = rect('.question-form-card'), header = rect('.question-card-header'), actions = rect('.question-card-actions'), body = rect('.question-form-body')
     return { card: card.toJSON(), header: header.toJSON(), actions: actions.toJSON(), body: body.toJSON() }
   })
-  expect(geometry.body.height).toBeGreaterThanOrEqual(44)
+  expect(geometry.body.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
   expect(geometry.actions.bottom).toBeLessThanOrEqual(geometry.card.bottom + 1)
   expect(geometry.actions.height).toBeGreaterThan(44)
 })

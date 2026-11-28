@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { COMPOSER, boot, horizontalOverflow, isolate } from '../support/app'
+import { COMPOSER, boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../support/app'
 
 /**
  * The command card, in a real browser.
@@ -12,7 +12,6 @@ import { COMPOSER, boot, horizontalOverflow, isolate } from '../support/app'
 const CHAT_PATH = '/chat/alpha-chat-1'
 const CHAT_ID = 'alpha-chat-1'
 const TITLE = 'Suggested command — review before running'
-const TOUCH_MIN = 44
 
 /** Put a `command` action on the chat, before the app boots. */
 async function raiseCommand(page: Page, command: string): Promise<void> {
@@ -84,8 +83,8 @@ test.describe('the command card on a phone', () => {
     expect(count).toBeGreaterThan(0)
     for (let i = 0; i < count; i += 1) {
       const size = (await controls.nth(i).boundingBox())!
-      expect(size.height, `control ${i} is ${size.height}px tall`).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
-      expect(size.width, `control ${i} is ${size.width}px wide`).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+      expect(size.height, `control ${i} is ${size.height}px tall`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+      expect(size.width, `control ${i} is ${size.width}px wide`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
   })
 })

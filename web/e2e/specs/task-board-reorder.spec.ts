@@ -1,5 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from '@playwright/test'
-import { boot, isolate, releasePointerInSameTask, type BootOptions } from '../support/app'
+import { boot, isolate, releasePointerInSameTask, type BootOptions, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Placing cards on the board: the card surface's pointer drag within and across
@@ -795,14 +795,14 @@ test.describe('placing cards by touch', () => {
     const trigger = page.locator('.task-card', { hasText: 'Book the venue' })
       .getByRole('button', { name: /^Actions for/ })
     const hit = (await trigger.boundingBox())!
-    expect(hit.width).toBeGreaterThanOrEqual(44)
-    expect(hit.height).toBeGreaterThanOrEqual(44)
+    expect(hit.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(hit.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
 
     await trigger.tap()
     const moveUp = page.getByRole('menuitem', { name: 'Move up' })
     await expect(moveUp).toBeVisible()
     const item = (await moveUp.boundingBox())!
-    expect(item.height).toBeGreaterThanOrEqual(44)
+    expect(item.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await moveUp.tap()
 
     await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Plan the offsite', 'Send the invites'])
@@ -814,27 +814,27 @@ test.describe('placing cards by touch', () => {
     const trigger = page.locator('.task-card', { hasText: 'Book the venue' })
       .getByRole('button', { name: /^Actions for/ })
     const triggerBox = (await trigger.boundingBox())!
-    expect(triggerBox.width).toBeGreaterThanOrEqual(44)
-    expect(triggerBox.height).toBeGreaterThanOrEqual(44)
+    expect(triggerBox.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(triggerBox.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await trigger.tap()
 
     const moveItem = page.getByRole('menuitem', { name: 'Move…' })
     await expect(moveItem).toBeVisible()
     const itemBox = (await moveItem.boundingBox())!
-    expect(itemBox.height).toBeGreaterThanOrEqual(44)
+    expect(itemBox.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await moveItem.tap()
 
     const lane = page.getByLabel('Column')
     const laneBox = (await lane.boundingBox())!
-    expect(laneBox.height).toBeGreaterThanOrEqual(44)
+    expect(laneBox.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await lane.selectOption('in_progress')
     const position = page.getByLabel('Position')
     const positionBox = (await position.boundingBox())!
-    expect(positionBox.height).toBeGreaterThanOrEqual(44)
+    expect(positionBox.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await position.selectOption('0')
     const move = page.getByRole('button', { name: 'Move', exact: true })
     const moveBox = (await move.boundingBox())!
-    expect(moveBox.height).toBeGreaterThanOrEqual(44)
+    expect(moveBox.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await move.tap()
 
     await expect.poll(() => sent.length).toBe(1)

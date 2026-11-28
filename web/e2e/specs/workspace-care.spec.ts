@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, horizontalOverflow, isolate } from '../support/app'
+import { boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../support/app'
 import { careReports } from '../../src/lib/careReportFixture'
 import { UNSURE_FIXTURE_ITEMS, unsureFixtureList } from '../../src/stories/unsureFixture'
 import type { CareReport } from '../../src/lib/careReport'
@@ -44,7 +44,7 @@ test.describe('Workspace care', () => {
     await expect(section.getByText('Care needs you')).toBeVisible()
     const row = section.locator('.needs-you-row', { hasText: 'Care needs you' })
     const open = row.getByRole('button', { name: 'Open report' })
-    expect((await open.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    expect((await open.boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
 
 
     // Keyboard: the primary is reachable and opens the report page.
@@ -221,7 +221,7 @@ test.describe('Workspace care', () => {
     await expect(page.locator('.mc-step').first()).toBeHidden()
     const summary = steps.locator('summary')
     await expect(summary).toHaveText(/Steps\s*5: 5 done/)
-    expect((await summary.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    expect((await summary.boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     // Below what needs you, in the page's reading order.
     expect((await summary.boundingBox())!.y).toBeGreaterThan((await needs.nth(3).boundingBox())!.y)
     await summary.focus()
@@ -377,7 +377,7 @@ test.describe('Workspace care on a phone', () => {
     const open = await row.getByRole('button', { name: 'Open report' }).boundingBox()
     expect(open!.y).toBeGreaterThan(text!.y + text!.height - 1)
     expect(open!.width).toBeGreaterThan(text!.width * 0.6)
-    expect(open!.height).toBeGreaterThanOrEqual(44)
+    expect(open!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     const { overflow } = await horizontalOverflow(page)
     expect(overflow).toBeLessThanOrEqual(0)
   })
@@ -389,7 +389,7 @@ test.describe('Workspace care on a phone', () => {
     expect(overflow, JSON.stringify(culprits)).toBeLessThanOrEqual(0)
     for (const control of await page.locator('.mc button, .mc a').all()) {
       if (!(await control.isVisible())) continue
-      expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+      expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
     await page.screenshot({ path: 'test-results/workspace-care-report-phone.png', fullPage: true })
   })

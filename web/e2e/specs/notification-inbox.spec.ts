@@ -1,21 +1,5 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test'
-import {
-  BELL,
-  HEADER_BELL,
-  INBOX_DIALOG,
-  RAIL_BELL,
-  ROWS,
-  activeWorkspaceButton,
-  bellCount,
-  boot,
-  fixtureWrites,
-  horizontalOverflow,
-  isolate,
-  openInbox,
-  quiesce,
-  secondDevice,
-  seedInbox,
-} from '../support/app'
+import { BELL, HEADER_BELL, INBOX_DIALOG, RAIL_BELL, ROWS, activeWorkspaceButton, bellCount, boot, fixtureWrites, horizontalOverflow, isolate, openInbox, quiesce, secondDevice, seedInbox, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Why this is a browser test and not a vitest one.
@@ -540,7 +524,7 @@ test.describe('notification inbox', () => {
       await boot(page)
       const bell = page.locator(HEADER_BELL)
       await expect(bell).toBeVisible()
-      expect((await bell.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+      expect((await bell.boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
 
       const dialog = await openInbox(page, HEADER_BELL)
       await expect(dialog).toHaveClass(/notif-popover--sheet/)
@@ -557,7 +541,7 @@ test.describe('notification inbox', () => {
       expect(box!.height).toBeGreaterThanOrEqual(52)
       const retry = await page.locator('.notif-retry').first().boundingBox()
       expect(retry).not.toBeNull()
-      expect(retry!.height).toBeGreaterThanOrEqual(44)
+      expect(retry!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       await page.screenshot({ path: test.info().outputPath('inbox-mobile.png') })
 
       // Following a row closes the sheet; the drawer was never open.

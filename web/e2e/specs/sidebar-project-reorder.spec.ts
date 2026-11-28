@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, isolate, quiesce } from '../support/app'
+import { boot, isolate, quiesce, TOUCH_FLOOR } from '../support/app'
 
 const READY = '.project-header'
 const NOTES = 'alpha-notes'
@@ -43,6 +43,9 @@ test.describe('sidebar project reordering', () => {
     await seed(page)
     await page.setViewportSize({ width: 1440, height: 700 })
     await boot(page, '/', READY)
+    // The sidebar keeps loading sections after the project rows appear; measure
+    // only once its layout has stopped moving.
+    await quiesce(page)
   })
 
   test('a long list auto-scrolls during a drag, commits once, and a reload keeps the order', async ({ page }) => {
@@ -103,24 +106,26 @@ test.describe('sidebar project reordering', () => {
     await expect(page.locator('.project-list > .drag-placeholder')).toHaveCount(1)
 
     // Move above Notes and release in one task: the drawn placeholder is still
-    // at the old slot while targetAt recomputes for the new one.
-    // Simulate an auto-scroll between Playwright tasks: the target must be
-    // measured in the same browser task as the release, not before this scroll.
-    await page.locator('.project-list').evaluate((list) => {
+    // at the old slot while targetAt recomputes for the new one. The pointer
+    // sits low in the sidebar, in the auto-scroll zone, so the list keeps
+    // scrolling between Playwright tasks and Notes' offset depends on how many
+    // frames have run. Scroll and release in the same browser task, with Notes
+    // placed a fixed distance under the scroller's top: the target must be
+    // measured at the release, after the scroll, and the aim is always inside
+    // Notes' top half.
+    await page.locator(`[data-project-id="${NOTES}"]`).evaluate((notes) => {
+      const list = notes.closest('.project-list')!
       for (let el = list.parentElement; el; el = el.parentElement) {
         if (el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY === 'auto') {
-          el.scrollTop = 50
+          el.scrollTop += notes.getBoundingClientRect().top - (el.getBoundingClientRect().top + 16)
           break
         }
       }
-    })
-    await page.locator(`[data-project-id="${NOTES}"]`).evaluate((notes) => {
       const rect = notes.getBoundingClientRect()
       const init: PointerEventInit = {
         pointerId: 1, isPrimary: true, pointerType: 'mouse', button: 0, buttons: 1,
         clientX: rect.x + rect.width / 2, clientY: rect.y + 8, bubbles: true, cancelable: true,
       }
-      const list = notes.closest('.project-list')!
       list.dispatchEvent(new PointerEvent('pointermove', init))
       list.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0 }))
     })
@@ -305,8 +310,8 @@ test.describe('sidebar project reordering on a phone', () => {
 
     const trigger = page.locator(`[data-project-id="${NOTES}"] .project-actions-btn`)
     const hit = (await trigger.boundingBox())!
-    expect(hit.width).toBeGreaterThanOrEqual(44)
-    expect(hit.height).toBeGreaterThanOrEqual(44)
+    expect(hit.width).toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(hit.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
 
     const requested = page.waitForRequest(
       (request) => request.method() === 'POST' && request.url().endsWith('/api/projects/reorder'),
@@ -315,7 +320,7 @@ test.describe('sidebar project reordering on a phone', () => {
     const moveDown = page.getByRole('menuitem', { name: 'Move down' })
     await expect(moveDown).toBeVisible()
     const item = (await moveDown.boundingBox())!
-    expect(item.height).toBeGreaterThanOrEqual(44)
+    expect(item.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     await moveDown.tap()
 
     const request = await requested

@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
-import { COMPOSER, boot, isolate, settled } from '../support/app'
+import { COMPOSER, boot, isolate, settled, TOUCH_FLOOR } from '../support/app'
 
 /**
  * A chat's own loop shows as a chip in the composer bar, beside the model. The
@@ -67,7 +67,7 @@ test.describe('chat loop chip, phone', () => {
     await expect(chip).toHaveAttribute('aria-label', /every 5 min · ends .* · 7 runs left/)
     await expectInsideBar(page)
     const box = (await chip.boundingBox())!
-    expect(box.height).toBeGreaterThanOrEqual(44)
+    expect(box.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
   })
 
   test('Stop removes the chip and deletes the loop exactly once', async ({ page, request }, testInfo) => {

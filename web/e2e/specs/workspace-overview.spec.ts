@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { activeWorkspaceButton, boot, horizontalOverflow, isolate } from '../support/app'
+import { activeWorkspaceButton, boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../support/app'
 
 /**
  * Why this is a browser test: the Overview page lives under a container-query
@@ -111,7 +111,7 @@ test.describe('workspace switcher entries on a phone', () => {
     expect(count).toBeGreaterThanOrEqual(5)
     for (let i = 0; i < count; i++) {
       const box = await items.nth(i).boundingBox()
-      expect(box?.height ?? 0, `menu item ${i}`).toBeGreaterThanOrEqual(44)
+      expect(box?.height ?? 0, `menu item ${i}`).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
   })
 

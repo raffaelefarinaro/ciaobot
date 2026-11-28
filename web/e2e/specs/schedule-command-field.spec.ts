@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, horizontalOverflow, isolate } from '../support/app'
+import { boot, horizontalOverflow, isolate, TOUCH_FLOOR } from '../support/app'
 
 const HINT = 'Runs first. If it prints nothing and exits 0, no chat is opened.'
 const PHONE = { width: 390, height: 844 }
@@ -110,7 +110,7 @@ test.describe('schedule command field', () => {
       const box = await field.boundingBox()
       const { overflow, culprits } = await horizontalOverflow(page)
       console.log(`MOBILE ${surface}: field ${box!.width}x${box!.height}, overflow ${overflow}`)
-      expect(box!.height).toBeGreaterThanOrEqual(44)
+      expect(box!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       expect(overflow, `scrolls ${overflow}px; ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
       await context.close()
     })

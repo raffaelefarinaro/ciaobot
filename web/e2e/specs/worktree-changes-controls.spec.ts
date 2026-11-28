@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, COMPOSER, isolate, openChatDetails, quiesce } from '../support/app'
+import { boot, COMPOSER, isolate, openChatDetails, quiesce, TOUCH_FLOOR } from '../support/app'
 
 test.use({ isMobile: true, hasTouch: true })
 
@@ -30,7 +30,7 @@ test('repository changes controls do not overlap on a phone or at 200% zoom', as
       && hideBox!.y < refreshBox!.y + refreshBox!.height
       && refreshBox!.y < hideBox!.y + hideBox!.height
     expect(overlaps, `Hide changes overlaps Refresh at ${width}px`).toBe(false)
-    expect(hideBox!.width, 'Hide changes keeps a usable touch target').toBeGreaterThanOrEqual(44)
-    expect(hideBox!.height, 'Hide changes keeps a usable touch target').toBeGreaterThanOrEqual(44)
+    expect(hideBox!.width, 'Hide changes keeps a usable touch target').toBeGreaterThanOrEqual(TOUCH_FLOOR)
+    expect(hideBox!.height, 'Hide changes keeps a usable touch target').toBeGreaterThanOrEqual(TOUCH_FLOOR)
   }
 })

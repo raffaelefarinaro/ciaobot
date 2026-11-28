@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, isolate } from '../support/app'
+import { boot, isolate, TOUCH_FLOOR } from '../support/app'
 
 /**
  * An open automation has the same header as an open chat: a title rail over the
@@ -97,7 +97,7 @@ test.describe('automation header, phone', () => {
     expect(count).toBeGreaterThan(0)
     for (let i = 0; i < count; i++) {
       const box = await menuItems.nth(i).boundingBox()
-      expect(box!.height).toBeGreaterThanOrEqual(44)
+      expect(box!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
   })
 })

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { COMPOSER, boot, isolate } from '../support/app'
+import { COMPOSER, boot, isolate, TOUCH_FLOOR } from '../support/app'
 
 // The composer model picker's footer controls, chosen the way a person does:
 // with a mouse on a desktop and a tap on a phone. A pick keeps the picker
@@ -65,7 +65,7 @@ test.describe('model picker footer on a phone', () => {
     const thinking = picker.locator('.thinking-levels__menu')
     await expect(thinking).toBeVisible()
     const box = (await thinking.boundingBox())!
-    expect(box.height).toBeGreaterThanOrEqual(44)
+    expect(box.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     expect(await picker.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
     await thinking.tap()
     const levels = page.getByRole('menuitemradio')

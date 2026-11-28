@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { boot, horizontalOverflow, isolate, quiesce } from '../support/app'
+import { boot, horizontalOverflow, isolate, quiesce, TOUCH_FLOOR } from '../support/app'
 
 /**
  * The Automations destination is three pages: Schedules (/schedules), Loops
@@ -69,7 +69,7 @@ test.describe('automations pages, phone', () => {
       await expect(page.locator('.automations-switcher [aria-current="page"]')).toHaveAttribute('href', path)
       await quiesce(page)
       for (const segment of await segments.all()) {
-        expect((await segment.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+        expect((await segment.boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
       }
       const overflow = await horizontalOverflow(page)
       expect(overflow.culprits).toEqual([])
@@ -93,7 +93,7 @@ test.describe('automations pages, phone', () => {
     const subnav = page.getByRole('navigation', { name: 'Automations', exact: true })
     await expect(subnav.getByRole('link')).toHaveCount(3)
     for (const link of await subnav.getByRole('link').all()) {
-      expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+      expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(TOUCH_FLOOR)
     }
     await expect(page.locator('.automations-next-item')).toHaveCount(3)
     // Following a page closes the drawer, so focus lands on the page, not
