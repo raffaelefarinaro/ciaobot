@@ -1,7 +1,13 @@
 import { defineStore } from 'pinia'
 import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
-import { postFormWithProgress, type UploadProgressHandler } from '../lib/chatAttachments'
+import {
+  parseImageUploadResults,
+  postFormWithProgress,
+  type ImageUploadResult,
+  type UploadNotice,
+  type UploadProgressHandler,
+} from '../lib/chatAttachments'
 import { buildFixPrompt } from '../lib/fixError'
 import { isCareChat } from '../lib/automationWorkspace'
 import { isPlausibleFilePath } from '../lib/filePaths'
@@ -6042,19 +6048,40 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Images ──────────────────────────────────────────────────────────
 
+  /** Stage uploaded images on the chat. A HEIC photo the engine could not
+   *  convert comes back as a file: it is staged as one, and the user told. */
   async function uploadImages(chatId: string, files: File[], onProgress?: UploadProgressHandler): Promise<string[]> {
-    const refs = await uploadImageRefs(chatId, files, onProgress)
-    addPendingImageRefs(chatId, refs)
-    return refs
+    const result = await postImages(chatId, files, onProgress)
+    addPendingImageRefs(chatId, result.refs)
+    if (result.files.length) addPendingFiles(chatId, result.files)
+    for (const notice of result.notices) pushUploadNotice(notice)
+    return result.refs
   }
 
+  /** Upload images for a comment, which takes image refs only: a HEIC photo
+   *  the engine could not convert is not attached there, and the user is told. */
   async function uploadImageRefs(chatId: string, files: File[], onProgress?: UploadProgressHandler): Promise<string[]> {
+    const result = await postImages(chatId, files, onProgress)
+    for (const notice of result.notices) {
+      pushToast({
+        chat_id: '',
+        title: `${notice.filename} not attached`,
+        body: 'Comments take images only, and this photo could not be converted to one. Attach it to the message instead.',
+      })
+    }
+    return result.refs
+  }
+
+  async function postImages(chatId: string, files: File[], onProgress?: UploadProgressHandler): Promise<ImageUploadResult> {
     const form = new FormData()
     for (const f of files) form.append(f.name, f)
     const { status, body } = await postFormWithProgress(`/api/chats/${chatId}/images`, form, onProgress)
     if (status < 200 || status >= 300) throw new Error('Image upload failed')
-    const results = Array.isArray(body) ? (body as { ref?: string }[]) : []
-    return results.filter(r => r.ref).map(r => r.ref!)
+    return parseImageUploadResults(body)
+  }
+
+  function pushUploadNotice(notice: UploadNotice): InAppToast {
+    return pushToast({ chat_id: '', title: `${notice.filename} attached as a file`, body: notice.message })
   }
 
   // ── Event handling ──────────────────────────────────────────────────
@@ -7185,7 +7212,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, stopRecovery, tryChatRetryNow, continueRecovery, checkRecoveryStatus, acknowledgeRecoveryReconciled, unknownRecoveryOutcomes, recoveryOutcomeStorageUnavailable,
     switchChat, attachBesideChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
-    sendMessage, stopChat, compactChat, compactRequests, compactState, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages, addPendingFiles, removePendingFile,
+    sendMessage, stopChat, compactChat, compactRequests, compactState, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, pushUploadNotice, addPendingImageRefs, removePendingImage, clearPendingImages, addPendingFiles, removePendingFile,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

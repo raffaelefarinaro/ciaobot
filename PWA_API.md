@@ -75,7 +75,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
-| POST | `/api/chats/{chat_id}/images` | Upload chat images |
+| POST | `/api/chats/{chat_id}/images` | Upload chat images; a HEIC/HEIF photo becomes a JPEG (macOS), or else returns a `file_ref` plus `notice` instead of a `ref` |
 | POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder; the browser receives bounded `file_refs`, not server paths |
 | GET | `/api/images/{ref}` | Read uploaded image blob |
 | GET | `/api/workspace-file` | Read allowed text file |
@@ -616,6 +616,18 @@ absolute path. The server expands a reference only while building the provider
 prompt, so the browser never needs the host path. Saved-page `.mht`/`.mhtml`
 files are accepted as binary project attachments and served as downloads rather
 than executable inline content.
+
+Chat image uploads answer one entry per file: `{ref, mime_type, filename}` for
+a stored image, `{filename, error}` for a refused one. A HEIC/HEIF photo
+(detected by extension in any case, or by its `ftyp` bytes under another name)
+is converted to JPEG on a macOS host, so its `ref` names the JPEG and
+`mime_type` is `image/jpeg`; the original stays beside it. When the host cannot
+convert it, or the photo is over the 10 MB image limit (a HEIC is read up to
+the 50 MB attachment limit), the entry is `{filename, file_ref: {ref, name},
+notice}`: the original is kept and attached as a file, and `notice` is the
+sentence to show the user. A native drop reports the same case in a `notices` list
+(`{filename, message}`) next to `errors`, with the dropped file in
+`file_refs`.
 
 HTTP `/api/*` requests have a 1 MiB default body limit. Exact route/method
 exceptions preserve supported upload and write contracts: project files and

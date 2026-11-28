@@ -84,6 +84,9 @@ class ImageAttachment:
     mime_type: str
     original_filename: str
     caption: str | None = None
+    # The upload as received when ``path`` is a converted copy (a HEIC photo
+    # sent as JPEG); the prompt names both.
+    original_path: Path | None = None
 
 
 # Native thinking/reasoning levels per provider, surfaced as-is in the PWA

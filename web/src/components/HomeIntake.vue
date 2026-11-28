@@ -165,7 +165,7 @@ import CodeMark from './CodeMark.vue'
 import type { ModelSection } from '../lib/modelSections'
 import { chosenRuntimeFor, newChatModelView } from '../lib/newChatModel'
 import ModelSelector from './ModelSelector.vue'
-import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
+import { importDesktopDrop, isImageUpload, uploadChatAttachments } from '../lib/chatAttachments'
 import { useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { useSlashCommands } from '../composables/useSlashCommands'
 import { readSharedContent, removeSharedContent, sharedPrompt, type SharedContent } from '../lib/sharedContent'
@@ -342,7 +342,7 @@ let stagedSeq = 0
 
 function stageFiles(files: File[]): void {
   for (const file of files) {
-    staged.value.push({ id: ++stagedSeq, name: file.name || 'pasted image', image: file.type.startsWith('image/'), file })
+    staged.value.push({ id: ++stagedSeq, name: file.name || 'pasted image', image: isImageUpload(file), file })
   }
 }
 
@@ -492,6 +492,7 @@ async function attachStaged(chatId: string, projectId: string, items: StagedItem
     try {
       const result = await importDesktopDrop(grant.grantId as string, { chatId, projectId })
       report(result.failures)
+      for (const notice of result.notices) store.pushUploadNotice(notice)
       store.addPendingFiles(chatId, result.files)
       store.addPendingImageRefs(chatId, result.imageRefs)
     } catch (error) {

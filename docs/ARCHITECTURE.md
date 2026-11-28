@@ -202,6 +202,7 @@ ciao/                          Python backend (Starlette).
     routes_api.py              REST route handlers. Catch-all for handlers without a domain home. The vault read handlers (`/api/vault/backlinks`, `/api/vault-markdown-paths`) do their whole file traversal in a bounded worker via `ciao/async_reads.run_read`, so a large-vault scan cannot stall WebSocket keepalives or unrelated responses. The chat-history handlers keep only their transport — query params, the pagination envelope, the part cache and the 404 — and hand the rendering to `transcript_service.py`. The category edit surface (`/api/memory/entity-types`, one handler for `GET`+`PATCH` as in `settings_routines`) is the same split: the route resolves `?workspace=` to the agent vault root, counts notes per `type:` off a worker-thread scan, maps 400/409/500, and hands the list to `entity_types.parse_payload`/`validate_entries`/`write_vault_file`; the domain rules (what a row means, what is persisted, what is refused) live in `entity_types.py`, and the Categories section of the regenerated `VOCABULARY.md` in `vault_index.py`.
     routes_onboarding.py       Signed-session browser transport for lifecycle progress and finish-gated completion. It accepts progress fields only, serializes mutations with the existing workspace registry lock, and delegates receipt operations to onboarding modules.
     document_conversion.py     Lazy firecrawl-anydoc conversion for chat attachments.
+    heif_images.py             HEIC/HEIF chat photos to an upright, bounded JPEG through macOS `sips`; elsewhere the original is attached as a file.
     routes_auth.py             Auth login/logout/check routes.
     routes_chat.py             Chat WebSocket + events routes.
     routes_chat_actions.py     POST /api/chats/{id}/actions/{aid}/start|dismiss|continue: browser-only action routes.
@@ -505,7 +506,22 @@ uploaded, with a Markdown conversion beside them. Uploads and desktop drops take
 the same path. The prompt references the Markdown copy, plus the original for
 formats the agent reads itself (PDF, where page images keep layout, figures and
 scans that the conversion loses). Images and ordinary text retain their existing
-behavior. A conversion error is per-file and non-fatal and leaves the original
+behavior. A HEIC/HEIF photo (an iPhone picture; the PWA sends one with an empty
+type as an image too) is the exception among images: agents take PNG, JPEG, GIF
+and WebP only, so `heif_images.py` has the system `sips` draw it upright (EXIF
+orientation applied), at most 2048 px on its long edge and without camera
+metadata, into an sRGB JPEG beside the kept original in the media folder, under
+the same ref stem. The JPEG is the image block; the prompt's image line names
+both paths, and a fork copies both. sips runs from an argument list with a 60 s
+timeout, at most two conversions at a time, and refuses a photo over 200
+million pixels before drawing it. Where it is missing (Linux, Windows) or
+fails, or the photo is over the 10 MB image limit (a HEIC upload may be up to
+the 50 MB attachment limit), the original is attached as a plain file
+reference instead, with a notice for the user, and the message is never
+dropped. Such an upload is kept under `media/unconverted/<chat id>/`, which
+goes with the chat's images on archive or delete; a desktop drop hands over the
+dropped path itself. A comment takes images only, so there the photo is not
+attached and a toast says so. A conversion error is per-file and non-fatal and leaves the original
 in the folder; a PDF is still attached without its copy. Originals the file
 viewers cannot preview (`.doc`, `.rtf`, `.epub` and the rest) are served by
 `/api/workspace-binary` as downloads.

@@ -84,7 +84,10 @@ def build_prompt(request: AgentRequest) -> str:
 
     lines = [request.prompt, "", "[INCOMING IMAGES]"]
     for index, image in enumerate(request.images, start=1):
-        summary = f"{index}. {image.original_filename} (attached in this message; file: {image.path})"
+        summary = f"{index}. {image.original_filename} (attached in this message; file: {image.path}"
+        if image.original_path is not None:
+            summary = f"{summary}; converted to JPEG, original: {image.original_path}"
+        summary = f"{summary})"
         if image.caption:
             summary = f"{summary} - caption: {image.caption}"
         lines.append(summary)
