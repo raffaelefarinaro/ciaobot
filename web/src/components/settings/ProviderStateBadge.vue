@@ -17,8 +17,11 @@ const view = computed(() => providerStateView(props.connKey, props.state))
 .provider-state {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   flex: none;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
   color: var(--fg2);
   font-size: var(--text-sm);
   white-space: nowrap;

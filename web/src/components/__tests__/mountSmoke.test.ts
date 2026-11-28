@@ -1109,8 +1109,17 @@ describe('component mount smoke', () => {
     try {
       await flushPromises()
       const row = wrapper.findAll('.provider-connections .credential-row').find(el => el.text().includes('Codex'))!
-      expect(row.find('details.provider-sign-in summary').text()).toBe('Connect Codex')
-      expect(row.find('details code').text()).toBe('codex login')
+      const verify = row.findAll('button').find(button => button.text() === 'Verify')!
+      expect(verify.attributes('aria-describedby')).toBe('provider-verify-note')
+      expect(wrapper.get('#provider-verify-note').text()).toContain('re-reads each CLI')
+      const connect = row.get('button.provider-disclosure')
+      expect(connect.text()).toBe('Connect')
+      expect(connect.attributes('aria-label')).toBe('Connect Codex')
+      expect(connect.attributes('aria-expanded')).toBe('false')
+      await connect.trigger('click')
+      expect(connect.attributes('aria-expanded')).toBe('true')
+      expect(connect.attributes('data-state')).toBe('open')
+      expect(row.get('.guidance code').text()).toBe('codex login')
       expect(row.text()).not.toContain('opencode auth login')
     } finally {
       wrapper.unmount()
@@ -1169,9 +1178,10 @@ describe('component mount smoke', () => {
       expect(details.includes('OAuth')).toBe(showAccount)
       if (auth === 'not_installed') {
         // The install line is never offered as a sign-in command.
-        expect(row.find('details.provider-sign-in').exists()).toBe(false)
+        expect(row.find('.provider-disclosure').exists()).toBe(false)
       } else {
-        expect(row.find('details code').text()).toBe('claude auth login')
+        expect(row.get('.provider-disclosure').text()).toBe(showAccount ? 'Reconnect' : 'Connect')
+        expect(row.get('.guidance code').text()).toBe('claude auth login')
       }
       expect(runInTerminal).not.toHaveBeenCalled()
       expect(vi.mocked(api.post).mock.calls.some(([path]) => String(path).endsWith('/connect'))).toBe(false)
