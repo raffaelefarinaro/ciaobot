@@ -30,6 +30,18 @@
     </div>
 
 
+    <!-- Changes: what Ciaobot changed on its own, with the week's counts beside it. -->
+    <div v-else-if="mm.section === 'changes'" class="mm-review-wrap">
+      <div class="page-grid mm-review-grid">
+        <div class="page-main">
+          <MemoryChangesPanel />
+        </div>
+        <aside class="page-rail mm-review-rail" aria-label="This week's changes">
+          <MemoryChangesRail />
+        </aside>
+      </div>
+    </div>
+
     <!-- Workspace care: the last daily run, read from its report file. -->
     <div v-else-if="mm.section === 'care'" class="mm-review-wrap">
       <div class="page-grid mm-review-grid">
@@ -295,6 +307,8 @@ import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
 import MemoryUnsurePanel from './MemoryUnsurePanel.vue'
 import MemoryUnsureRail from './MemoryUnsureRail.vue'
 import MemoryCarePanel from './MemoryCarePanel.vue'
+import MemoryChangesPanel from './MemoryChangesPanel.vue'
+import MemoryChangesRail from './MemoryChangesRail.vue'
 import MemoryCareRail from './MemoryCareRail.vue'
 import { useProjectStore } from '../stores/projects'
 import {
@@ -1242,6 +1256,7 @@ const SECTION_LABELS: Record<MemorySection, string> = {
   map: 'Map',
   categories: 'Categories',
   unsure: 'Unsure',
+  changes: 'Changes',
   care: 'Workspace care',
 }
 // The route owns the section. Bare /memory lands on the section last visited

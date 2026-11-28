@@ -3,7 +3,7 @@ import { expect, waitFor } from 'storybook/test'
 import MemoryCarePanel from '../components/MemoryCarePanel.vue'
 import type { CareReport } from '../lib/careReport'
 import type { FixtureRoute } from './fixtureBoundary'
-import { careProposalRoutes, careReports, careRoute, careUnsureRoute, CARE_PROPOSAL_PATH, CARE_WORKSPACE } from './careFixture'
+import { careProposalRoutes, careReports, careRoute, careUnsureRoute, changesRoute, CARE_PROPOSAL_PATH, CARE_WORKSPACE } from './careFixture'
 import { unsureFixtureList } from './unsureFixture'
 import { assertFenceQuiet, renderHome } from './homeWindowsFixture'
 
@@ -28,7 +28,7 @@ function story(report: CareReport | CareReport[] | 'held' | 'failed', options: {
     },
   })
   return {
-    parameters: { fixture: { routes: [careRoute(report), careUnsureRoute(), ...(options.extra ?? [])] } },
+    parameters: { fixture: { routes: [careRoute(report), careUnsureRoute(), changesRoute(), ...(options.extra ?? [])] } },
     render: () => ({ components: { owner }, template: '<owner />' }),
   }
 }

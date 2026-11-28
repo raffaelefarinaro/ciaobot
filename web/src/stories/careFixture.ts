@@ -4,6 +4,8 @@
  * and the care schedule's run-now. Synthetic values only.
  */
 import type { CareReport } from '../lib/careReport'
+import type { ChangesFeed } from '../lib/changesFeed'
+import { changesFeed } from '../lib/changesFeedFixture'
 import { CARE_PROPOSAL_PATH, CARE_WORKSPACE, careReports } from '../lib/careReportFixture'
 import type { FixtureRoute } from './fixtureBoundary'
 import { held, json } from './homeWindowsFixture'
@@ -29,6 +31,17 @@ export function careRoute(report: CareReport | CareReport[] | 'held' | 'failed')
         ? json({ error: 'Synthetic care read failure' }, 503)
         : json(report)
     },
+  }
+}
+
+export const changesPath = `/api/memory/changes?workspace=${CARE_WORKSPACE}`
+
+/** The Changes feed read, answering `feed` (the synthetic feed by default) or failing. */
+export function changesRoute(feed: ChangesFeed | 'failed' = changesFeed): FixtureRoute {
+  return {
+    method: 'GET',
+    path: changesPath,
+    respond: () => (feed === 'failed' ? json({ error: 'Synthetic changes read failure' }, 503) : json(feed)),
   }
 }
 

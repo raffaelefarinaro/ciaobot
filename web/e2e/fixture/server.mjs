@@ -735,6 +735,16 @@ const GET_ROUTES = {
       running: null,
     }
   },
+  // Nothing changed yet; the Changes spec answers the route itself.
+  '/api/memory/changes': (req, url) => {
+    const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
+    return {
+      workspace, undo_log: 'missing', undo_log_path: `memory-vault/${workspace}/Workspace/Memory-Consolidations.md`, groups: [],
+      week: { since: '', lines_changed: 0, memory_lines: 0, note_lines: 0, skill_suggestions: 0, chats_processed: 0 },
+      today: { date: '', lines_changed: 0, skill_suggestions: 0, chats_processed: 0 },
+      care_run: null,
+    }
+  },
   // No Unsure list yet; the Unsure spec answers the route itself.
   '/api/memory/unsure': (req, url) => {
     const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name

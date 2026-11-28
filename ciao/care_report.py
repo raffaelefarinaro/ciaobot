@@ -386,11 +386,15 @@ def _fd_relative_supported() -> bool:
     return sys.platform != "win32" and _OPEN_TAKES_DIR_FD
 
 
-def _read_fd(fd: int, expect: os.stat_result | None = None) -> tuple[str, bytes, float]:
+def _read_fd(
+    fd: int, expect: os.stat_result | None = None, *, limit: int = MAX_REPORT_BYTES, tail: bool = False
+) -> tuple[str, bytes, float]:
     """Judge and read an opened descriptor: a regular file with one link, under the cap.
 
     `expect` is the `lstat` taken before a path-based open; the opened file must
     be that same file, so a swap between the check and the open is refused.
+    With `tail`, a file over `limit` is not refused: its last `limit` bytes are
+    read and the status is `tail` (an append-only log keeps its newest lines last).
     """
     info = os.fstat(fd)
     if not stat_module.S_ISREG(info.st_mode):
@@ -402,10 +406,14 @@ def _read_fd(fd: int, expect: os.stat_result | None = None) -> tuple[str, bytes,
         (info.st_dev, info.st_ino) != (expect.st_dev, expect.st_ino)
     ):
         return "unreadable", b"", 0.0
-    if info.st_size > MAX_REPORT_BYTES:
-        return "too_large", b"", 0.0
+    status = "ok"
+    if info.st_size > limit:
+        if not tail:
+            return "too_large", b"", 0.0
+        os.lseek(fd, info.st_size - limit, os.SEEK_SET)
+        status = "tail"
     chunks: list[bytes] = []
-    remaining = MAX_REPORT_BYTES + 1
+    remaining = limit + 1
     while remaining > 0:
         chunk = os.read(fd, min(remaining, 16384))
         if not chunk:
@@ -413,12 +421,16 @@ def _read_fd(fd: int, expect: os.stat_result | None = None) -> tuple[str, bytes,
         chunks.append(chunk)
         remaining -= len(chunk)
     raw = b"".join(chunks)
-    if len(raw) > MAX_REPORT_BYTES:
-        return "too_large", b"", 0.0
-    return "ok", raw, info.st_mtime
+    if len(raw) > limit:
+        if not tail:
+            return "too_large", b"", 0.0
+        raw, status = raw[-limit:], "tail"
+    return status, raw, info.st_mtime
 
 
-def _read_fd_relative(vault_root: Path, parts: tuple[str, ...]) -> tuple[str, bytes, float]:
+def _read_fd_relative(
+    vault_root: Path, parts: tuple[str, ...], *, limit: int = MAX_REPORT_BYTES, tail: bool = False
+) -> tuple[str, bytes, float]:
     """POSIX: open the report without following a symlink at any step.
 
     Each folder and the file are opened relative to the one before, from the
@@ -440,7 +452,7 @@ def _read_fd_relative(vault_root: Path, parts: tuple[str, ...]) -> tuple[str, by
     finally:
         os.close(dir_fd)
     try:
-        return _read_fd(fd)
+        return _read_fd(fd, limit=limit, tail=tail)
     finally:
         os.close(fd)
 
@@ -468,7 +480,9 @@ def _is_link(info: os.stat_result) -> bool:
     return getattr(info, "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
 
 
-def _read_by_path(vault_root: Path, parts: tuple[str, ...]) -> tuple[str, bytes, float]:
+def _read_by_path(
+    vault_root: Path, parts: tuple[str, ...], *, limit: int = MAX_REPORT_BYTES, tail: bool = False
+) -> tuple[str, bytes, float]:
     """Windows (no `dir_fd`): check each step with `lstat`, then open and re-check.
 
     No folder on the way and not the file may be a symlink or reparse point,
@@ -492,15 +506,65 @@ def _read_by_path(vault_root: Path, parts: tuple[str, ...]) -> tuple[str, bytes,
         return "unreadable", b"", 0.0
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
     try:
-        return _read_fd(fd, expect=info)
+        return _read_fd(fd, expect=info, limit=limit, tail=tail)
     finally:
         os.close(fd)
 
 
-def _read_bounded(vault_root: Path, parts: tuple[str, ...] = REPORT_RELATIVE_PATH.parts) -> tuple[str, bytes, float]:
+def _read_bounded(
+    vault_root: Path,
+    parts: tuple[str, ...] = REPORT_RELATIVE_PATH.parts,
+    *,
+    limit: int = MAX_REPORT_BYTES,
+    tail: bool = False,
+) -> tuple[str, bytes, float]:
     if _fd_relative_supported():
-        return _read_fd_relative(vault_root, parts)
-    return _read_by_path(vault_root, parts)
+        return _read_fd_relative(vault_root, parts, limit=limit, tail=tail)
+    return _read_by_path(vault_root, parts, limit=limit, tail=tail)
+
+
+def read_vault_file(
+    vault_root: Path, parts: tuple[str, ...], *, limit: int = MAX_REPORT_BYTES, tail: bool = False
+) -> tuple[str, bytes, float]:
+    """Another vault file read the way the report is: no symlink at any step, a
+    regular single-link file, at most `limit` bytes (the last ones with `tail`).
+
+    Returns `(status, raw, mtime)`; status is `ok`, `tail`, `too_large` or
+    `unreadable`. Raises `FileNotFoundError` for a missing file and `OSError`
+    for a link or an I/O error, like the report's own read.
+    """
+    return _read_bounded(vault_root, parts, limit=limit, tail=tail)
+
+
+def list_vault_folder(vault_root: Path, parts: tuple[str, ...]) -> list[str]:
+    """The entry names of a vault folder, opened without following a link at any step.
+
+    POSIX opens each folder relative to the one before with `O_NOFOLLOW`;
+    Windows checks each step with `lstat` (no link or reparse point) and that the
+    folder resolves inside the vault. Raises `OSError` (missing included).
+    """
+    if _fd_relative_supported():
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory = getattr(os, "O_DIRECTORY", 0)
+        dir_fd = os.open(vault_root, os.O_RDONLY | directory)
+        try:
+            for name in parts:
+                next_fd = os.open(name, os.O_RDONLY | directory | nofollow, dir_fd=dir_fd)
+                os.close(dir_fd)
+                dir_fd = next_fd
+            return os.listdir(dir_fd)
+        finally:
+            os.close(dir_fd)
+    root = vault_root.resolve()
+    current = root
+    for name in parts:
+        current = current / name
+        info = os.lstat(current)
+        if _is_link(info) or not stat_module.S_ISDIR(info.st_mode):
+            raise NotADirectoryError(str(name))
+    if not current.resolve().is_relative_to(root):
+        raise NotADirectoryError(parts[-1] if parts else "")
+    return os.listdir(current)
 
 
 def read_proposal_status(vault_root: Path, path: str) -> str:
