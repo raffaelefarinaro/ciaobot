@@ -110,8 +110,10 @@ async def _consume_run_stream(
     """Fold one turn's stream into *outcome*; True when it sent a subagent to the background.
 
     A ``tool_result`` marked ``background`` for an ``Agent`` call acknowledges
-    a launch: the subagent goes on after the turn's result. A background shell's
-    acknowledgement does not count. A later result replaces the final text, so
+    a launch: the subagent goes on after the turn's result. So does a top-level
+    ``Subagent`` node (``child:<session>``): a child session no call claims,
+    which is all the client sees when OpenCode's own turn launches a subagent.
+    A background shell's acknowledgement does not count. A later result replaces the final text, so
     the last turn grades the run. With *stop_on_attention* (a follow-up turn,
     which is attended and raises cards) a permission request or a question ends
     the read at once: that stream waits for the owner, not for the run.
@@ -135,6 +137,13 @@ async def _consume_run_stream(
             outcome.question_requested = True
         elif event_type == "tool_use" and payload.get("tool_name") == "Agent":
             agent_calls.add(str(payload.get("tool_use_id") or ""))
+        elif (
+            event_type == "tool_use"
+            and payload.get("tool_name") == "Subagent"
+            and not payload.get("parent_tool_use_id")
+            and str(payload.get("tool_use_id") or "").startswith("child:")
+        ):
+            launched = True
         elif (
             event_type == "tool_result"
             and payload.get("background")

@@ -315,6 +315,9 @@ class OpencodeAcpProvider(AcpProvider):
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)
         self._children: set[str] = set()
+        # Children that opened their own ``child:`` node, until their terminal status closes it. Not
+        # cleared at a turn end: a child outlives the turn that saw it start.
+        self._orphan_nodes: dict[str, None] = {}
         self._children_root: object = None
         self._children_limit_logged = False
         self._dropped_kinds: set[str] = set()
@@ -427,6 +430,9 @@ class OpencodeAcpProvider(AcpProvider):
                 return []
             self._children.add(child_id)
             if call_id is None:
+                self._orphan_nodes[child_id] = None
+                while len(self._orphan_nodes) > _CHILD_LIMIT:
+                    del self._orphan_nodes[next(iter(self._orphan_nodes))]
                 events.append(ToolUseEvent(
                     type="tool_use",
                     tool_name="Subagent",
@@ -454,6 +460,12 @@ class OpencodeAcpProvider(AcpProvider):
                 # The child is over: its slot is free for the next one.
                 self._children.discard(child_id)
                 is_error = _OPENCODE_CHILD_END[status]
+                if call_id is not None and child_id in self._orphan_nodes:
+                    # Opened as its own node before a launch claimed it: that node closes too.
+                    events.append(ToolUseEvent(
+                        type="tool_result", tool_use_id=tool_id, parent_tool_use_id=parent, is_error=is_error,
+                    ))
+                self._orphan_nodes.pop(child_id, None)
                 if call_id is not None:
                     # The subagent call's own result, closing the launch acknowledgement.
                     events.append(ToolUseEvent(
