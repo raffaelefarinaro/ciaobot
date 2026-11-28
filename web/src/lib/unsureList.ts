@@ -3,6 +3,8 @@
  * `<vault>/Workspace/Unsure.md`, parsed by the engine (`ciao/unsure_list.py`).
  * Pure helpers, no Vue: the store, the page and the rail share them.
  */
+import { isChatId } from './chatLinks'
+import { resolveUnder, sourceKey, type ReviewSource } from './reviewQueue'
 
 /** The kinds the stock memory guide allows; '' is a plain fact or change. */
 export type UnsureKind = '' | 'observation' | 'drop' | 'restore' | 'category' | 'repo' | 'rule'
@@ -98,25 +100,19 @@ export function discussSeed(item: UnsureItem, listPath: string): string {
 
 // ── The review queue's reading of one item ───────────────────────────────────
 
-const CHAT_ID = /^chat-[0-9a-f]{8}$/
 const CHAT_IDS = /chat-[0-9a-f]{8}\b/g
 
-/** One place an item came from: a chat (linked), a vault note (opened) or plain words such as "care run". */
-export type UnsureSource =
-  | { kind: 'chat'; id: string }
-  | { kind: 'note'; path: string }
-  | { kind: 'text'; label: string }
 
 /**
  * Where the item came from, in order and without repeats: the `source:` field
  * (chat ids and note paths joined by `,` or `and`) and, on an observation, the
  * chats its `seen in:` detail names.
  */
-export function unsureSources(item: Pick<UnsureItem, 'source' | 'text' | 'kind'>): UnsureSource[] {
-  const out: UnsureSource[] = []
+export function unsureSources(item: Pick<UnsureItem, 'source' | 'text' | 'kind'>): ReviewSource[] {
+  const out: ReviewSource[] = []
   const seen = new Set<string>()
-  const add = (source: UnsureSource) => {
-    const key = source.kind === 'chat' ? source.id : source.kind === 'note' ? source.path : source.label
+  const add = (source: ReviewSource) => {
+    const key = sourceKey(source)
     if (!key || seen.has(key)) return
     seen.add(key)
     out.push(source)
@@ -124,7 +120,7 @@ export function unsureSources(item: Pick<UnsureItem, 'source' | 'text' | 'kind'>
   for (const piece of item.source.split(/\s*,\s*|\s+and\s+/)) {
     const token = piece.trim()
     if (!token) continue
-    if (CHAT_ID.test(token)) add({ kind: 'chat', id: token })
+    if (isChatId(token)) add({ kind: 'chat', id: token })
     else if (/\.md$/i.test(token) && !token.startsWith('/') && !token.includes('..')) add({ kind: 'note', path: token })
     else add({ kind: 'text', label: token })
   }
@@ -168,21 +164,6 @@ export function unsureVaultRoot(listPath: string): string {
   return listPath.replace(/\/?Workspace\/Unsure\.md$/, '')
 }
 
-/**
- * A path relative to `base` (a folder the viewer can open), resolved; '' when
- * it is absolute, has a scheme, or climbs out of `root`.
- */
-function resolveUnder(root: string, base: string, relative: string): string {
-  if (!relative || /^[a-z][a-z0-9+.-]*:/i.test(relative) || relative.startsWith('/') || relative.startsWith('~')) return ''
-  const parts = base.split('/').filter(Boolean)
-  for (const piece of relative.split('#')[0].split('/')) {
-    if (!piece || piece === '.') continue
-    if (piece === '..') parts.pop()
-    else parts.push(piece)
-  }
-  const path = parts.join('/')
-  return path === root || path.startsWith(`${root}/`) ? path : ''
-}
 
 /**
  * The reason, with each Markdown link turned into its text and, when it points
@@ -289,40 +270,4 @@ export function approveEffect(item: UnsureItem): ApproveEffect {
           : 'The next Workspace care run writes it where it belongs and takes the line off this list. This line does not say where.',
       }
   }
-}
-
-// ── Queue keys ───────────────────────────────────────────────────────────────
-
-export type QueueKey = 'approve' | 'dismiss' | 'skip' | 'next' | 'previous'
-
-/**
- * The queue's single-key shortcuts: A approves, D dismisses, S skips, the
- * arrows move. Unmodified keys only (Shift, Alt, Ctrl, Cmd and AltGr chords are
- * someone else's), never mid-IME (Safari reports a composing key as 229), and
- * never a key another handler already took. The caller also refuses a key aimed
- * at a text field or an open dialog or menu.
- */
-export function queueKey(event: KeyboardEvent): QueueKey | null {
-  if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return null
-  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null
-  if (event.getModifierState?.('AltGraph')) return null
-  switch (event.key) {
-    case 'a': case 'A': return 'approve'
-    case 'd': case 'D': return 'dismiss'
-    case 's': case 'S': return 'skip'
-    case 'ArrowDown': case 'ArrowRight': return 'next'
-    case 'ArrowUp': case 'ArrowLeft': return 'previous'
-    default: return null
-  }
-}
-
-/** A key aimed at something that types or owns its own keys: a field, a menu, a dialog. */
-export function keyBelongsElsewhere(target: EventTarget | null, queue: Element | null): boolean {
-  if (!(target instanceof Element)) return false
-  if (target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]')) return true
-  if (target instanceof HTMLElement && target.isContentEditable) return true
-  // A chat or terminal in the slot beside the page keeps its own keys.
-  if (target.closest('.chat-split-side')) return true
-  const owner = target.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tablist"], [role="slider"], .title-rail')
-  return !!owner && !(queue && queue.contains(owner))
 }

@@ -6,6 +6,7 @@ import { useMemoryMapStore } from '../stores/memoryMap'
 import { useProjectStore } from '../stores/projects'
 import type { FixtureRoute } from './fixtureBoundary'
 import { UNSURE_FIXTURE_ITEMS, unsureFixtureList } from './unsureFixture'
+import { skillFixtureList } from './skillsFixture'
 import { mountConnected, type ConnectedFixture } from './mountConnected'
 
 /**
@@ -272,6 +273,17 @@ export function unsureRoutes(mode: UnsureMode = 'loaded'): FixtureRoute[] {
   ]
 }
 
+export type SkillsMode = 'loaded' | 'empty'
+
+/** Memory · Skills' one read: the open skill-edit proposals. */
+export function skillsRoutes(mode: SkillsMode = 'loaded'): FixtureRoute[] {
+  return [{
+    method: 'GET',
+    path: `/api/memory/skill-proposals?workspace=${mapWorkspace}`,
+    respond: () => response(mode === 'empty' ? skillFixtureList(mapWorkspace, []) : skillFixtureList(mapWorkspace)),
+  }]
+}
+
 /** The Memory pages' reads: the guide the Always loaded window reads, and Unsure's. */
 export function memoryPageRoutes(unsure: UnsureMode = 'loaded'): FixtureRoute[] {
   return [workspaceGuideRoute, ...unsureRoutes(unsure)]
@@ -297,11 +309,12 @@ const markdownPathsRoute: FixtureRoute = {
 }
 
 /** The exact declared reads and writes for one MemoryMapView story. */
-export function mapRoutes(options: { graph: GraphMode; dense?: boolean; notes?: string[]; unsure?: UnsureMode }): FixtureRoute[] {
+export function mapRoutes(options: { graph: GraphMode; dense?: boolean; notes?: string[]; unsure?: UnsureMode; skills?: SkillsMode }): FixtureRoute[] {
   const routes = [
     graphRoute(options.graph, (options.dense ? denseSyntheticVault : syntheticVault)()),
     ...memoryPageRoutes(options.unsure),
   ]
+  if (options.skills) routes.push(...skillsRoutes(options.skills))
   for (const id of options.notes ?? []) routes.push(noteFileRoute(id))
   routes.push(markdownPathsRoute)
   return routes

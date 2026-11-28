@@ -740,6 +740,11 @@ const GET_ROUTES = {
     const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
     return { workspace, path: `memory-vault/${workspace}/Workspace/Unsure.md`, found: false, items: [], counts: { waiting: 0, ticked: 0 } }
   },
+  // No skill suggestions yet; the Skills spec answers the route itself.
+  '/api/memory/skill-proposals': (req, url) => {
+    const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
+    return { workspace, found: false, items: [], counts: { waiting: 0 }, skipped: 0, truncated: false }
+  },
   '/api/models': () => ({
     // A realistic picker needs enough options to exercise its own scroll
     // container; a single model never overflows at the constrained viewport.

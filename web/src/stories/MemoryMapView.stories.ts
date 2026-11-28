@@ -33,6 +33,7 @@ function noteFilesFor(state: MapState): string[] {
 
 type MapState =
   | 'default' | 'unsure' | 'unsure-phone' | 'unsure-empty' | 'unsure-error' | 'unsure-many' | 'loading' | 'error'
+  | 'skills' | 'skills-phone'
   | 'detail-plain' | 'detail-stale' | 'detail-facts'
 
 const stateDescription: Record<MapState, string> = {
@@ -42,6 +43,8 @@ const stateDescription: Record<MapState, string> = {
   'unsure-empty': 'the Unsure section with nothing waiting',
   'unsure-error': 'the Unsure section when the list cannot be read',
   'unsure-many': 'the Unsure section with sixty lines',
+  skills: 'the Skills queue: three skill-edit proposals, the first (a diff) open in full',
+  'skills-phone': 'the Skills queue in a 390px pane: one card at a time with Reject and Approve under it',
   loading: 'a held vault graph read behind the graph skeleton',
   error: 'a failed vault graph read',
   'detail-plain': 'a selected note with no callout, neighbours swappable in play',
@@ -51,8 +54,8 @@ const stateDescription: Record<MapState, string> = {
 
 function mountState(host: HTMLElement, state: MapState) {
   return mountMapFixture(host, MemoryMapView, {
-    section: state.startsWith('unsure') ? 'unsure' : undefined,
-    view: state === 'default' || state.startsWith('unsure') ? undefined : 'graph',
+    section: state.startsWith('unsure') ? 'unsure' : state.startsWith('skills') ? 'skills' : undefined,
+    view: state === 'default' || state.startsWith('unsure') || state.startsWith('skills') ? undefined : 'graph',
     selectedId: selectedIdFor(state),
   })
 }
@@ -72,7 +75,7 @@ function renderState(state: MapState) {
         h('p', `Synthetic ${state} fixture: production MemoryMapView with ${stateDescription[state]}.`),
         // The phone story's host is the pane the app gives the page: 390px and the
         // `chat-pane` container its grid answers to, so the rail drops below.
-        h('div', state === 'unsure-phone' ? { ref: host, style: 'max-width: 390px; container: chat-pane / inline-size' } : { ref: host }),
+        h('div', state === 'unsure-phone' || state === 'skills-phone' ? { ref: host, style: 'max-width: 390px; container: chat-pane / inline-size' } : { ref: host }),
         h('p', { role: 'status' }, `Fixture requests: ${fixture.value?.boundary.requests.length ?? 0}. Violations: ${fixture.value?.boundary.violations.length ?? 0}.`),
         error.value ? h('p', { role: 'alert' }, error.value) : null,
         ...(fixture.value?.boundary.violations ?? []).map((message) => h('p', { role: 'alert' }, message)),
@@ -152,14 +155,49 @@ export const UnsurePhone: Story = {
   parameters: { fixture: { routes: mapRoutes({ graph: 'loaded' }) } },
   render: () => renderState('unsure-phone'),
   play: async ({ canvas, canvasElement, userEvent }) => {
-    await waitFor(() => expect(canvasElement.querySelector('[data-unsure-card]')).toBeTruthy())
+    await waitFor(() => expect(canvasElement.querySelector('[data-review-card]')).toBeTruthy())
     expect(canvasElement.querySelector('[data-unsure-count]')?.textContent).toBe('1 of 12')
     expect(canvas.getByText('← swipe left to dismiss')).toBeTruthy()
     const approve = canvas.getByRole('button', { name: `Approve: ${NORTHWIND}` })
     expect(approve.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
     expect(canvas.getByRole('button', { name: `Dismiss: ${NORTHWIND}` }).getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
     await userEvent.click(approve)
-    await waitFor(() => expect(canvasElement.querySelector('[data-unsure-card]')?.textContent).toContain('Does the November 27 summary'))
+    await waitFor(() => expect(canvasElement.querySelector('[data-review-card]')?.textContent).toContain('Does the November 27 summary'))
+    await assertSettled(canvas)
+  },
+}
+
+const WEEKLY = 'Weekly summary: ask for the date range first'
+
+// Memory · Skills: the open skill-edit proposals beside the first one in full,
+// its change as a diff (+2 −1), where it came from, and S moving to the next.
+export const Skills: Story = {
+  parameters: { fixture: { routes: mapRoutes({ graph: 'loaded', skills: 'loaded' }) } },
+  render: () => renderState('skills'),
+  play: async ({ canvas, canvasElement, userEvent }) => {
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Suggestions' })).toBeTruthy())
+    expect(canvas.getByText('Memory · Skills')).toBeTruthy()
+    expect(canvas.getByRole('heading', { name: WEEKLY, level: 3 })).toBeTruthy()
+    expect(canvasElement.querySelector('.pd-change-count')?.textContent).toBe('+2 −1')
+    expect(canvas.getByRole('link', { name: 'Open the chat chat-a290cb48' })).toBeTruthy()
+    expect(canvasElement.querySelector('[data-skills-count]')?.textContent).toBe('1 of 3')
+    await userEvent.keyboard('s')
+    await waitFor(() => expect(canvasElement.querySelector('[data-skills-count]')?.textContent).toBe('2 of 3'))
+    expect(canvas.getByText('proposed text')).toBeTruthy()
+    await assertSettled(canvas)
+  },
+}
+
+// The same queue on a phone: one card, REJECT and APPROVE stamps, the two 44px buttons.
+export const SkillsPhone: Story = {
+  parameters: { fixture: { routes: mapRoutes({ graph: 'loaded', skills: 'loaded' }) } },
+  render: () => renderState('skills-phone'),
+  play: async ({ canvas, canvasElement }) => {
+    await waitFor(() => expect(canvasElement.querySelector('[data-review-card]')).toBeTruthy())
+    expect(canvasElement.querySelector('[data-skills-count]')?.textContent).toBe('1 of 3')
+    expect(canvas.getByText('← swipe left to reject')).toBeTruthy()
+    expect(canvas.getByRole('button', { name: `Approve in a chat: ${WEEKLY}` }).getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
+    expect(canvas.getByRole('button', { name: `Reject: ${WEEKLY}` }).getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
     await assertSettled(canvas)
   },
 }

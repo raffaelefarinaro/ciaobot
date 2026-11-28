@@ -94,7 +94,7 @@ describe('MemoryUnsurePanel', () => {
     vi.restoreAllMocks()
   })
 
-  const titles = (wrapper: Awaited<ReturnType<typeof mountPanel>>) => wrapper.findAll('.mu-row-title').map(t => t.text())
+  const titles = (wrapper: Awaited<ReturnType<typeof mountPanel>>) => wrapper.findAll('.rq-row-title').map(t => t.text())
   const detailTitle = (wrapper: Awaited<ReturnType<typeof mountPanel>>) => wrapper.get('#mu-detail-title').text()
   const live = () => document.querySelector('[data-unsure-live]')?.textContent ?? ''
   function press(key: string, init: KeyboardEventInit = {}, target: EventTarget = document.body): KeyboardEvent {
@@ -106,7 +106,7 @@ describe('MemoryUnsurePanel', () => {
   it('shows a skeleton until the first read answers', async () => {
     apiGet.mockImplementation(() => new Promise(() => {}))
     const wrapper = await mountPanel()
-    expect(wrapper.find('.mu-skeleton').exists()).toBe(true)
+    expect(wrapper.find('.rq-skeleton').exists()).toBe(true)
     expect(wrapper.get('.mu').attributes('aria-busy')).toBe('true')
   })
 
@@ -120,9 +120,9 @@ describe('MemoryUnsurePanel', () => {
     const wrapper = await mountPanel()
     const rows = wrapper.findAll('[data-unsure-row]')
     expect(rows).toHaveLength(3)
-    expect(rows[0].get('.mu-kind').text()).toBe('fact')
-    expect(rows[1].get('.mu-kind').text()).toBe('pattern')
-    expect(rows[0].get('.mu-row-sub').text()).toBe('Unsure because the Mo note says otherwise · chat-0123abcd')
+    expect(rows[0].get('.rq-kind').text()).toBe('fact')
+    expect(rows[1].get('.rq-kind').text()).toBe('pattern')
+    expect(rows[0].get('.rq-row-sub').text()).toBe('Unsure because the Mo note says otherwise · chat-0123abcd')
     expect(rows[0].attributes('aria-selected')).toBe('true')
     expect(rows[0].attributes('tabindex')).toBe('0')
     expect(rows[1].attributes('tabindex')).toBe('-1')
@@ -135,7 +135,7 @@ describe('MemoryUnsurePanel', () => {
     expect(wrapper.get('.mud-reason').text()).toBe('the Mo note says otherwise')
     expect(wrapper.get('.mud-meta').text()).toContain('Found Nov 20')
     expect(wrapper.get('.mud-meta').text()).toContain('1 chat')
-    expect(wrapper.get('a.mus-chip').attributes('href')).toBe('/chat/chat-0123abcd')
+    expect(wrapper.get('a.rvs-chip').attributes('href')).toBe('/chat/chat-0123abcd')
     expect(wrapper.get('.mud-effect-line').text()).toBe('Mo works at Acme.')
     expect(wrapper.get('.mud-effect-where').text()).toContain('Saved to People/Mo.md')
     expect(wrapper.get('.mud-effect-how').text()).toBe('The next Workspace care run writes it there and takes the line off this list.')
@@ -187,7 +187,7 @@ describe('MemoryUnsurePanel', () => {
     await flushPromises()
     expect(apiPost).toHaveBeenLastCalledWith('/api/memory/unsure', { workspace: 'work', op: 'untick', id: 'f'.repeat(16) })
     expect(detailTitle(wrapper)).toBe('Item a?')
-    expect(wrapper.find('.mu-undo').exists()).toBe(false)
+    expect(wrapper.find('.rq-undo').exists()).toBe(false)
   })
 
   it('D dismisses the open item and Undo puts the exact line back before its neighbour', async () => {
@@ -313,7 +313,7 @@ describe('MemoryUnsurePanel', () => {
   it('a category, repository or rule item opens a chat to approve, from the button or the key', async () => {
     answer(listOf([item('r', { kind: 'repo', qualifier: '~/repos/app' }), item('u', { kind: 'rule' })]))
     const wrapper = await mountPanel()
-    expect(wrapper.findAll('.mu-row .mu-kind--chat')).toHaveLength(2)
+    expect(wrapper.findAll('.rq-row .mu-kind--chat')).toHaveLength(2)
     expect(wrapper.get('.mud-effect-where').text()).toContain('~/repos/app/AGENTS.md')
     await button(wrapper, 'Approve in a chat: Item r?').trigger('click')
     expect(startFileDiscussion).toHaveBeenCalledTimes(1)
@@ -366,7 +366,7 @@ describe('MemoryUnsurePanel', () => {
     const done = item('a', { checked: true, raw: '- [x] Item a? More detail. — unsure because only one chat says it; source: chat-0123abcd; 2026-11-20' })
     answer(listOf([done]))
     const wrapper = await mountPanel()
-    expect(wrapper.get('.mu-detail-actions').text()).toContain('Approved: saved by the next Workspace care run.')
+    expect(wrapper.get('.rq-detail-actions').text()).toContain('Approved: saved by the next Workspace care run.')
     const care = useCareReportStore()
     const run = vi.spyOn(care, 'runAgain').mockResolvedValue({ ok: true, message: 'Care started.' })
     await button(wrapper, 'Apply now: run care to save Item a?').trigger('click')
@@ -422,7 +422,7 @@ describe('MemoryUnsurePanel', () => {
   it('keeps a malformed line visible: it can be dismissed or discussed, and Approve opens a chat', async () => {
     answer(listOf([item('m', { malformed: true, kind: '', title: 'a plain bullet', raw: '- a plain bullet' })]))
     const wrapper = await mountPanel()
-    expect(wrapper.get('.mu-kind').text()).toBe('line')
+    expect(wrapper.get('.rq-kind').text()).toBe('line')
     await button(wrapper, 'Approve in a chat: a plain bullet').trigger('click')
     expect(startFileDiscussion).toHaveBeenCalled()
     expect(apiPost).not.toHaveBeenCalled()
@@ -439,7 +439,7 @@ describe('MemoryUnsurePanel', () => {
       })
     })
 
-    const card = (wrapper: Awaited<ReturnType<typeof mountPanel>>) => wrapper.get('[data-unsure-card]')
+    const card = (wrapper: Awaited<ReturnType<typeof mountPanel>>) => wrapper.get('[data-review-card]')
     /** jsdom has no PointerEvent: a MouseEvent of the pointer type, carrying a touch pointer's fields. */
     async function pointer(el: Element, type: string, x: number, y: number, id = 7): Promise<void> {
       const event = new MouseEvent(type, { clientX: x, clientY: y, bubbles: true, cancelable: true })
@@ -458,10 +458,10 @@ describe('MemoryUnsurePanel', () => {
     it('shows one card with its place, the swipe hints and the two buttons', async () => {
       answer(listOf([item('a'), item('b'), item('c')]))
       const wrapper = await mountPanel()
-      expect(wrapper.find('.mu-queue').exists()).toBe(false)
+      expect(wrapper.find('.rq-queue').exists()).toBe(false)
       expect(wrapper.get('[data-unsure-count]').text()).toBe('1 of 3')
       expect(card(wrapper).text()).toContain('Item a?')
-      expect(wrapper.findAll('.mudk-shadow')).toHaveLength(2)
+      expect(wrapper.findAll('.rvd-shadow')).toHaveLength(2)
       expect(button(wrapper, 'Dismiss: Item a?').exists()).toBe(true)
       expect(button(wrapper, 'Approve: Item a?').exists()).toBe(true)
     })
@@ -473,7 +473,7 @@ describe('MemoryUnsurePanel', () => {
       const wrapper = await mountPanel()
       apiPost.mockResolvedValueOnce(listOf([{ ...a, checked: true }, b]))
       await drag(wrapper, 160)
-      expect(card(wrapper).classes()).toContain('mudk-card--flying')
+      expect(card(wrapper).classes()).toContain('rvd-card--flying')
       expect(apiPost).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(200)
       await flushPromises()

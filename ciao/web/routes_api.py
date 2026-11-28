@@ -54,6 +54,7 @@ from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import loads_untrusted, write_private_text
 from ciao.file_kernel import QueueLockError
+from ciao.skill_proposals import read_skill_proposals
 from ciao.unsure_list import UnsureError, change_line, read_list, restore_line, is_line_id as is_unsure_line_id
 from ciao.os_support.child_env import child_env
 from ciao.port_in_use import BIND_PHASE
@@ -4497,6 +4498,31 @@ async def unsure_list(request: Request) -> JSONResponse:
         return _unsure_error("the list could not be read or written", 500, "io_error")
     payload["workspace"] = workspace
     payload["path"] = _care_display_path(config, vault / CARE_UNSURE_PATH)
+    return JSONResponse(payload)
+
+
+async def skill_proposals(request: Request) -> JSONResponse:
+    """GET one workspace's open skill-edit proposals, for Memory · Skills (read-only).
+
+    `?workspace=<name>` answers :func:`ciao.skill_proposals.read_skill_proposals`
+    plus each item's `open_path` (the file as the file viewer opens it). The
+    client names a workspace, never a path. Approve and Reject are not here:
+    the page opens an attended chat, or saves the file's `status:` line through
+    `POST /api/workspace-file`, exactly as the care page's proposal review does.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace or config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        vault = Path(config.workspace_vault_root(workspace)).resolve()
+    except (AttributeError, ValueError, OSError) as exc:
+        logger.warning("skill proposals: vault for %s unavailable: %s", workspace, type(exc).__name__)
+        return JSONResponse({"error": "the workspace's vault is not available"}, status_code=503)
+    payload: dict[str, Any] = await asyncio.to_thread(read_skill_proposals, vault)
+    for item in payload["items"]:
+        item["open_path"] = _care_display_path(config, vault / item["path"])
+    payload["workspace"] = workspace
     return JSONResponse(payload)
 
 

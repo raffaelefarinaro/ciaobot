@@ -1,104 +1,105 @@
 <template>
-  <section ref="root" class="mu" :class="{ 'mu--deck': deck }" aria-labelledby="mu-title" :aria-busy="showSkeleton">
+  <section ref="root" class="mu rq-page" :class="{ 'mu--deck': deck }" aria-labelledby="mu-title" :aria-busy="showSkeleton">
     <h2 id="mu-title" class="sr-only" tabindex="-1">Unsure</h2>
     <!-- Every change is said here once: what was done and what is showing now. -->
     <p class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-unsure-live>{{ live }}</p>
 
     <!-- First read: placeholder rows, so the queue arrives in place. -->
-    <ul v-if="showSkeleton" class="mu-skeleton" aria-hidden="true">
-      <li v-for="n in 3" :key="n" class="mu-skeleton-row">
-        <span class="mu-skeleton-bar mu-skeleton-bar--title"></span>
-        <span class="mu-skeleton-bar mu-skeleton-bar--sub"></span>
+    <ul v-if="showSkeleton" class="rq-skeleton" aria-hidden="true">
+      <li v-for="n in 3" :key="n" class="rq-skeleton-row">
+        <span class="rq-skeleton-bar rq-skeleton-bar--title"></span>
+        <span class="rq-skeleton-bar rq-skeleton-bar--sub"></span>
       </li>
     </ul>
     <p v-if="showSkeleton" class="sr-only" role="status">Reading the list…</p>
 
-    <div v-else-if="unsure.error && !list" class="mu-state mu-state--error" role="alert">
-      <p class="mu-state-text">Could not read the list. {{ unsure.error }}</p>
+    <div v-else-if="unsure.error && !list" class="rq-state rq-state--error" role="alert">
+      <p class="rq-state-text">Could not read the list. {{ unsure.error }}</p>
       <button type="button" class="btn-small mu-retry" @click="unsure.refresh()">Try again</button>
     </div>
 
     <template v-else>
       <!-- What the last action did, with its Undo, sits where the eye already is:
            over the open item's buttons, under the card, or here once nothing is left. -->
-      <div v-if="notice && noticeAt === 'top'" class="mu-notice " data-unsure-notice>
-        <span class="mu-notice-text">{{ notice.text }}</span>
+      <div v-if="notice && noticeAt === 'top'" class="rq-notice " data-unsure-notice>
+        <span class="rq-notice-text">{{ notice.text }}</span>
         <button
           v-if="notice.undo"
           type="button"
-          class="mu-link mu-undo"
+          class="rq-link rq-undo"
           :disabled="undoing || careRunning"
           @click="undo"
         >Undo</button>
       </div>
-      <p v-if="careRunning" class="mu-care-note">
+      <p v-if="careRunning" class="rq-care-note">
         Workspace care is running and may change this list. Approve, Dismiss and Undo wait until it finishes.
       </p>
 
-      <p v-if="!items.length" ref="emptyEl" class="mu-state mu-state-text" tabindex="-1">
+      <p v-if="!items.length" ref="emptyEl" class="rq-state rq-state-text" tabindex="-1">
         Nothing is waiting. Care adds a line here only when it is not sure enough to write something down.
       </p>
 
       <!-- Phone: one card at a time, swiped or decided with the buttons under it. -->
-      <div v-else-if="deck" class="mu-deck">
+      <div v-else-if="deck" class="rq-deck">
         <template v-if="selected && !selected.checked">
-          <div class="mu-deck-top">
-            <p class="mu-count" data-unsure-count>{{ position }} of {{ waiting.length }}</p>
+          <div class="rq-deck-top">
+            <p class="rq-count" data-unsure-count>{{ position }} of {{ waiting.length }}</p>
             <button
               type="button"
-              class="mu-link mu-skip-link"
+              class="rq-link rq-skip-link"
               :disabled="waiting.length < 2"
               :aria-label="`Skip: ${selected.title}`"
               @click="skip"
             >Skip</button>
           </div>
-          <MemoryUnsureDeck
+          <ReviewDeck
             ref="deckRef"
-            :item="selected"
-            :list-path="listPath"
+            :item-key="selected.id"
             :title-id="detailTitleId"
             :behind="Math.min(2, waiting.length - 1)"
             :disabled="locked(selected)"
             @decide="op => decide(op, selected!)"
-          />
-          <p class="mu-swipe-hint" aria-hidden="true">
+          >
+            <MemoryUnsureDetail :item="selected" :list-path="listPath" :title-id="detailTitleId" compact />
+          </ReviewDeck>
+          <p class="rq-swipe-hint" aria-hidden="true">
             <span>← swipe left to dismiss</span><span>swipe right to approve →</span>
           </p>
-          <div class="mu-deck-actions">
+          <div class="rq-deck-actions">
             <button
               type="button"
-              class="mu-btn"
+              class="rq-btn"
               :disabled="locked(selected)"
               :aria-label="`Dismiss: ${selected.title}`"
               @click="fling('dismiss')"
             ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>Dismiss</button>
             <button
               type="button"
-              class="mu-btn mu-btn--primary"
+              class="rq-btn rq-btn--primary"
               :disabled="approveLocked(selected)"
               :aria-label="approveLabel(selected)"
               @click="effectOf(selected).chat ? discussItem(selected) : fling('approve')"
             ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>{{ effectOf(selected).chat ? 'Approve in a chat' : 'Approve' }}</button>
           </div>
-          <div v-if="notice && noticeAt === 'deck'" class="mu-notice " data-unsure-notice>
-        <span class="mu-notice-text">{{ notice.text }}</span>
+          <div v-if="notice && noticeAt === 'deck'" class="rq-notice " data-unsure-notice>
+        <span class="rq-notice-text">{{ notice.text }}</span>
         <button
           v-if="notice.undo"
           type="button"
-          class="mu-link mu-undo"
+          class="rq-link rq-undo"
           :disabled="undoing || careRunning"
           @click="undo"
         >Undo</button>
       </div>
         </template>
-        <p v-else class="mu-state mu-state-text" tabindex="-1" data-unsure-done>
+        <p v-else class="rq-state rq-state-text" tabindex="-1" data-unsure-done>
           Nothing else is waiting.
         </p>
         <div v-if="approved.length" class="mu-approved-note">
           <p class="mu-approved-text">{{ approved.length }} approved, saved by the next Workspace care run.</p>
           <button
             type="button"
-            class="mu-link"
+            class="rq-link"
             :disabled="care.starting || careRunning"
             @click="applyNow"
           >{{ careRunning ? 'Care is running' : care.starting ? 'Starting…' : 'Apply now' }}</button>
@@ -106,35 +107,35 @@
       </div>
 
       <!-- Desktop: the queue on the left, the open item in full on the right. -->
-      <div v-else class="mu-queue">
-        <div class="mu-list-pane">
-          <div class="mu-list-head">
-            <h3 id="mu-list-title" class="mu-list-title">Waiting for you</h3>
-            <span class="mu-count" data-unsure-count>{{ selected && !selected.checked ? `${position} of ${waiting.length}` : waiting.length }}</span>
+      <div v-else class="rq-queue">
+        <div class="rq-list-pane">
+          <div class="rq-list-head">
+            <h3 id="mu-list-title" class="rq-list-title">Waiting for you</h3>
+            <span class="rq-count" data-unsure-count>{{ selected && !selected.checked ? `${position} of ${waiting.length}` : waiting.length }}</span>
           </div>
           <ul
             ref="listEl"
-            class="mu-list"
+            class="rq-list"
             role="listbox"
             aria-labelledby="mu-list-title"
             @keydown="onListKeydown"
           >
-            <li v-if="!waiting.length" class="mu-list-empty" role="presentation">Nothing else is waiting.</li>
+            <li v-if="!waiting.length" class="rq-list-empty" role="presentation">Nothing else is waiting.</li>
             <li
               v-for="entry in waitingRows"
               :id="entry.optionId"
               :key="entry.key"
-              class="mu-row"
-              :class="{ 'mu-row--current': entry.item === selected, 'mu-row--busy': unsure.busy.has(entry.item.id) }"
+              class="rq-row"
+              :class="{ 'rq-row--current': entry.item === selected, 'rq-row--busy': unsure.busy.has(entry.item.id) }"
               role="option"
               :aria-selected="entry.item === selected"
               :tabindex="entry.item === selected ? 0 : -1"
               data-unsure-row
               @click="select(entry.item)"
             >
-              <span class="mu-kind" :class="{ 'mu-kind--chat': effectOf(entry.item).chat }" aria-hidden="true">{{ entry.item.malformed ? 'line' : kindLabel(entry.item.kind) }}</span>
-              <span class="mu-row-title">{{ entry.item.title }}</span>
-              <span v-if="entry.sub" class="mu-row-sub">{{ entry.sub }}</span>
+              <span class="rq-kind" :class="{ 'mu-kind--chat': effectOf(entry.item).chat }" aria-hidden="true">{{ entry.item.malformed ? 'line' : kindLabel(entry.item.kind) }}</span>
+              <span class="rq-row-title">{{ entry.item.title }}</span>
+              <span v-if="entry.sub" class="rq-row-sub">{{ entry.sub }}</span>
             </li>
             <li v-if="approvedRows.length" class="mu-group" role="group" aria-labelledby="mu-approved-title">
               <div id="mu-approved-title" class="mu-group-title" role="presentation">
@@ -145,38 +146,38 @@
                   v-for="entry in approvedRows"
                   :id="entry.optionId"
                   :key="entry.key"
-                  class="mu-row mu-row--approved"
-                  :class="{ 'mu-row--current': entry.item === selected }"
+                  class="rq-row mu-row--approved"
+                  :class="{ 'rq-row--current': entry.item === selected }"
                   role="option"
                   :aria-selected="entry.item === selected"
                   :tabindex="entry.item === selected ? 0 : -1"
                   data-unsure-row
                   @click="select(entry.item)"
                 >
-                  <span class="mu-kind" :class="{ 'mu-kind--chat': effectOf(entry.item).chat }" aria-hidden="true">{{ entry.item.malformed ? 'line' : kindLabel(entry.item.kind) }}</span>
-                  <span class="mu-row-title">{{ entry.item.title }}</span>
+                  <span class="rq-kind" :class="{ 'mu-kind--chat': effectOf(entry.item).chat }" aria-hidden="true">{{ entry.item.malformed ? 'line' : kindLabel(entry.item.kind) }}</span>
+                  <span class="rq-row-title">{{ entry.item.title }}</span>
                 </li>
               </ul>
             </li>
           </ul>
         </div>
 
-        <div v-if="selected" class="mu-detail" :aria-labelledby="detailTitleId" role="region">
-          <div :key="selected.id" class="mu-detail-body">
+        <div v-if="selected" class="rq-detail" :aria-labelledby="detailTitleId" role="region">
+          <div :key="selected.id" class="rq-detail-body">
             <MemoryUnsureDetail :item="selected" :list-path="listPath" :title-id="detailTitleId" />
           </div>
-          <div class="mu-detail-foot">
-          <div v-if="notice && noticeAt === 'detail'" class="mu-notice " data-unsure-notice>
-        <span class="mu-notice-text">{{ notice.text }}</span>
+          <div class="rq-detail-foot">
+          <div v-if="notice && noticeAt === 'detail'" class="rq-notice " data-unsure-notice>
+        <span class="rq-notice-text">{{ notice.text }}</span>
         <button
           v-if="notice.undo"
           type="button"
-          class="mu-link mu-undo"
+          class="rq-link rq-undo"
           :disabled="undoing || careRunning"
           @click="undo"
         >Undo</button>
       </div>
-          <div class="mu-detail-actions">
+          <div class="rq-detail-actions">
             <template v-if="selected.checked">
               <p class="mu-approved-text">
                 {{ effectOf(selected).chat ? 'Approved. It still needs a chat to apply it.' : 'Approved: saved by the next Workspace care run.' }}
@@ -184,7 +185,7 @@
               <button
                 v-if="!effectOf(selected).chat"
                 type="button"
-                class="mu-btn"
+                class="rq-btn"
                 :disabled="care.starting || careRunning"
                 :aria-label="`Apply now: run care to save ${selected.title}`"
                 @click="applyNow"
@@ -192,7 +193,7 @@
               <button
                 v-if="!selected.malformed"
                 type="button"
-                class="mu-btn"
+                class="rq-btn"
                 :disabled="locked(selected)"
                 :aria-label="`Undo approval: ${selected.title}`"
                 @click="unapprove(selected)"
@@ -201,7 +202,7 @@
             <template v-else>
               <button
                 type="button"
-                class="mu-btn mu-btn--primary"
+                class="rq-btn rq-btn--primary"
                 :disabled="approveLocked(selected)"
                 :aria-label="approveLabel(selected)"
                 aria-keyshortcuts="A"
@@ -209,7 +210,7 @@
               ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>{{ effectOf(selected).chat ? 'Approve in a chat' : 'Approve' }} <kbd aria-hidden="true">A</kbd></button>
               <button
                 type="button"
-                class="mu-btn"
+                class="rq-btn"
                 :disabled="locked(selected)"
                 :aria-label="`Dismiss: ${selected.title}`"
                 aria-keyshortcuts="D"
@@ -218,7 +219,7 @@
               ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>Dismiss <kbd aria-hidden="true">D</kbd></button>
               <button
                 type="button"
-                class="mu-btn mu-btn--ghost"
+                class="rq-btn rq-btn--ghost"
                 :disabled="waiting.length < 2"
                 :aria-label="`Skip: ${selected.title}`"
                 aria-keyshortcuts="S"
@@ -226,12 +227,12 @@
                 @click="skip"
               >Skip <kbd aria-hidden="true">S</kbd></button>
             </template>
-            <span class="mu-hint" aria-hidden="true">↑ ↓ move · acting moves to the next</span>
+            <span class="rq-hint" aria-hidden="true">↑ ↓ move · acting moves to the next</span>
           </div>
           </div>
           <button
             type="button"
-            class="mu-link mu-discuss"
+            class="rq-link mu-discuss"
             :aria-label="`Discuss: ${selected.title}`"
             title="Open a new chat about this item"
             @click="discussItem(selected)"
@@ -240,10 +241,10 @@
       </div>
     </template>
 
-    <div class="mu-actions">
-      <button type="button" class="mu-link" :disabled="!list?.found" :title="list ? `Open ${list.path}` : 'Open Unsure.md'" @click="openList">Open Unsure.md</button>
+    <div class="rq-actions">
+      <button type="button" class="rq-link" :disabled="!list?.found" :title="list ? `Open ${list.path}` : 'Open Unsure.md'" @click="openList">Open Unsure.md</button>
       <span aria-hidden="true">·</span>
-      <button type="button" class="mu-link" :disabled="!items.length" title="Start a chat about the whole list" @click="discussAll">Go through it with Ciaobot</button>
+      <button type="button" class="rq-link" :disabled="!items.length" title="Start a chat about the whole list" @click="discussAll">Go through it with Ciaobot</button>
     </div>
   </section>
 </template>
@@ -256,11 +257,12 @@ import { useUnsureStore } from '../stores/unsure'
 import { useCareReportStore } from '../stores/careReport'
 import { startFileDiscussion } from '../lib/fileDiscussion'
 import MemoryUnsureDetail from './MemoryUnsureDetail.vue'
-import MemoryUnsureDeck from './MemoryUnsureDeck.vue'
+import ReviewDeck from './ReviewDeck.vue'
 import {
-  appliesUnattended, approveEffect, discussSeed, keyBelongsElsewhere, kindLabel, queueKey, unsureSources,
+  appliesUnattended, approveEffect, discussSeed, kindLabel, unsureSources,
   type UnsureItem,
 } from '../lib/unsureList'
+import { keyBelongsElsewhere, queueKey } from '../lib/reviewQueue'
 
 /**
  * Memory · Unsure as a review queue over the lines of `Workspace/Unsure.md`.
@@ -298,7 +300,7 @@ const careRunning = computed(() => !!care.report?.running)
 const root = ref<HTMLElement | null>(null)
 const listEl = ref<HTMLElement | null>(null)
 const emptyEl = ref<HTMLElement | null>(null)
-const deckRef = ref<InstanceType<typeof MemoryUnsureDeck> | null>(null)
+const deckRef = ref<InstanceType<typeof ReviewDeck> | null>(null)
 const detailTitleId = 'mu-detail-title'
 
 // ── Layout: a card deck when the pane is phone-narrow ─────────────────────────
@@ -623,129 +625,10 @@ watch(() => store.activeWorkspace, () => {
 </script>
 
 <style scoped>
-.mu {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  padding: 4px 0 16px;
-  min-width: 0;
-}
-
-.mu-state {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-2);
-  margin: 0;
-  padding: 18px 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-}
-.mu-state-text { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.5; max-width: 62ch; }
-.mu-state--error .mu-state-text { color: var(--error-text); }
-.mu-state:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
-
-.mu-notice {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 12px;
-  padding: 4px 4px 4px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg2);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  line-height: 1.45;
-}
-.mu-notice-text { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
-.mu-care-note { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.45; }
 #mu-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
-
-/* ── Desktop: two panes in one window ─────────────────────────────────────── */
-.mu-queue {
-  display: grid;
-  grid-template-columns: minmax(240px, 38%) minmax(0, 1fr);
-  min-height: 520px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg2);
-  overflow: hidden;
-}
-.mu-list-pane { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--border); }
-.mu-list-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  min-height: 44px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border);
-}
-.mu-list-title { margin: 0; color: var(--fg); font-size: var(--text-base); font-weight: 650; }
-.mu-count { margin: 0; color: var(--fg3); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-
-.mu-list { flex: 1; margin: 0; padding: 0; list-style: none; overflow-y: auto; max-height: 72dvh; }
-.mu-list-empty { padding: 14px 16px; color: var(--fg3); font-size: var(--text-sm); }
 .mu-sublist { margin: 0; padding: 0; list-style: none; }
-
-/* ListRow's vocabulary: a flat row, hairline under it, title over one muted line. */
-.mu-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
-  gap: 4px 10px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-  outline: none;
-  transition: background 120ms var(--ease);
-}
-.mu-row:hover { background: var(--bg3); }
-.mu-row--current { background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
-.mu-row--current:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.mu-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.mu-row--busy { opacity: 0.6; }
-
-/* Squared tag (DESIGN: --radius-xs is for tags that must not read as counts).
-   An item a chat must settle has a dashed outline: shape and word, not colour. */
-.mu-kind {
-  margin-top: 1px;
-  padding: 1px 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
-  color: var(--fg2);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  line-height: 1.4;
-  white-space: nowrap;
-}
 .mu-kind--chat { border-style: dashed; }
-.mu-row-title {
-  display: -webkit-box;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg);
-  font-weight: 600;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-}
-.mu-row--approved .mu-row-title { color: var(--fg3); font-weight: 500; }
-.mu-row-sub {
-  grid-column: 2;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg3);
-  font-size: var(--text-sm);
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+.mu-row--approved .rq-row-title { color: var(--fg3); font-weight: 500; }
 .mu-group-title {
   display: flex;
   align-items: baseline;
@@ -757,94 +640,8 @@ watch(() => store.activeWorkspace, () => {
   font-weight: 600;
 }
 .mu-group-count { font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
-
-.mu-detail { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; padding: 22px 26px; }
-.mu-detail-body { animation: mu-in 160ms var(--ease); }
-@keyframes mu-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.mu-detail-foot { display: flex; flex-direction: column; gap: 10px; margin-top: auto; }
-.mu-detail-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-.mu-hint { margin-left: auto; color: var(--fg3); font-size: var(--text-sm); }
 .mu-discuss { align-self: flex-start; }
 .mu-approved-text { flex: 1 1 100%; margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.45; }
-
-.mu-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: var(--touch);
-  padding: 0 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-elev, var(--bg2));
-  color: var(--fg);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease);
-}
-.mu-btn:hover:not(:disabled) { background: var(--bg3); }
-.mu-btn--primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
-.mu-btn--primary:hover:not(:disabled) { background: var(--accent-strong, var(--accent)); border-color: var(--accent-strong, var(--accent)); }
-.mu-btn--ghost { background: transparent; }
-.mu-btn:disabled { cursor: default; opacity: 0.55; }
-.mu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.mu-btn kbd {
-  padding: 0 5px;
-  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
-  border-radius: var(--radius-xs);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  opacity: 0.85;
-}
-/* No keyboard to press them on: the key letters and the hint go. */
-@media (hover: none) and (pointer: coarse) {
-  .mu-btn kbd, .mu-hint { display: none; }
-}
-
-/* ── Phone: the card deck ─────────────────────────────────────────────────── */
-.mu-deck { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
-.mu-deck-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.mu-swipe-hint { display: flex; justify-content: space-between; gap: 8px; margin: 4px 2px 0; color: var(--fg3); font-size: var(--text-xs); }
-.mu-deck-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.mu-deck-actions .mu-btn { min-height: 52px; }
 .mu-approved-note { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
 .mu-approved-note .mu-approved-text { flex: 1 1 200px; }
-
-.mu-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--fg3); }
-.mu-link {
-  min-height: var(--touch);
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--accent);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-sm);
-}
-.mu-link:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
-.mu-link:disabled { color: var(--fg3); cursor: default; }
-.mu-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
-.mu-undo, .mu-skip-link { min-width: var(--touch); padding: 0 8px; font-weight: 600; }
-
-.mu-skeleton { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--border); }
-.mu-skeleton-row { display: flex; flex-direction: column; gap: 8px; padding: 14px 2px; border-bottom: 1px solid var(--border); }
-.mu-skeleton-bar { display: block; height: 10px; border-radius: 5px; background: var(--bg3); animation: mu-pulse 1.4s var(--ease) infinite alternate; }
-.mu-skeleton-bar--title { width: 58%; height: 12px; }
-.mu-skeleton-bar--sub { width: 36%; }
-@keyframes mu-pulse { from { opacity: 0.55; } to { opacity: 1; } }
-
-@media (prefers-reduced-motion: reduce) {
-  .mu-skeleton-bar, .mu-detail-body { animation: none; }
-  .mu-row, .mu-btn { transition: none; }
-}
 </style>

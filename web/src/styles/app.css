@@ -1,3 +1,6 @@
+/* Shared page pieces that several components draw. */
+@import './review-queue.css';
+
 :root {
   /* Font scale multiplier. The default is the platform's 16px body, not a
      designed 120%: the body token is 14px, so 14 × 1.15 = 16.1px. Settings

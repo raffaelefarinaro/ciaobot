@@ -30,6 +30,7 @@ const PAGE_HREFS = [
   '/memory/map',
   '/memory/categories',
   '/memory/unsure',
+  '/memory/skills',
   '/memory/care',
 ]
 

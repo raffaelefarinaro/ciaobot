@@ -1,0 +1,197 @@
+/* Memory's review queues (Unsure, Skills): one window with the list beside the
+   open item on a wide pane, a card deck on a phone. Shared by
+   MemoryUnsurePanel.vue and MemorySkillsPanel.vue; the card itself is
+   ReviewDeck.vue and the sources ReviewSources.vue. */
+.rq-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: 4px 0 16px;
+  min-width: 0;
+}
+
+.rq-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 18px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.rq-state-text { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.5; max-width: 62ch; }
+.rq-state--error .rq-state-text { color: var(--error-text); }
+.rq-state:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+.rq-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 4px 4px 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.rq-notice-text { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+.rq-care-note { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.45; }
+/* ── Desktop: two panes in one window ─────────────────────────────────────── */
+.rq-queue {
+  display: grid;
+  grid-template-columns: minmax(240px, 38%) minmax(0, 1fr);
+  min-height: 520px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg2);
+  overflow: hidden;
+}
+.rq-list-pane { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--border); }
+.rq-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 44px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+.rq-list-title { margin: 0; color: var(--fg); font-size: var(--text-base); font-weight: 650; }
+.rq-count { margin: 0; color: var(--fg3); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.rq-list { flex: 1; margin: 0; padding: 0; list-style: none; overflow-y: auto; max-height: 72dvh; }
+.rq-list-empty { padding: 14px 16px; color: var(--fg3); font-size: var(--text-sm); }
+/* ListRow's vocabulary: a flat row, hairline under it, title over one muted line. */
+.rq-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 4px 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  outline: none;
+  transition: background 120ms var(--ease);
+}
+.rq-row:hover { background: var(--bg3); }
+.rq-row--current { background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.rq-row--current:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.rq-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.rq-row--busy { opacity: 0.6; }
+/* Squared tag (DESIGN: --radius-xs is for tags that must not read as counts).
+   An item a chat must settle has a dashed outline: shape and word, not colour. */
+.rq-kind {
+  margin-top: 1px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.rq-row-title {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+.rq-row-sub {
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rq-detail { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; padding: 22px 26px; }
+.rq-detail-body { animation: rq-in 160ms var(--ease); }
+@keyframes rq-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.rq-detail-foot { display: flex; flex-direction: column; gap: 10px; margin-top: auto; }
+.rq-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.rq-hint { margin-left: auto; color: var(--fg3); font-size: var(--text-sm); }
+.rq-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--touch);
+  padding: 0 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elev, var(--bg2));
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease);
+}
+.rq-btn:hover:not(:disabled) { background: var(--bg3); }
+.rq-btn--primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.rq-btn--primary:hover:not(:disabled) { background: var(--accent-strong, var(--accent)); border-color: var(--accent-strong, var(--accent)); }
+.rq-btn--ghost { background: transparent; }
+.rq-btn:disabled { cursor: default; opacity: 0.55; }
+.rq-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rq-btn kbd {
+  padding: 0 5px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  opacity: 0.85;
+}
+/* No keyboard to press them on: the key letters and the hint go. */
+@media (hover: none) and (pointer: coarse) {
+  .rq-btn kbd, .rq-hint { display: none; }
+}
+/* ── Phone: the card deck ─────────────────────────────────────────────────── */
+.rq-deck { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.rq-deck-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.rq-swipe-hint { display: flex; justify-content: space-between; gap: 8px; margin: 4px 2px 0; color: var(--fg3); font-size: var(--text-xs); }
+.rq-deck-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.rq-deck-actions .rq-btn { min-height: 52px; }
+.rq-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--fg3); }
+.rq-link {
+  min-height: var(--touch);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+}
+.rq-link:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.rq-link:disabled { color: var(--fg3); cursor: default; }
+.rq-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+.rq-undo, .rq-skip-link { min-width: var(--touch); padding: 0 8px; font-weight: 600; }
+.rq-skeleton { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--border); }
+.rq-skeleton-row { display: flex; flex-direction: column; gap: 8px; padding: 14px 2px; border-bottom: 1px solid var(--border); }
+.rq-skeleton-bar { display: block; height: 10px; border-radius: 5px; background: var(--bg3); animation: rq-pulse 1.4s var(--ease) infinite alternate; }
+.rq-skeleton-bar--title { width: 58%; height: 12px; }
+.rq-skeleton-bar--sub { width: 36%; }
+@keyframes rq-pulse { from { opacity: 0.55; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .rq-skeleton-bar, .rq-detail-body { animation: none; }
+  .rq-row, .rq-btn { transition: none; }
+}

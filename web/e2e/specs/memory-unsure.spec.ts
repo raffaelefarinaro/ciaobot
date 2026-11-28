@@ -78,8 +78,8 @@ test.describe('Memory › Unsure', () => {
     await expect(page.locator('.mud-effect-where')).toContainText(`Saved to ${FIRST.destination}`)
     await expect(page.getByRole('link', { name: 'Open the chat chat-7e11530b' })).toHaveAttribute('href', '/chat/chat-7e11530b')
     // Two panes side by side, the rail's two windows beside them.
-    const list = await page.locator('.mu-list-pane').boundingBox()
-    const detail = await page.locator('.mu-detail').boundingBox()
+    const list = await page.locator('.rq-list-pane').boundingBox()
+    const detail = await page.locator('.rq-detail').boundingBox()
     expect(detail!.x).toBeGreaterThan(list!.x + list!.width - 2)
     await expect(page.locator('.mm-review-rail .docked-window')).toHaveCount(2)
     await expect(page.locator('a[href="/memory/unsure"] .memory-nav-count')).toHaveText('12')
@@ -144,7 +144,7 @@ test.describe('Memory › Unsure', () => {
   test('says so when nothing is waiting', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     await answerList(page, [])
-    await boot(page, '/memory/unsure', '.mu-state')
+    await boot(page, '/memory/unsure', '.rq-state')
 
     await expect(page.locator('.mu')).toContainText('Nothing is waiting. Care adds a line here only when it is not sure enough to write something down.')
     await expect(page.locator('a[href="/memory/unsure"] .memory-nav-count')).toHaveCount(0)
@@ -161,10 +161,10 @@ test.describe('Memory › Unsure on a phone', () => {
 
   test('one card at a time, no sideways scroll, every control 44px', async ({ page }) => {
     await answerList(page)
-    await boot(page, '/memory/unsure', '[data-unsure-card]')
+    await boot(page, '/memory/unsure', '[data-review-card]')
 
     await expect(page.locator('[data-unsure-count]')).toHaveText('1 of 12')
-    await expect(page.locator('[data-unsure-card]')).toContainText(FIRST.title)
+    await expect(page.locator('[data-review-card]')).toContainText(FIRST.title)
     const { overflow, culprits } = await horizontalOverflow(page)
     expect(overflow, `scrolls ${overflow}px sideways; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
     for (const name of [`Approve: ${FIRST.title}`, `Dismiss: ${FIRST.title}`, `Skip: ${FIRST.title}`, 'Open Unsure.md']) {
@@ -178,8 +178,8 @@ test.describe('Memory › Unsure on a phone', () => {
 
   test('swiping the card right approves and left dismisses; a short drag springs back', async ({ page }) => {
     const state = await answerList(page)
-    await boot(page, '/memory/unsure', '[data-unsure-card]')
-    const card = page.locator('[data-unsure-card]')
+    await boot(page, '/memory/unsure', '[data-review-card]')
+    const card = page.locator('[data-review-card]')
 
     async function swipe(dx: number, hold = false): Promise<void> {
       const box = (await card.boundingBox())!
@@ -197,7 +197,7 @@ test.describe('Memory › Unsure on a phone', () => {
     expect(state.posts).toHaveLength(0)
 
     await swipe(180, true)
-    await expect(page.locator('.mudk-stamp--approve')).toHaveCSS('opacity', '1')
+    await expect(page.locator('.rvd-stamp--approve')).toHaveCSS('opacity', '1')
     await page.screenshot({ path: 'test-results/memory-unsure-phone-drag.png' })
     await page.mouse.up()
     await expect(card).toContainText(SECOND.title)

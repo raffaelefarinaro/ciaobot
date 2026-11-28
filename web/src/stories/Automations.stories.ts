@@ -222,7 +222,7 @@ export const WebhooksPageEmpty: Story = {
 }
 export const SidebarSection: Story = {
   // The sidebar's own reads that this section does not draw stay pending.
-  parameters: { fixture: { routes: [loadedHooks, { method: 'GET', path: '/api/housekeeping', respond: neverSettles }, { method: 'GET', path: '/api/workspace-health', respond: neverSettles }, { method: 'GET', path: '/api/memory/unsure?workspace=personal', respond: neverSettles }] } },
+  parameters: { fixture: { routes: [loadedHooks, { method: 'GET', path: '/api/housekeeping', respond: neverSettles }, { method: 'GET', path: '/api/workspace-health', respond: neverSettles }, { method: 'GET', path: '/api/memory/unsure?workspace=personal', respond: neverSettles }, { method: 'GET', path: '/api/memory/skill-proposals?workspace=personal', respond: neverSettles }] } },
   render: () => routedSidebar(seedFullWorkspace),
   play: async ({ canvas }) => {
     const nav = await canvas.findByRole('navigation', { name: 'Automations' })
