@@ -257,6 +257,16 @@ def system_base_id(schedule_id: str) -> str:
     return (schedule_id or "").split(SYSTEM_ID_SEPARATOR, 1)[0]
 
 
+# The packaged Workspace care routine, fanned out per workspace
+# (`system-memory-curation@<workspace>`).
+CARE_SCHEDULE_BASE_ID = "system-memory-curation"
+
+
+def is_care_schedule_id(schedule_id: str) -> bool:
+    """True for the Workspace care routine's id, bare or fanned out per workspace."""
+    return system_base_id(schedule_id) == CARE_SCHEDULE_BASE_ID
+
+
 def system_schedule_id(base_id: str, workspace: str) -> str:
     return f"{base_id}{SYSTEM_ID_SEPARATOR}{workspace}"
 
