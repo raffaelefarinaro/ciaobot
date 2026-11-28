@@ -284,9 +284,9 @@ describe('MemoryCategoriesPanel', () => {
     expect((drawer.get('#cat-id').element as HTMLInputElement).readOnly).toBe(true)
     expect(drawer.find('.cat-btn--danger').exists()).toBe(false)
     expect(drawer.text()).toContain('can be turned off, but not deleted')
-    // The scope note is here so the stored folder and aliases are not read as
-    // behaviour that already follows from them.
-    expect(drawer.get('.cat-scope').text()).toContain('once that wiring lands')
+    // The drawer says what the folder and aliases do.
+    expect(drawer.get('.cat-scope').text()).toContain('where new notes of this kind are filed')
+    expect(drawer.get('.cat-scope').text()).not.toContain('wiring')
 
     await drawer.get('#cat-label').setValue('Human')
     apiPatch.mockResolvedValue(body([row({ label: 'Human' }), STOCK[1]!, STOCK[2]!]))
@@ -412,7 +412,7 @@ describe('MemoryCategoriesPanel', () => {
     // user's own list is the only thing that can change the registry.
     const wrapper = await mountPanel([...STOCK, ...SYSTEM])
 
-    expect(wrapper.get('.cat-lede').text()).toContain('own folder')
+    expect(wrapper.get('.cat-lede').text()).toContain('usually with its own folder')
     expect(wrapper.get('.cat-lede').text()).toContain('type:')
     const why = wrapper.get('.cat-why')
     expect(why.text()).toContain('When and where notes are saved')
@@ -421,6 +421,9 @@ describe('MemoryCategoriesPanel', () => {
     expect(why.text()).toContain('nothing is saved for it until you approve')
     expect(why.text()).toContain('Nothing from an automated run is saved')
     expect(why.text()).toContain('People/<name>.md')
+    expect(why.text()).toContain('Workspace/Learnings.md')
+    expect(why.text()).toContain('waits on the Unsure list until it has shown up in three')
+    expect(why.text()).toContain('raised on the Unsure list as a question to add one')
     expect(why.text()).toContain('AGENTS.md')
     expect(why.text()).toContain('No empty folders are created')
     // The always-loaded block is a clause, not the lead.

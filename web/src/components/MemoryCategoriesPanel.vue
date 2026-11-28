@@ -309,8 +309,8 @@ async function saveDraft() {
     <header class="cat-head">
       <h2 id="cat-heading" class="cat-h">{{ onCount }} of {{ visibleRows.length }} categories on</h2>
       <p class="cat-lede">
-        A category is a kind of note with its own folder (People, Projects, and so
-        on) and the <code>type:</code> each note is written with.
+        A category is a kind of note, usually with its own folder (People, Projects,
+        and so on), and the <code>type:</code> each note is written with.
       </p>
     </header>
 
@@ -325,19 +325,22 @@ async function saveDraft() {
           <strong>When.</strong> After you archive a chat, the memory pass files what
           it is sure about, and Workspace care tidies once a day. What it is unsure
           about waits in Memory &rsaquo; Unsure, and nothing is saved for it until
-          you approve. Nothing from an automated run is saved.
+          you approve. Nothing from an automated run is saved. A pattern seen in fewer than
+          three chats waits on the Unsure list until it has shown up in three.
         </li>
         <li>
           <strong>Where.</strong> A fact about a person goes to
           <code>People/&lt;name&gt;.md</code>, a project fact goes to that project's
-          note, and anything else goes to the folder of the matching category. Your
-          general rules and preferences go to the short block in
-          <code>AGENTS.md</code> that every chat loads.
+          note, and other notes go to the folder of the matching category. Reusable
+          how-to lessons go to <code>Workspace/Learnings.md</code>. Your general
+          rules and preferences go to the short block in <code>AGENTS.md</code>
+          that every chat loads.
         </li>
         <li>
           <strong>Changing the list.</strong> Turning a category off keeps its notes
           but stops new ones being filed there. Adding one gives future notes of that
-          kind their own folder. No empty folders are created.
+          kind their own folder. No empty folders are created. A note that fits no
+          category is raised on the Unsure list as a question to add one.
         </li>
       </ul>
       <p class="cat-why-foot">
@@ -537,12 +540,11 @@ async function saveDraft() {
             </select>
           </div>
 
-          <!-- The scope note, in one line: this edits the list the vault is
-               configured with, and the consumers that read it are still to come
-               (A2a). Saying so is honest; faking the behaviour is not. -->
+          <!-- What the two fields do, in one line: the registry is read when
+               notes are filed and when the vault is linted. -->
           <p class="cat-scope">
-            Folder and aliases are stored now; they start changing how notes are
-            sorted and linted once that wiring lands.
+            The folder is where new notes of this kind are filed. Aliases are
+            other spellings of the type that count as this category.
           </p>
 
           <p v-if="store.error" class="cat-error" role="alert">{{ store.error }}</p>
