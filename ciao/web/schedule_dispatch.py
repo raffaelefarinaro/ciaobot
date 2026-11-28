@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from ciao import job_runs
 from ciao import loop_wake
 from ciao import schedules as schedule_support
+from ciao.care_report import read_care_report
 from ciao.config import CiaoConfig
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import BridgeMode, ImageAttachment
@@ -238,6 +239,8 @@ class ScheduleDispatchHost(Protocol):
     def _follow_up_pending(self, chat_id: str) -> bool: ...
 
     def _stop_count(self, chat_id: str) -> int: ...
+
+    def announce_schedule_run_end(self, chat_id: str, text: str) -> None: ...
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None: ...
 
@@ -995,6 +998,10 @@ class ScheduleDispatcher:
         # while a completed run credits the occurrence it was dispatched for
         # either way (issue #490).
         self._stamp_row_outcome(_sched_schedule_id, _sched_dispatch_id, _row_status)
+        if schedule_support.is_care_schedule_id(_sched_schedule_id):
+            await self._announce_care_run_end(
+                target_id, outcome, _sched_status, _sched_exec_workspace, _sched_started
+            )
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",
@@ -1050,6 +1057,36 @@ class ScheduleDispatcher:
             # on the user) stays invisible until an unrelated refetch or reload.
             schedule_support.publish_automations_changed(self._host)
 
+    async def _announce_care_run_end(
+        self,
+        chat_id: str,
+        outcome: chat_service.ScheduleRunOutcome,
+        status: str,
+        workspace: str,
+        started: datetime,
+    ) -> None:
+        """Raise the Workspace care run's one notification, with its outcome.
+
+        The run's own turns announce nothing (``ProjectChatManager._care_run_turn``),
+        so this is the notification for the whole run. The step count comes from
+        the care report, and only when this run wrote it.
+        """
+        counts: dict[str, int] | None = None
+        needs = 0
+        if workspace:
+            try:
+                vault = Path(self._host._config.workspace_vault_root(workspace))
+                report = await asyncio.to_thread(read_care_report, vault)
+            except Exception:  # noqa: BLE001
+                logger.warning("Care report unreadable for the run notice in %s", workspace)
+                report = {}
+            if report.get("status") == "ok" and _written_since(str(report.get("modified_at") or ""), started):
+                counts = report.get("counts") or None
+                needs = len(report.get("needs_you") or [])
+        text = care_run_end_text(outcome, status, counts=counts, needs=needs)
+        if text:
+            self._host.announce_schedule_run_end(chat_id, text)
+
     def _chat_workspace(self, chat_id: str) -> str:
         """Read-only owner lookup. Unknown ids/projects are empty, never guessed."""
         chat = self._host._chats.get(chat_id)
@@ -1096,6 +1133,49 @@ class ScheduleDispatcher:
             },
         ))
         return {"status": "ok"}
+
+
+def _written_since(modified_at: str, started: datetime) -> bool:
+    try:
+        modified = datetime.fromisoformat(modified_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return modified >= started
+
+
+def care_run_end_text(
+    outcome: chat_service.ScheduleRunOutcome,
+    status: str,
+    *,
+    counts: dict[str, int] | None = None,
+    needs: int = 0,
+) -> str:
+    """The Workspace care run's end notice, or "" when it raises none.
+
+    Nothing is raised when another notification already speaks for the run: a
+    question or approval request (it notified on its own), a deferred retry
+    (the retried turn reports), or a turn the person took over (they are
+    there, and their own turn is announced).
+    """
+    if outcome.retry_pending or outcome.follow_up_unfinished == chat_service.FOLLOW_UP_SUPERSEDED:
+        return ""
+    progress = ""
+    if counts and counts.get("total"):
+        progress = f"{counts.get('done', 0)} of {counts['total']} steps done"
+    if status == "error":
+        if outcome.follow_up_unfinished == chat_service.FOLLOW_UP_CUT_OFF:
+            minutes = f"{chat_service.SCHEDULE_FOLLOW_UP_MAX_S / 60:g}"
+            head = f"Workspace care was cut off: a step was still running after {minutes} min"
+            return f"{head} ({progress})." if progress else f"{head}."
+        return "Workspace care failed. Open the chat to see why."
+    if outcome.follow_up_unfinished == chat_service.FOLLOW_UP_STOPPED:
+        return f"Workspace care was stopped: {progress}." if progress else "Workspace care was stopped."
+    if status != "ok":
+        return ""
+    parts = [progress] if progress else []
+    if needs:
+        parts.append(f"{needs} {'item needs' if needs == 1 else 'items need'} you")
+    return f"Workspace care finished: {', '.join(parts)}." if parts else "Workspace care finished."
 
 
 # Keep the shorter name available to callers that describe the lifecycle by

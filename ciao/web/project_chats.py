@@ -320,6 +320,7 @@ from ciao.schedules import (
     LOOP_FAIL_LIMIT,
     ScheduleEntry,
     ScheduleStore,
+    is_care_schedule_id,
     loop_end_reason,
     publish_automations_changed,
     settle_retrying_runs,
@@ -9403,12 +9404,16 @@ class ProjectChatManager:
         """Publish ``chat_result_ready`` and queue a delayed result push.
 
         The reply to a loop stop note is not announced: the engine's own notice
-        already is, and the reply must not make a second notification.
+        already is, and the reply must not make a second notification. Nor is a
+        turn of a Workspace care run: the dispatcher announces the run once, when
+        it records the outcome (``announce_schedule_run_end``).
         """
         if chat_id in self._stop_notice_chats:
             return
         chat = self._chats.get(chat_id)
         if chat is not None and self._loop_run_will_stop(chat):
+            return
+        if chat is not None and self._care_run_turn(chat):
             return
         self._publish_result_ready(chat_id, project_id, title, snippet)
 
@@ -9430,6 +9435,41 @@ class ProjectChatManager:
             "quiet_loop_run": chat is not None and self._loop_run_quiet(chat),
         })
         self._schedule_push(chat_id, title, snippet)
+
+    @staticmethod
+    def _care_run_turn(chat: ChatInfo) -> bool:
+        """True when the chat's latest turn belongs to a scheduled Workspace care run.
+
+        The care run is an orchestrator: its first reply only plans, and every
+        subagent that finishes wakes it for another turn (origin
+        ``background_run``). None of those turns is a result for the person, so
+        none is announced; the dispatcher raises the run's one notification with
+        its outcome. Wake turns are skipped back to the turn that started the
+        work: a scheduled one is the run's, while a typed one (the person
+        talking to the care chat) is announced as usual. Questions and approval
+        requests are not results and keep their own notifications.
+        """
+        if not is_care_schedule_id(chat.schedule_id):
+            return False
+        for index in range(chat.user_turn_count - 1, -1, -1):
+            origin = str(chat.user_turn_origin.get(str(index)) or "")
+            if origin != "background_run":
+                return origin == "schedule"
+        return False
+
+    def announce_schedule_run_end(self, chat_id: str, text: str) -> None:
+        """Raise a schedule run's one notification, with its outcome, now.
+
+        Any result still parked or queued for the chat is dropped first, so the
+        run's own turns can never add a second notification after this one.
+        """
+        chat = self._chats.get(chat_id)
+        try:
+            self._cancel_pending_push(chat_id)
+            self._discard_result_announce(chat_id)
+            self._publish_notice(chat_id, chat, text)
+        except Exception:
+            logger.exception("Schedule run notice could not be published for %s", chat_id)
 
     def note_unattended_denial(self, chat_id: str) -> None:
         """A permission request was denied for an unattended turn of this chat."""
@@ -9485,7 +9525,7 @@ class ProjectChatManager:
         text = loop_wake.loop_stop_text(denied_tool)
         try:
             self._cancel_pending_push(chat_id)
-            self._publish_stop_notice(chat_id, chat, text)
+            self._publish_notice(chat_id, chat, text)
         except Exception:
             logger.exception("Loop stop notice could not be published for %s", chat_id)
         if chat is None or chat.archived:
@@ -9495,8 +9535,8 @@ class ProjectChatManager:
         except Exception:
             logger.exception("Loop stop note could not be delivered to %s", chat_id)
 
-    def _publish_stop_notice(self, chat_id: str, chat: ChatInfo | None, text: str) -> None:
-        """The one user notification of a stop: the banner event and the push, now."""
+    def _publish_notice(self, chat_id: str, chat: ChatInfo | None, text: str) -> None:
+        """An engine-written notification: the banner event and the push, now."""
         title = chat.title if chat is not None else "Ciaobot"
         self._events.publish({
             "type": "chat_result_ready",

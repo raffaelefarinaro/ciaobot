@@ -96,6 +96,7 @@ from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
 from ciao.schedule_command import normalize_schedule_command
 from ciao.schedules import (
+    CARE_SCHEDULE_BASE_ID,
     DEFAULT_INTERVAL_MINUTES,
     DEFAULT_TIMEZONE,
     FREQUENCIES,
@@ -106,6 +107,7 @@ from ciao.schedules import (
     ScheduleStoreCorrupt,
     compute_last_expected_run,
     compute_next_run,
+    is_care_schedule_id,
     is_interval,
     normalize_archive_policy,
     normalize_days_of_week,
@@ -113,7 +115,6 @@ from ciao.schedules import (
     publish_automations_changed,
     run_failed_since,
     stamp_fallback_project,
-    system_base_id,
     system_schedule_id,
     wall_clock_time_error,
     wall_clock_time_value_error,
@@ -4254,11 +4255,6 @@ async def vault_graph(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=503)
 
 
-# The packaged Workspace care routine, fanned out per workspace
-# (`system-memory-curation@<workspace>`).
-CARE_SCHEDULE_BASE_ID = "system-memory-curation"
-
-
 def _care_display_path(config: CiaoConfig, path: Path) -> str:
     """The path the file viewer opens: workspace-relative when it can be."""
     try:
@@ -5474,7 +5470,7 @@ async def run_schedule_now(request: Request) -> JSONResponse:
             return JSONResponse({"error": refusal}, status_code=400)
         # Workspace care rebuilds and ticks one report file; a second run on top
         # of a live one would rewrite the checklist under it.
-        if system_base_id(entry.schedule_id) == CARE_SCHEDULE_BASE_ID and entry.last_status == "running":
+        if is_care_schedule_id(entry.schedule_id) and entry.last_status == "running":
             return JSONResponse({"error": "already running"}, status_code=409)
     try:
         result = await sm.dispatch_now(schedule_id)

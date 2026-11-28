@@ -111,6 +111,8 @@ class _ScheduleHost:
         self.follow_up_pending = False
         self.follow_up_checks = 0
         self.stops = 0
+        # What the dispatcher handed the run-end notifier.
+        self.run_end_notices: list[tuple[str, str]] = []
 
     @property
     def events(self) -> EventsHub:
@@ -217,6 +219,9 @@ class _ScheduleHost:
     def _stop_count(self, chat_id: str) -> int:
         del chat_id
         return self.stops
+
+    def announce_schedule_run_end(self, chat_id: str, text: str) -> None:
+        self.run_end_notices.append((chat_id, text))
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         self.archives.append(chat_id)
