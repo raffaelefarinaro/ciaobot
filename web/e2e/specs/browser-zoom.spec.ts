@@ -43,7 +43,7 @@ test.describe('zoom and text scaling', () => {
     ).toBeLessThanOrEqual(0)
   })
 
-  test('the phone drawer shows the 30px vector brand mark', async ({ page }) => {
+  test('the phone drawer shows the 27px vector brand mark', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await boot(page)
     await page.getByRole('button', { name: 'Open sidebar', exact: true }).click()
@@ -52,6 +52,8 @@ test.describe('zoom and text scaling', () => {
     await expect(brand).toHaveAttribute('aria-label', 'Reload Ciaobot')
     await expect(brand.locator('svg path')).toHaveAttribute('stroke', 'currentColor')
     await expect(brand.locator('svg circle')).toHaveCount(2)
+    await expect(brand.locator('svg')).toHaveCSS('width', '27px')
+    await expect(brand.locator('svg')).toHaveCSS('height', '27px')
     await expect(brand).toHaveCSS('width', '30px')
     await expect(brand).toHaveCSS('height', '30px')
     const box = await brand.boundingBox()

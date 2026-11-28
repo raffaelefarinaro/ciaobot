@@ -80,17 +80,24 @@ async function reload() {
 
 <style scoped>
 .brand {
-  display: block;
+  display: grid;
+  place-items: center;
   box-sizing: content-box;
+  /* The mark draws at 27px (90% of the 30px layout box); the box keeps the
+     mark's position, the row spacing and a 44px touch target unchanged. */
   width: 30px;
   height: 30px;
   flex: none;
-  /* A 44px touch target around the 30px mark without moving it. */
   padding: calc((var(--touch) - 30px) / 2);
   margin: calc((30px - var(--touch)) / 2);
   border: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
+}
+
+.brand :deep(.ciao-mark) {
+  width: 27px;
+  height: 27px;
 }
 </style>
