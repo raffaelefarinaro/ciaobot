@@ -79,13 +79,21 @@
           </select>
           <p class="mm-toolbar-stats" aria-label="Vault">
             <span><strong>{{ mm.visibleNodes.length.toLocaleString() }}</strong> notes</span>
-            <span><strong>{{ mm.edges.length.toLocaleString() }}</strong> links</span>
-            <span><strong>{{ mm.orphanNotes.length.toLocaleString() }}</strong> unlinked</span>
-            <span
+            <span><strong>{{ mm.visibleEdgeCount.toLocaleString() }}</strong> links</span>
+            <span><strong>{{ mm.orphanCount.toLocaleString() }}</strong> unlinked</span>
+            <!-- The number is the one figure worth acting on: pressing it
+                 narrows the map and the list to those notes, pressing it again
+                 brings the rest back. -->
+            <button
               v-if="mm.staleNotes.length"
-              class="mm-toolbar-stale"
-              title="Notes unchecked past their type's limit"
-            ><strong>{{ mm.staleNotes.length.toLocaleString() }}</strong> unchecked</span>
+              type="button"
+              class="mm-toolbar-stale mm-stat-btn"
+              :class="{ active: mm.staleFilter }"
+              :aria-pressed="mm.staleFilter"
+              :aria-label="`${mm.staleNotes.length} notes not checked for a long time: ${mm.staleFilter ? 'show all notes' : 'show them'}`"
+              :title="mm.staleFilter ? 'Notes not checked for a long time: show all notes' : 'Notes not checked for a long time: show them'"
+              @click="mm.toggleStaleFilter()"
+            ><strong>{{ mm.staleNotes.length.toLocaleString() }}</strong> unchecked</button>
             <!-- A second, separate figure, and it is not a subset of the first.
                  "Unchecked" counts notes whose own date is old; this counts notes
                  holding at least one fact nobody has re-checked, which is how a
@@ -1849,33 +1857,52 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 /* Wraps rather than scrolls, so a narrow pane stacks the controls and the
-   vault's numbers drop to their own line. */
+   vault's numbers drop to their own line, left-aligned under the controls. */
 .mm-toolbar {
   flex: none;
-  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3);
-  padding: var(--space-2) var(--space-5);
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--page-inset);
   border-bottom: 1px solid var(--border);
 }
 .mm-toolbar-stats {
   margin: 0 0 0 auto;
-  display: flex; flex-wrap: wrap; gap: 2px var(--space-4);
+  min-width: 0;
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--space-1) var(--space-4);
   color: var(--fg3); font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
 }
-.mm-toolbar-stats strong { color: var(--fg); font-weight: 600; }
-.mm-toolbar-stale {
-  color: var(--warning);
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--warning) 45%, transparent);
-  text-underline-offset: 3px;
+/* Each figure is one unit: wrapping between "with" and "facts unchecked"
+   would split a label across two lines while the toolbar stacks. */
+.mm-toolbar-stats > span {
+  display: inline-flex; align-items: baseline; gap: var(--space-1);
+  white-space: nowrap;
 }
-.mm-toolbar-stale strong { color: inherit; }
+/* The labels stay quiet; the figures are normal weight and tabular so the
+   row reads as one column of numbers rather than five bold claims. */
+.mm-toolbar-stats strong {
+  color: var(--fg2);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.mm-stat-btn {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  padding: 3px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg3);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 120ms var(--ease), border-color 120ms var(--ease), background 120ms var(--ease);
+}
+.mm-stat-btn:hover { color: var(--fg2); border-color: var(--border-strong); background: var(--bg3); }
+.mm-stat-btn.active { color: var(--fg); background: var(--bg3); border-color: var(--accent); }
+.mm-stat-btn.active strong { color: inherit; }
 @media (pointer: coarse) {
-  /* inline-block, not flex: flex items drop the space in "<strong>N</strong> unchecked". */
-  .mm-toolbar-stale {
-    display: inline-block;
-    line-height: var(--touch);
-  }
+  .mm-stat-btn { min-height: var(--touch); padding-inline: var(--space-3); }
 }
 
 /* Facts unchecked inside notes, in the toolbar. Quieter than the note-level
@@ -1884,11 +1911,14 @@ onBeforeUnmount(() => {
    toolbar where both shout is a toolbar where neither is read. */
 .mm-toolbar-entries { color: var(--fg3); cursor: default; }
 .mm-toolbar-entries strong { color: var(--fg2); }
-.mm-list-wrap { padding: 0 var(--space-5) var(--space-5); }
-@media (max-width: 700px) {
-  .mm-toolbar { padding-inline: var(--space-4); }
-  .mm-toolbar-stats { margin-left: 0; width: 100%; }
-  .mm-list-wrap { padding-inline: var(--space-4); }
+.mm-list-wrap { padding: 0 var(--page-inset) var(--space-5); }
+/* A mid-width pane cannot hold the controls and five figures on one line: the
+   numbers take a line of their own and keep the controls' left edge. */
+@container chat-pane (max-width: 860px) {
+  .mm-toolbar-stats { margin-left: 0; flex-basis: 100%; }
+}
+@container chat-pane (max-width: 640px) {
+  .mm-stat-btn { min-height: var(--touch); padding-inline: var(--space-3); }
 }
 
 .mm-filter {

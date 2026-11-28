@@ -760,16 +760,26 @@ describe('MemoryMapView stale notes', () => {
     wrapper.unmount()
   })
 
-  it('counts the stale notes in the toolbar as plain text', async () => {
+  it('counts the stale notes in the toolbar and offers them as a filter', async () => {
     const wrapper = await mountView('/memory/map')
     await flushPromises()
     await nextTick()
 
     const mm = useMemoryMapStore()
     expect(mm.staleNotes.map(n => n.title)).toEqual(['Old', 'Untouched'])
-    const stat = wrapper.get('.mm-toolbar-stale')
-    expect(stat.text()).toContain('2')
-    expect(stat.element.tagName).toBe('SPAN')
+    const button = wrapper.get('button.mm-toolbar-stale')
+    expect(button.text()).toContain('2')
+    expect(button.attributes('aria-pressed')).toBe('false')
+    expect(button.attributes('title')).toBe('Notes not checked for a long time: show them')
+
+    await button.trigger('click')
+    expect(mm.staleFilter).toBe(true)
+    expect(button.attributes('aria-pressed')).toBe('true')
+    expect(mm.visibleNodes.map(n => n.id).sort()).toEqual(['old', 'untouched'])
+
+    await button.trigger('click')
+    expect(mm.staleFilter).toBe(false)
+    expect(mm.visibleNodes).toHaveLength(3)
     wrapper.unmount()
   })
 })

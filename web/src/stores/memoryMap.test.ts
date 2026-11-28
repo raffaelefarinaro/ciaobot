@@ -186,6 +186,25 @@ describe('staleness', () => {
     expect(mm.staleNotes).not.toContain(mm.nodesById.get('fresh'))
   })
 
+  test('the unchecked filter keeps only notes past their horizon, and toggles back', () => {
+    const mm = useMemoryMapStore()
+    mm.nodes = [
+      node('mid', 1, { stale: true, ageDays: 100 }),
+      node('fresh', 0),
+      node('old', 1, { stale: true, ageDays: 400 }),
+    ]
+    mm.edges = []
+    mm.resetCategories()
+    // The figure the button shows is computed before this filter, so it keeps
+    // saying how many notes there are while the filter is on.
+    mm.toggleStaleFilter()
+    expect(mm.staleFilter).toBe(true)
+    expect(mm.visibleNodes.map(n => n.id).sort()).toEqual(['mid', 'old'])
+    expect(mm.staleNotes).toHaveLength(2)
+    mm.toggleStaleFilter()
+    expect(mm.visibleNodes).toHaveLength(3)
+  })
+
   test('ageLabelOf stays quiet about notes with no usable date', () => {
     const mm = useMemoryMapStore()
     expect(mm.ageLabelOf(node('a', 0, { ageDays: 400 }))).toBe('1.1y')

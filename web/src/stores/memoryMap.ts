@@ -216,6 +216,13 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     set: (v: boolean) => { orphanFilter.value = v ? 'hide' : 'all' },
   })
   /**
+   * The toolbar's "unchecked" figure is the door to the notes behind it: on,
+   * the drawing and the list keep only notes past their type's review
+   * horizon. Off by default, and the count itself is computed before this
+   * filter so the button keeps saying how many there are while it is on.
+   */
+  const staleFilter = ref(false)
+  /**
    * Which surface the memory page shows. The switcher itself lives in the
    * sidebar next to the workspace toggle, so this state is shared between
    * `ProjectSidebar` (the buttons) and `MemoryMapView` (the surfaces).
@@ -284,6 +291,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     if (search.value.trim() && !matchesSearch(n, search.value)) return false
     if (orphanFilter.value === 'hide' && n.degree === 0) return false
     if (orphanFilter.value === 'only' && n.degree !== 0) return false
+    if (staleFilter.value && !n.stale) return false
     return true
   }
 
@@ -543,6 +551,9 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   function setOrphanFilter(v: 'all' | 'hide' | 'only') {
     orphanFilter.value = v
   }
+  function toggleStaleFilter() {
+    staleFilter.value = !staleFilter.value
+  }
   function toggleCategory(key: string) {
     if (activeCats.has(key)) activeCats.delete(key)
     else activeCats.add(key)
@@ -656,7 +667,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     mostConnected, selectedNode,
     orphanNotes, recentNotes, staleNotes, entryStaleNotes, ageLabelOf,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
-    toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter,
+    toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter, staleFilter, toggleStaleFilter,
     selectNode, requestFocus, requestFocusOnOpen, consumePendingFocus, resolveNodeId,
     handleNodeClick, deleteNote,
     graphIsWarm, markGraphWarm, ensureGraph,

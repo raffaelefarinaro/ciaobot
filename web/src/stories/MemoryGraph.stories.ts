@@ -39,7 +39,7 @@ function renderState(state: 'graph-dense' | 'graph-selection') {
             },
           }, 'Fixture: show a note on the map')
           : null,
-        h('div', { ref: host }),
+        h('div', { ref: host, style: 'container: chat-pane / inline-size' }),
         h('p', { role: 'status' }, `Fixture requests: ${fixture.value?.boundary.requests.length ?? 0}. Violations: ${fixture.value?.boundary.violations.length ?? 0}.`),
         error.value ? h('p', { role: 'alert' }, error.value) : null,
         ...(fixture.value?.boundary.violations ?? []).map((message) => h('p', { role: 'alert' }, message)),
