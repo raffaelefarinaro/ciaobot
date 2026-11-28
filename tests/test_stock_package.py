@@ -968,6 +968,8 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
     assert _run_self_check(tmp_path, head + long_path + "\n") == []
     # The tail is read as the parser reads it: any case, trailing space. A hyphenated word is not a step id.
     assert _run_self_check(tmp_path, head + "1. A peer-review proposal is ready. (Path: AGENTS.md) \n") == []
+    # A real note is a fine path; only the report itself is refused.
+    assert _run_self_check(tmp_path, head + "1. Links in People/User.md and 3 other notes point outside this vault. Decide whether each should stay. (path: People/User.md)\n") == []
     # Each rule bites on its own.
     for bad in (
         "1. Hygiene [!] stayed blocked. (path: Workspace/Care-Report.md)",
@@ -980,8 +982,19 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
         "1. The closed-tasks pass read three tasks. (path: AGENTS.md)",
         "1. " + "word " * 60 + "(path: AGENTS.md)",
         "1. Choose Optimize to trim it together.",
+        "1. 5 files have no header. Decide whether to ignore their folder. (path: Workspace/Care-Report.md)",
+        "1. Links point outside this vault. Decide what to keep. (Path: Workspace/Care-Report.md) ",
     ):
         assert _run_self_check(tmp_path, head + bad + "\n") == [bad], bad
+
+
+def test_hygiene_items_point_at_a_real_note_never_the_report() -> None:
+    hygiene = _reference("curation-pass-6-hygiene.md")
+    assert "Never point an item at `Workspace/Care-Report.md`" in hygiene
+    assert "(path: Workspace/Care-Report.md)" not in hygiene
+    assert "Choose Fix with a chat" not in hygiene
+    preamble = _reference("step-preamble.md")
+    assert "A path is never `Workspace/Care-Report.md`" in preamble
 
 
 def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:
