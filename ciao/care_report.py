@@ -40,6 +40,7 @@ MAX_NEEDS = 20
 MAX_NOTES = 20
 MAX_FIELD_CHARS = 600
 MAX_PATH_CHARS = 240
+MAX_SECTION_CHARS = 80
 
 # The step files the care prompt dispatches (ciao/stock/schedules.json, step 2),
 # under the durable-memory procedures' `references/` folder. A test keeps this
@@ -75,8 +76,15 @@ _LIST_ITEM = re.compile(r"^\s*(?:\d{1,3}[.)]|[-*+])\s+(.*)$")
 # What a model writes for "no ids" instead of leaving the line out.
 _PLACEHOLDERS = {"none", "n/a", "na", "-", "\u2014", "empty", "nothing"}
 _BOLD_LEAD = re.compile(r"^\*\*(.+?)\*\*\s*[:\-\u2014]?\s*(.*)$")
-# The machine-readable tail of a needs-you item: `(path: Workspace/Unsure.md)`.
-_PATH_TAIL = re.compile(r"\s*\(path:\s*`?([^()`]*?)`?\s*\)\s*\.?\s*$", re.IGNORECASE)
+# The machine-readable tail of a needs-you item: `(path: People/User.md)`, the
+# path and the report section holding the item's details
+# (`(path: People/User.md; section: Hygiene)`), or the section alone
+# (`(section: Hygiene)`). A path never holds `;` (see _PATH_ASCII), so the
+# first `; section:` ends it.
+_TAIL = re.compile(
+    r"\s*\((?:path:\s*`?([^()`]*?)`?\s*(?:;\s*section:\s*([^()`;]*?)\s*)?|section:\s*([^()`;]*?)\s*)\)\s*\.?\s*$",
+    re.IGNORECASE,
+)
 _NEEDS_LEAD = re.compile(r"^needs you:\s*", re.IGNORECASE)
 # A file name ends in an extension: `ciao memory status` is a command, not a file.
 _FILE_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,10}$")
@@ -157,6 +165,20 @@ def vault_relative_path(raw: str) -> str:
     return value
 
 
+def report_section(raw: str) -> str:
+    """`raw` as the name of a heading in the care report, or "" when it is not one.
+
+    The name opens the report at that heading, so it is plain words only: the
+    leading `#` marks and surrounding space are dropped, and anything longer
+    than a heading may be, or holding a character a vault path may not (a
+    slash, a bracket, a control or bidi character), gives no section.
+    """
+    value = " ".join(raw.strip().strip("`").strip().lstrip("#").split())
+    if not value or len(value) > MAX_SECTION_CHARS:
+        return ""
+    return value if all(_path_char(ch) for ch in value) else ""
+
+
 def _path_char(ch: str) -> bool:
     if ch in _PATH_ASCII:
         return True
@@ -204,24 +226,29 @@ def _first_sentence(text: str) -> tuple[str, str]:
 def _needs_item(text: str) -> dict[str, str]:
     """One needs-you item: a short title, the rest, and the file it points at.
 
-    The care prompt asks for `<plain sentence> (path: <vault-relative path>)`.
-    The title is the first sentence (or a bold lead), the detail the rest, and
-    `path` the tail's path once :func:`vault_relative_path` accepted it; an
-    unsafe path is "", and the app then offers no file to open. An item with no
-    tail (a model that missed the standard) takes its first backticked vault
-    path instead, and its text loses the backticks the page would show raw.
+    The care prompt asks for `<plain sentence> (path: <vault-relative path>)`,
+    optionally with `; section: <report heading>` after the path, or
+    `(section: <report heading>)` alone. The title is the first sentence (or a
+    bold lead), the detail the rest, `path` the tail's path once
+    :func:`vault_relative_path` accepted it, and `section` the heading once
+    :func:`report_section` accepted it; an unsafe value is "", and the app then
+    offers nothing for it. An item with no tail (a model that missed the
+    standard) takes its first backticked vault path instead, and its text loses
+    the backticks the page would show raw.
     """
     text = _NEEDS_LEAD.sub("", " ".join(text.split()))
-    tail = _PATH_TAIL.search(text)
+    tail = _TAIL.search(text)
+    section = ""
     if tail:
-        path = vault_relative_path(tail.group(1))
+        path = vault_relative_path(tail.group(1) or "")
+        section = report_section(tail.group(2) or tail.group(3) or "")
         text = text[: tail.start()].rstrip()
     else:
         path = backticked_path(text)
         text = text.replace("`", "")
     bold = _BOLD_LEAD.match(text)
     title, detail = (bold.group(1), bold.group(2)) if bold else _first_sentence(text)
-    return {"title": _clip(title.strip()), "detail": _clip(detail.strip()), "path": path}
+    return {"title": _clip(title.strip()), "detail": _clip(detail.strip()), "path": path, "section": section}
 
 
 def parse_care_report(text: str) -> dict[str, Any]:

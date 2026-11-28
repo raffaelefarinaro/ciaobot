@@ -162,6 +162,23 @@ test.describe('Workspace care', () => {
     await expect(page.getByRole('button', { name: 'Fix Hygiene with a chat' })).toBeVisible()
   })
 
+  test('See details opens the report at the item\'s section, scrolled to and marked', async ({ page }) => {
+    await answerCare(page, careReports.needsYou)
+    const filler = Array.from({ length: 60 }, (_, i) => `- [x] step-${i}: something that was done`).join('\n')
+    const report = `# Care report 2026-11-27\n\n${filler}\n\n## What needs you\n\n1. An item.\n\n## Hygiene\n\n- index rebuilt; audit exit 1, 4 findings before, 4 after; fixed 0\n- A link in People/User.md points outside this vault.\n`
+    await page.route(/\/api\/workspace-file\?/, route => route.fulfill({ body: report, contentType: 'text/plain' }))
+    await boot(page, '/memory/care', '.mc-need')
+    await page.locator('.mc-need').nth(3).getByRole('button', { name: /^See details: / }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    const heading = dialog.getByRole('heading', { name: 'Hygiene', exact: true })
+    // The mark stays for the open; the tint is brief and is covered by the viewer's unit test.
+    await expect(heading).toHaveAttribute('data-fv-target', '')
+    await expect(heading).toBeInViewport()
+    await expect(dialog.getByRole('heading', { name: /^Care report/ })).not.toBeInViewport()
+    await page.screenshot({ path: 'test-results/workspace-care-see-details.png' })
+  })
+
   test('what needs you leads and the steps and notes fold below it', async ({ page }) => {
     await answerCare(page, careReports.needsYou)
     await boot(page, '/memory/care', '.mc-need')
@@ -171,11 +188,15 @@ test.describe('Workspace care', () => {
     await expect(needs.nth(0).getByRole('button', { name: /^Review proposal: / })).toBeVisible()
     await expect(needs.nth(1).getByRole('button', { name: /^Optimize: / })).toBeVisible()
     await expect(needs.nth(2).getByRole('button', { name: /^Open Unsure: / })).toBeVisible()
-    await expect(needs.nth(3).getByRole('button', { name: /^Open report: / })).toBeVisible()
-    // Proposal, guide and Unsure have one destination each; only the report file keeps a chat.
-    for (const i of [0, 1, 2]) await expect(needs.nth(i).getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(0)
-    await expect(needs.nth(3).getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(1)
-    await expect(page.getByRole('button', { name: /^Fix with a chat: / })).toHaveCount(1)
+    // A real note is decided in a chat, with Open note and its report section beside it.
+    for (const name of [/^Decide in a chat: /, /^Open note: /, /^See details: /]) {
+      const control = needs.nth(3).getByRole('button', { name })
+      await expect(control).toBeVisible()
+      expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    }
+    // Proposal, guide and Unsure have one destination each and offer no chat.
+    for (const i of [0, 1, 2]) await expect(needs.nth(i).getByRole('button', { name: /^(Decide in|Fix with) a chat: / })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^(Decide in|Fix with) a chat: / })).toHaveCount(1)
     const steps = page.locator('details.mc-disclosure').first()
     await expect(steps).not.toHaveAttribute('open', '')
     await expect(page.locator('.mc-step').first()).toBeHidden()

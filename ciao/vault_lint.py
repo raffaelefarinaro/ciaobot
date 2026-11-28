@@ -115,8 +115,39 @@ class VaultTraversalError(RuntimeError):
         super().__init__(f"vault traversal failed: {detail}")
 
 
+# Files the engine and the stock care steps write at `Workspace/<name>` (casefolded):
+# machine-owned reports, rule files and ledgers, never notes. Linting them put
+# `Missing header: Workspace/Care-Report.md` into the care run's own hygiene list.
+# Unlike `RESERVED_UNINDEXED_FILES` these stay searchable and in the Memory Map;
+# only the lint skips them as sources (they remain valid link targets, as a
+# `.ciaoignore` match does). `.care-*` ledgers are matched by prefix.
+GENERATED_WORKSPACE_FILES = frozenset(
+    {
+        "care-report.md",
+        "import-report.md",
+        "learnings.md",
+        "memory-consolidations.md",
+        "memory-review-rules.md",
+        "observations.md",
+        "task-rules.md",
+        "unsure.md",
+    }
+)
+_GENERATED_WORKSPACE_PREFIX = ".care-"
+
+
+def is_generated_workspace_file(relative: Path) -> bool:
+    parts = relative.parts
+    if len(parts) not in {2, 3} or parts[-2].casefold() != "workspace":
+        return False
+    name = parts[-1].casefold()
+    return name in GENERATED_WORKSPACE_FILES or name.startswith(_GENERATED_WORKSPACE_PREFIX)
+
+
 def _is_excluded(relative: Path) -> bool:
     if any(part in EXCLUDE_DIRS for part in relative.parts):
+        return True
+    if is_generated_workspace_file(relative):
         return True
     # The memory pipeline's own paperwork — the review queue included — is a
     # projection of state, not a note. Linting it reported the queue as an

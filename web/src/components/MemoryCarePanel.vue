@@ -44,8 +44,9 @@
               <p class="mc-need-title">{{ item.title }}</p>
               <p v-if="item.detail" class="mc-need-detail">{{ item.detail }}</p>
               <div class="mc-need-actions">
+                <!-- A proposal, Unsure and the guide each have one destination that resolves the item. -->
                 <button
-                  v-if="needActionLabel(needAction(item))"
+                  v-if="needChat(item) === 'none' && needActionLabel(needAction(item))"
                   type="button"
                   class="btn-small mc-action"
                   :class="{ 'btn-primary': needAction(item) === 'proposal' }"
@@ -53,15 +54,30 @@
                   :data-path="item.path"
                   @click="act(item)"
                 >{{ needActionLabel(needAction(item)) }}</button>
-                <!-- A proposal, Unsure and the guide each have one destination that resolves the item. -->
+                <!-- Any other item is talked through: with its note pinned when it names one. -->
                 <button
-                  v-if="needCanFix(item)"
+                  v-else-if="needChat(item) !== 'none'"
                   type="button"
-                  class="mc-link mc-fix"
+                  class="btn-small mc-action mc-chat"
+                  :class="{ 'btn-primary': needChat(item) === 'decide' }"
                   :disabled="fixing !== ''"
-                  :aria-label="`Fix with a chat: ${item.title}`"
-                  @click="fixNeed(item, i)"
-                >{{ fixing === `need:${i}` ? 'Opening…' : 'Fix with a chat' }}</button>
+                  :aria-label="`${needChatLabel(needChat(item))}: ${item.title}`"
+                  @click="chatNeed(item, i)"
+                >{{ fixing === `need:${i}` ? 'Opening…' : needChatLabel(needChat(item)) }}</button>
+                <button
+                  v-if="needChat(item) === 'decide'"
+                  type="button"
+                  class="mc-link mc-link--quiet mc-open"
+                  :aria-label="`Open note: ${item.title}`"
+                  @click="act(item)"
+                >Open note</button>
+                <button
+                  v-if="needHasDetails(item)"
+                  type="button"
+                  class="mc-link mc-link--quiet mc-details"
+                  :aria-label="`See details: ${item.title}`"
+                  @click="seeDetails(item)"
+                >See details</button>
               </div>
             </div>
           </li>
@@ -133,8 +149,8 @@ import AppIcon from './AppIcon.vue'
 import CareGlyph from './CareGlyph.vue'
 import CareProposalReview from './CareProposalReview.vue'
 import {
-  careFixSeed, careGlyph, careLastRunWords, careNeedChatTitle, careReportIsStale, careNeedFixSeed, careState, careSummaryMeta, careSummaryTitle, needAction,
-  needActionLabel, needCanFix, openNeeds, stepCanFix, stepGlyph, stepLine, stepName, stepsCountWords, stepsOpenByDefault,
+  careFixSeed, careGlyph, careLastRunWords, careNeedChatTitle, careNeedSeed, careReportIsStale, careState, careSummaryMeta, careSummaryTitle, needAction,
+  needActionLabel, needChat, needChatLabel, needHasDetails, openNeeds, stepCanFix, stepGlyph, stepLine, stepName, stepsCountWords, stepsOpenByDefault,
   stepWord, type CareNeed, type CareStep,
 } from '../lib/careReport'
 import { startFileDiscussion } from '../lib/fileDiscussion'
@@ -249,12 +265,12 @@ watch(proposalPath, async (now, before) => {
   ;(back ?? titleEl.value)?.focus()
 })
 
-/** Open a vault file only once the engine serves it; a gone file gets a calm line. */
-async function openChecked(path: string): Promise<void> {
+/** Open a vault file (at a heading, if named) only once the engine serves it; a gone file gets a calm line. */
+async function openChecked(path: string, heading = ''): Promise<void> {
   try {
     const resp = await fetch(`/api/workspace-file?exact=1&path=${encodeURIComponent(path)}`, { credentials: 'same-origin' })
     if (resp.ok) {
-      void fileViewer.open(path)
+      void (heading ? fileViewer.open(path, null, '', heading) : fileViewer.open(path))
       return
     }
     status.value = resp.status === 404
@@ -287,14 +303,24 @@ async function act(item: CareNeed): Promise<void> {
   if (item.open_path) await openChecked(item.open_path)
 }
 
-async function fixNeed(item: CareNeed, index: number): Promise<void> {
+/** The report, opened at the heading that holds the item's details (its top when it names none). */
+async function seeDetails(item: CareNeed): Promise<void> {
+  const current = report.value
+  if (current) await openChecked(current.report_path, item.section)
+}
+
+/**
+ * Decide in a chat pins the item's note and asks what to do; Fix with a chat
+ * has no note, so it pins the report the item came from.
+ */
+async function chatNeed(item: CareNeed, index: number): Promise<void> {
   const current = report.value
   if (!current || fixing.value) return
   fixing.value = `need:${index}`
   try {
     await startFileDiscussion(store, {
       path: item.open_path || current.report_path,
-      seed: careNeedFixSeed(current, item),
+      seed: careNeedSeed(current, item),
       title: careNeedChatTitle(item),
       workspace: current.workspace,
     })
@@ -437,7 +463,7 @@ button.mc-back { padding: 0; border: 0; background: none; cursor: pointer; font:
 .mc-need-detail, .mc-step-line { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
 .mc-action { margin-top: var(--space-1); min-height: var(--touch); }
 .mc-need-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-4); }
-.mc-fix { margin-top: var(--space-1); }
+.mc-open, .mc-details { margin-top: var(--space-1); }
 /* Straight after the summary there is already a rule: no second one. */
 .mc-status:empty + .mc-disclosure { border-top: 0; margin-top: 0; }
 .mc-steps { border-top: 1px solid var(--border); }
@@ -468,5 +494,8 @@ button.mc-back { padding: 0; border: 0; background: none; cursor: pointer; font:
 @media (pointer: coarse) { .mc-link { min-width: var(--touch); } }
 .mc-link:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
 .mc-link:disabled { color: var(--fg3); cursor: default; }
+/* A secondary way beside an item's button: quiet until hovered. */
+.mc-link--quiet { color: var(--fg2); font-weight: 600; }
+.mc-link--quiet:hover:not(:disabled) { color: var(--fg); }
 .mc-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
 </style>

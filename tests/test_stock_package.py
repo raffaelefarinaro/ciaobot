@@ -900,7 +900,16 @@ def test_the_needs_you_standard_lives_in_the_preamble_and_the_prompt_points_at_i
         text = _reference(name)
         assert "`note: " in text, name
         assert "`needs you: P" not in text, name
-    assert "Choose Optimize to trim it together. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
+    regions = _reference("curation-pass-2-regions.md")
+    assert "Decide what to trim. (path: AGENTS.md)" in regions
+    assert "Choose Optimize" not in regions
+    # The item is written only for a region above 100% of its cap, and names only those.
+    assert "`pct` in `ciao memory status` (`data.regions.*.pct`) of 100.5 or more" in regions
+    assert "Name only the regions with `pct` of 100.5 or more" in regions
+    assert "Never write a percentage of 100% or less" in regions
+    assert "write no item when no region is above 100" in regions
+    assert "(a `note:` is enough for a region from 85 up to 100.5)" in regions
+    assert "at most a `note:`, never a needs-you item" in regions
 
 
 def _self_check_line() -> str:
@@ -948,7 +957,7 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
     assert _run_self_check(tmp_path, head + "\n".join(_REAL_RUN_ITEMS) + notes) == list(_REAL_RUN_ITEMS)
     sample = _reference("curation-report-example.md")
     rewritten = (
-        "1. Your always-loaded memory is nearly full (95% and 92%) and everything in it still matters. Choose Optimize to trim it together. (path: AGENTS.md)",
+        "1. Your always-loaded memory is nearly full (112% and 104%) and everything in it still matters. Decide what to trim. (path: AGENTS.md)",
         "2. 17 suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
         "3. A proposal would remove repeated lines from your guide. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/agents-md-trim-duplicates.md)",
     )
@@ -970,6 +979,9 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
     assert _run_self_check(tmp_path, head + "1. A peer-review proposal is ready. (Path: AGENTS.md) \n") == []
     # A real note is a fine path; only the report itself is refused.
     assert _run_self_check(tmp_path, head + "1. Links in People/User.md and 3 other notes point outside this vault. Decide whether each should stay. (path: People/User.md)\n") == []
+    # The report section holding the details may follow the path, or stand alone when no note fits.
+    assert _run_self_check(tmp_path, head + "1. Links in People/User.md and 3 other notes point outside this vault. Decide whether each should stay. (path: People/User.md; section: Hygiene)\n") == []
+    assert _run_self_check(tmp_path, head + "1. 4 notes have a damaged header. Decide whether to rebuild them. (Section: Hygiene)\n") == []
     # Each rule bites on its own.
     for bad in (
         "1. Hygiene [!] stayed blocked. (path: Workspace/Care-Report.md)",
@@ -984,6 +996,7 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
         "1. Choose Optimize to trim it together.",
         "1. 5 files have no header. Decide whether to ignore their folder. (path: Workspace/Care-Report.md)",
         "1. Links point outside this vault. Decide what to keep. (Path: Workspace/Care-Report.md) ",
+        "1. Links point outside this vault. Decide what to keep. (path: Workspace/Care-Report.md; section: Hygiene)",
     ):
         assert _run_self_check(tmp_path, head + bad + "\n") == [bad], bad
 
@@ -993,8 +1006,13 @@ def test_hygiene_items_point_at_a_real_note_never_the_report() -> None:
     assert "Never point an item at `Workspace/Care-Report.md`" in hygiene
     assert "(path: Workspace/Care-Report.md)" not in hygiene
     assert "Choose Fix with a chat" not in hygiene
+    # Every finding item links to the full list under ## Hygiene.
+    examples = [line for line in hygiene.splitlines() if line.startswith("  - `needs you: ")]
+    assert len(examples) == 3
+    assert all(line.endswith("; section: Hygiene)`") for line in examples), examples
     preamble = _reference("step-preamble.md")
     assert "A path is never `Workspace/Care-Report.md`" in preamble
+    assert "`(path: People/User.md; section: Hygiene)`, or alone, `(section: Hygiene)`" in preamble
 
 
 def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:
@@ -1013,7 +1031,7 @@ def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:
     # Each step that emits an item gives it with its path.
     for name, form in (
         ("curation-pass-1-unsure.md", "need one more step from you, such as adding a category in Settings. Choose Open Unsure to see them. (path: Workspace/Unsure.md)"),
-        ("curation-pass-2-regions.md", "(path: AGENTS.md)`, A and B as whole numbers"),
+        ("curation-pass-2-regions.md", "(path: AGENTS.md)`, as whole numbers"),
         ("curation-pass-3-stale-notes.md", "(path: Workspace/Proposals/<slug>.md)"),
         ("curation-pass-4-learnings.md", "(path: Workspace/Proposals/<slug>.md)"),
         ("curation-pass-6-hygiene.md", "(path: Workspace/Proposals/<slug>.md)"),
