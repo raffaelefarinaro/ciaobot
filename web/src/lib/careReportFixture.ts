@@ -13,10 +13,10 @@ function step(id: string, state: CareStep['state'], what: string, evidence = '',
   return { id, state, what, evidence, verify, step_file: state === 'open' ? '' : `/stock/references/${id}.md` }
 }
 
-/** A needs-you item as the route sends it: vault path, viewer path, proposal status. */
-export function need(title: string, detail: string, path = '', proposalStatus = ''): CareNeed {
+/** A needs-you item as the route sends it: vault path, viewer path, proposal status, report section. */
+export function need(title: string, detail: string, path = '', proposalStatus = '', section = ''): CareNeed {
   const viewer = path && path !== 'AGENTS.md' ? `memory-vault/${CARE_WORKSPACE}/${path}` : ''
-  return { title, detail, path, open_path: viewer, proposal_status: proposalStatus }
+  return { title, detail, path, open_path: viewer, section, proposal_status: proposalStatus }
 }
 
 /** The proposal the needs-you fixture points at. */
@@ -70,7 +70,7 @@ export const careReports = {
       need('A proposal would trim your guide: it removes an outdated status section and a repeated folder path.', 'Choose Review proposal, then Approve or Reject.', CARE_PROPOSAL_PATH, 'draft'),
       need('Your always-loaded memory is nearly full (98% and 95%) and everything in it still matters.', 'Choose Optimize to trim it together.', 'AGENTS.md'),
       need('13 suggestions are waiting in Unsure, such as which brief template to keep, a project\'s status and a new People page.', 'Open Memory > Unsure and approve or reject them.', 'Workspace/Unsure.md'),
-      need('4 notes need a decision the run cannot make alone, such as two notes for one person.', 'Choose Fix with a chat to go through them.', 'Workspace/Care-Report.md'),
+      need('Links in People/User.md and 3 other notes point outside this vault.', 'Decide whether each should stay or be removed.', 'People/User.md', '', 'Hygiene'),
     ],
     notes: [
       'Re-checking older notes did not finish; it tries again on the next run.',

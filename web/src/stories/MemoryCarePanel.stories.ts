@@ -10,8 +10,9 @@ type Canvas = Parameters<NonNullable<StoryObj['play']>>[0]['canvas']
 
 /**
  * Memory → Workspace care over the fail-closed fixture: the production panel
- * reading one synthetic report per state. Fix with a chat opens a chat, which
- * the fixture does not declare, so no play presses it.
+ * reading one synthetic report per state. Decide in a chat and Fix with a chat
+ * open a chat, and Open note and See details open the file viewer, which the
+ * fixture does not declare, so no play presses them.
  */
 function story(report: CareReport | CareReport[] | 'held' | 'failed', options: { narrow?: boolean, extra?: FixtureRoute[], route?: string } = {}) {
   const owner = renderHome(MemoryCarePanel, {
@@ -54,8 +55,12 @@ export const NeedsYou: Story = {
     expect(canvas.getByRole('button', { name: /^Review proposal: A proposal would trim your guide/ })).toBeTruthy()
     expect(canvas.getByRole('button', { name: /^Optimize: Your always-loaded memory/ })).toBeTruthy()
     expect(canvas.getByRole('button', { name: /^Open Unsure: 13 suggestions/ })).toBeTruthy()
-    // A proposal, the guide and Unsure each have one destination, so only the report file's item keeps a chat.
-    expect(canvas.getAllByRole('button', { name: /^Fix with a chat: / })).toHaveLength(1)
+    // A proposal, the guide and Unsure each have one destination; the item about a real note is decided in a chat,
+    // with Open note and its report section beside it, each at the 44px floor.
+    expect(canvas.queryAllByRole('button', { name: /^Fix with a chat: / })).toHaveLength(0)
+    for (const name of [/^Decide in a chat: Links in People\/User\.md/, /^Open note: Links/, /^See details: Links/]) {
+      expect(canvas.getByRole('button', { name }).getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
+    }
     // Steps and Notes are folded: the step words are not shown until opened.
     const steps = canvas.getByText('Steps').closest('details') as HTMLDetailsElement
     expect(steps.open).toBe(false)

@@ -43,6 +43,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // attachment opens by URL, which `/api/workspace-image` cannot resolve.
   const imageUrl = ref('')
   const line = ref<number | null>(null)
+  // A heading the open lands on in a Markdown file ('' for none): the viewer
+  // scrolls to it once and marks it briefly.
+  const heading = ref('')
   const content = ref('')
   const loading = ref(false)
   const error = ref('')
@@ -195,6 +198,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     sourceError.value = ''
     sourceLoaded.value = false
     line.value = null
+    heading.value = ''
     content.value = ''
     error.value = ''
     loading.value = false
@@ -241,13 +245,16 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     filePath: string,
     lineNumber: number | null = null,
     chat: string = '',
+    atHeading: string = '',
   ): Promise<boolean> {
     if (!filePath || !await canReplaceOpenFile(filePath)) return false
-    if (lineNumber === null && await dockInstead(filePath, chat)) return true
+    // A line or a heading to land on keeps the viewer: the docked tile has neither.
+    if (lineNumber === null && !atHeading && await dockInstead(filePath, chat)) return true
     _reset()
     isOpen.value = true
     path.value = filePath
     line.value = lineNumber
+    heading.value = atHeading
     chatId.value = chat
     // Provisional until the chat path resolves, so the window opens at its
     // final size (the prose width or the wide one) instead of resizing.
@@ -609,6 +616,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     path,
     imageUrl,
     line,
+    heading,
     content,
     loading,
     error,

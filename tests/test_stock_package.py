@@ -970,6 +970,9 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
     assert _run_self_check(tmp_path, head + "1. A peer-review proposal is ready. (Path: AGENTS.md) \n") == []
     # A real note is a fine path; only the report itself is refused.
     assert _run_self_check(tmp_path, head + "1. Links in People/User.md and 3 other notes point outside this vault. Decide whether each should stay. (path: People/User.md)\n") == []
+    # The report section holding the details may follow the path, or stand alone when no note fits.
+    assert _run_self_check(tmp_path, head + "1. Links in People/User.md and 3 other notes point outside this vault. Decide whether each should stay. (path: People/User.md; section: Hygiene)\n") == []
+    assert _run_self_check(tmp_path, head + "1. 4 notes have a damaged header. Decide whether to rebuild them. (Section: Hygiene)\n") == []
     # Each rule bites on its own.
     for bad in (
         "1. Hygiene [!] stayed blocked. (path: Workspace/Care-Report.md)",
@@ -984,6 +987,7 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
         "1. Choose Optimize to trim it together.",
         "1. 5 files have no header. Decide whether to ignore their folder. (path: Workspace/Care-Report.md)",
         "1. Links point outside this vault. Decide what to keep. (Path: Workspace/Care-Report.md) ",
+        "1. Links point outside this vault. Decide what to keep. (path: Workspace/Care-Report.md; section: Hygiene)",
     ):
         assert _run_self_check(tmp_path, head + bad + "\n") == [bad], bad
 
@@ -993,8 +997,13 @@ def test_hygiene_items_point_at_a_real_note_never_the_report() -> None:
     assert "Never point an item at `Workspace/Care-Report.md`" in hygiene
     assert "(path: Workspace/Care-Report.md)" not in hygiene
     assert "Choose Fix with a chat" not in hygiene
+    # Every finding item links to the full list under ## Hygiene.
+    examples = [line for line in hygiene.splitlines() if line.startswith("  - `needs you: ")]
+    assert len(examples) == 3
+    assert all(line.endswith("; section: Hygiene)`") for line in examples), examples
     preamble = _reference("step-preamble.md")
     assert "A path is never `Workspace/Care-Report.md`" in preamble
+    assert "`(path: People/User.md; section: Hygiene)`, or alone, `(section: Hygiene)`" in preamble
 
 
 def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:

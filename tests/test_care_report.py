@@ -150,6 +150,35 @@ def test_an_unsafe_path_is_dropped_not_followed(raw: str) -> None:
     assert item["title"] == "Look at it."
 
 
+@pytest.mark.parametrize(
+    ("line", "path", "section"),
+    [
+        ("Links point outside this vault. Decide what stays. (path: People/User.md; section: Hygiene)", "People/User.md", "Hygiene"),
+        ("Links point outside this vault. Decide what stays. (path: `People/User.md`; Section: ## Hygiene).", "People/User.md", "Hygiene"),
+        ("Links point outside this vault. Decide what stays. (section: Hygiene)", "", "Hygiene"),
+        ("Links point outside this vault. Decide what stays. (Section:  Daily   care )", "", "Daily care"),
+        ("Links point outside this vault. Decide what stays. (path: People/User.md)", "People/User.md", ""),
+        # An unsafe path keeps a safe section, and the other way round.
+        ("Links point outside this vault. Decide what stays. (path: ../x.md; section: Hygiene)", "", "Hygiene"),
+        ("Links point outside this vault. Decide what stays. (path: People/User.md; section: Hy/giene)", "People/User.md", ""),
+        ("Links point outside this vault. Decide what stays. (path: People/User.md; section: Hy\u202egiene)", "People/User.md", ""),
+        ("Links point outside this vault. Decide what stays. (path: People/User.md; section: " + "x" * 81 + ")", "People/User.md", ""),
+        # A path never holds `;`: anything else after one is not a path.
+        ("Links point outside this vault. Decide what stays. (path: People/User.md; other: x)", "", ""),
+    ],
+)
+def test_the_tail_may_name_the_report_section_holding_the_details(line: str, path: str, section: str) -> None:
+    item = parse_care_report(f"- [x] a: b\n## What needs you\n1. {line}\n")["needs_you"][0]
+    assert (item["path"], item["section"]) == (path, section)
+    assert item["title"] == "Links point outside this vault."
+    assert item["detail"] == "Decide what stays."
+
+
+def test_an_item_with_no_tail_has_no_section() -> None:
+    needs = parse_care_report(STANDARD)["needs_you"]
+    assert [n["section"] for n in needs] == ["", "", "", ""]
+
+
 @pytest.mark.parametrize("raw", ["Workspace/Unsure.md", "People/Rae Smith.md", "`AGENTS.md`", "Projects/Atlas 2026.md", "People/Zoë Ruiz.md"])
 def test_a_vault_relative_path_is_kept(raw: str) -> None:
     assert care_report.vault_relative_path(raw) == raw.strip("`")

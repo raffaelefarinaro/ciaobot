@@ -372,6 +372,7 @@ import { useArtifactSelection } from '../composables/useArtifactSelection'
 import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import { startFileDiscussion } from '../lib/fileDiscussion'
+import { findHeading } from '../lib/markdownHeadings'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
 import { handleAppLinkClick } from '../lib/appLinks'
@@ -570,7 +571,32 @@ function scrollToHighlight(id: string): void {
   }
 }
 
+// The load whose heading has been landed on: the heading is scrolled to once,
+// not again each time a comment or the rendered text changes.
+let headingShownFor = -1
+
+/**
+ * Open at a heading (`store.heading`): scroll it to the top of the body and
+ * tint it briefly. With reduced motion the jump is instant and the tint holds
+ * still. A heading the note does not have leaves the note at its top.
+ */
+function scrollToHeading(): void {
+  if (!bodyEl.value || !mdEl.value || headingShownFor === store.loadToken) return
+  const el = findHeading(mdEl.value, store.heading)
+  if (!el) return
+  headingShownFor = store.loadToken
+  const still = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const top = bodyEl.value.scrollTop + el.getBoundingClientRect().top - bodyEl.value.getBoundingClientRect().top - 16
+  bodyEl.value.scrollTo({ top: Math.max(top, 0), behavior: still ? 'auto' : 'smooth' })
+  el.classList.add('fv-heading-target')
+  window.setTimeout(() => el.classList.remove('fv-heading-target'), 1600)
+}
+
 function scrollToTarget(): void {
+  if (store.heading) {
+    scrollToHeading()
+    return
+  }
   const line = store.line
   if (!bodyEl.value || line == null) return
 
@@ -2103,7 +2129,20 @@ watch(
   25%  { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent2) 30%, transparent); }
   100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent2) 0%, transparent); }
 }
+/* A heading the viewer opened at: a brief tint that fades. */
+:deep(.fv-heading-target) {
+  border-radius: var(--radius-xs);
+  animation: fv-heading-target 1.6s var(--ease, ease) 1;
+}
+@keyframes fv-heading-target {
+  0%, 40% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  100% { background: transparent; }
+}
 @media (prefers-reduced-motion: reduce) {
+  :deep(.fv-heading-target) {
+    animation: none;
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
   :deep(.comment-highlight.comment-pulse),
   .pre-line.comment-highlight.comment-pulse,
   .pre-line.comment-pulse { animation: none; }

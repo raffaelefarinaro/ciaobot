@@ -128,6 +128,53 @@ describe('FileViewerModal', () => {
     expect(document.activeElement).toBe(dialog.element)
   })
 
+it('opens a note at a named heading: scrolls to it once and marks it briefly', async () => {
+    const calls: ScrollToOptions[] = []
+    const proto = Element.prototype as unknown as { scrollTo?: unknown }
+    const original = proto.scrollTo
+    proto.scrollTo = function scrollTo(options: ScrollToOptions) { calls.push(options) }
+    vi.stubGlobal('matchMedia', vi.fn((query: string) => ({ matches: query.includes('reduce'), media: query })))
+    try {
+      const store = openViewer()
+      store.path = 'Workspace/Care-Report.md'
+      store.heading = 'hygiene'
+      store.content = '# Care report\n\nHygiene ran.\n\n## What needs you\n\n1. Item\n\n## Hygiene\n\n- a finding\n'
+      await settle()
+      await settle()
+      const target = wrapper!.findAll('.fv-md h2').find(h => h.text() === 'Hygiene')!
+      expect(target.classes()).toContain('fv-heading-target')
+      expect(wrapper!.findAll('.fv-heading-target')).toHaveLength(1)
+      // Reduced motion: the jump is instant.
+      expect(calls).toHaveLength(1)
+      expect(calls[0].behavior).toBe('auto')
+      // A later render of the same open does not pull the reader back.
+      store.content += '\n- another finding\n'
+      await settle()
+      expect(calls).toHaveLength(1)
+    } finally {
+      proto.scrollTo = original
+    }
+  })
+
+  it('leaves a note at its top when the named heading is not there', async () => {
+    const calls: unknown[] = []
+    const proto = Element.prototype as unknown as { scrollTo?: unknown }
+    const original = proto.scrollTo
+    proto.scrollTo = function scrollTo(options: unknown) { calls.push(options) }
+    try {
+      const store = openViewer()
+      store.path = 'Workspace/Care-Report.md'
+      store.heading = 'Notes'
+      store.content = '# Care report\n\n## Hygiene\n\n- a finding\n'
+      await settle()
+      await settle()
+      expect(calls).toEqual([])
+      expect(wrapper!.find('.fv-heading-target').exists()).toBe(false)
+    } finally {
+      proto.scrollTo = original
+    }
+  })
+
   it('marks HTML previews so mobile layout can remove the document inset', async () => {
     const store = openViewer()
     store.kind = 'html'

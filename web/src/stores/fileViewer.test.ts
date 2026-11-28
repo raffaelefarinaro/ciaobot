@@ -496,6 +496,22 @@ describe('docking beside the chat', () => {
     expect(store.line).toBe(120)
   })
 
+  test('an open that targets a heading keeps the viewer, and the next open forgets it', async () => {
+    vi.mocked(api.get).mockResolvedValue({ path: '/work/Workspace/Care-Report.md' })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('# Care report')))
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    await store.open('Workspace/Care-Report.md', null, 'chat-1', 'Hygiene')
+    expect(projects.pinFile).not.toHaveBeenCalled()
+    expect(store.isOpen).toBe(true)
+    expect(store.heading).toBe('Hygiene')
+    store.close()
+    await store.open('notes/today.md')
+    expect(store.heading).toBe('')
+  })
+
   test('a chat open replaces the current pin', async () => {
     vi.mocked(api.get).mockResolvedValue({ path: '/work/b.md' })
     const projects = useProjectStore()
