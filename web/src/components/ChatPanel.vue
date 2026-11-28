@@ -1485,7 +1485,7 @@ import { withoutProviderCatalogs } from '../lib/modelCatalogs'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
-import { dropZoneAt, type DropZone } from '../lib/nativeDrop'
+import { dragHasFiles, dropZoneAt, type DropZone } from '../lib/nativeDrop'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
 import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage } from '../lib/types'
@@ -1706,6 +1706,9 @@ function dropZoneUnder(e: DragEvent): DropZone | null {
   ])
 }
 function onPanelDragOver(e: DragEvent): void {
+  // Only a drag that carries files shows the zones; a dragged chat row or
+  // text selection does not.
+  if (!dragHasFiles(e.dataTransfer?.types)) return
   dragOver.value = true
   hoverZone.value = dropZoneUnder(e)
 }

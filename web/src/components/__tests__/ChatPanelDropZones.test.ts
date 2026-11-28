@@ -78,7 +78,7 @@ function setHost(hostname: string, native: boolean): void {
 }
 
 async function dragOver(wrapper: Awaited<ReturnType<typeof mountPanel>>['wrapper']) {
-  await wrapper.find('.chat-panel').trigger('dragover')
+  await wrapper.find('.chat-panel').trigger('dragover', { dataTransfer: { types: ['Files'] } })
 }
 
 describe('ChatPanel drop zones', () => {
@@ -112,6 +112,15 @@ describe('ChatPanel drop zones', () => {
     expect(wrapper.findAll('.drop-zone')).toHaveLength(1)
     expect(wrapper.find('.drop-zone__note').text()).toContain('A browser tab cannot see where a file lives')
     expect(wrapper.find('.in-place-btn').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows nothing for a drag that carries no files, such as a chat row', async () => {
+    setHost('127.0.0.1', true)
+    const { wrapper } = await mountPanel()
+    await wrapper.find('.chat-panel').trigger('dragover', { dataTransfer: { types: ['text/plain'] } })
+
+    expect(wrapper.find('.drop-overlay').exists()).toBe(false)
     wrapper.unmount()
   })
 

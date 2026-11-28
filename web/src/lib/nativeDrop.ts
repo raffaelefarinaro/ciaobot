@@ -85,6 +85,21 @@ export async function requestNativeDropGrant(
   return parseNativeDropGrant(reply)
 }
 
+/** Tell the app to forget the drop it recorded: the page attached it as a
+ *  copy, so no grant should be made from it later. Best effort. */
+export function clearNativeDropCapture(
+  win: HostWindow | undefined = globalThis as unknown as HostWindow,
+): void {
+  const bridge = handler(win)
+  if (!bridge) return
+  bridge.postMessage({ op: 'clear' }).catch(() => {})
+}
+
+/** Whether a drag carries files (not a dragged chat row or text). */
+export function dragHasFiles(types: ArrayLike<string> | null | undefined): boolean {
+  return Array.from(types || []).includes('Files')
+}
+
 interface ZoneBox {
   zone: DropZone
   rect: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'> | null | undefined

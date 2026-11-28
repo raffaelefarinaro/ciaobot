@@ -194,3 +194,16 @@ describe('composeAttachmentBlock / splitAttachmentBlock', () => {
       .toContain('- a b c.md: `')
   })
 })
+
+describe('composeAttachmentBlock for files used in place', () => {
+  it('sends the engine-validated path, which outlives the opaque ref', async () => {
+    const { composeAttachmentBlock: compose, splitAttachmentBlock: split } = await import('./chatAttachments')
+    const ref = `drop_${'c'.repeat(32)}`
+    const block = compose([
+      { ref, name: 'Q3 data/', inPlace: true, path: '/Users/me/Q3 data' },
+      { ref, name: 'copy.md' },
+    ])
+    expect(block).toBe(`Attached files:\n- Q3 data/: \`/Users/me/Q3 data\`\n- copy.md: \`ciao-drop:${ref}\``)
+    expect(split(block).attachments.map(a => a.path)).toEqual(['/Users/me/Q3 data', null])
+  })
+})

@@ -436,7 +436,7 @@ describe('useChatComposer attachments', () => {
       expect(postForm).not.toHaveBeenCalled()
       const [, init] = (fetchImpl as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]
       expect(JSON.parse(init.body as string)).toMatchObject({ grant_id: GRANT, chat_id: CHAT_ID, mode: 'in_place' })
-      expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'data/', inPlace: true, outside: true }])
+      expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'data/', inPlace: true, outside: true, sensitive: false }])
       expect(store.pushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "data/ is outside this chat's folders" }))
     })
 
@@ -448,19 +448,37 @@ describe('useChatComposer attachments', () => {
 
       await composer.handleDrop(dropEvent([textFile('notes.md')]), 'in-place')
 
-      expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'notes.md', inPlace: true, outside: false }])
+      expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'notes.md', inPlace: true, outside: false, sensitive: false }])
       expect(store.pushToast).not.toHaveBeenCalled()
     })
 
-    it('attaches a copy for a drop outside both zones', async () => {
+    it('attaches a copy for a drop outside both zones, and tells the app to forget the drop', async () => {
       const { postMessage, hostWindow } = nativeHost(null)
       const postForm = fakePostForm({ file_refs: [] })
       const { composer } = makeComposer({ postForm, hostWindow })
 
       await composer.handleDrop(dropEvent([textFile('notes.md')]), null)
 
-      expect(postMessage).not.toHaveBeenCalled()
+      expect(postMessage).toHaveBeenCalledTimes(1)
+      expect(postMessage).toHaveBeenCalledWith({ op: 'clear' })
       expect(postForm).toHaveBeenCalled()
+    })
+
+    it('keeps the validated path on the chip and warns about a secrets folder', async () => {
+      const ref = `drop_${'b'.repeat(32)}`
+      const { hostWindow } = nativeHost({ grantId: GRANT, names: ['id_ed25519'] })
+      const fetchImpl = vi.fn(async () => jsonResponse({
+        file_refs: [{ ref, name: 'id_ed25519', outside: true, sensitive: true, path: '/Users/me/.ssh/id_ed25519' }],
+      })) as unknown as typeof fetch
+      const { composer, store } = makeComposer({ fetchImpl, hostWindow })
+
+      await composer.handleDrop(dropEvent([textFile('id_ed25519')]), 'in-place')
+
+      expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [
+        { ref, name: 'id_ed25519', inPlace: true, path: '/Users/me/.ssh/id_ed25519', outside: true, sensitive: true },
+      ])
+      expect(store.pushToast).toHaveBeenCalledTimes(1)
+      expect(store.pushToast).toHaveBeenCalledWith(expect.objectContaining({ title: 'id_ed25519 is in a folder that holds secrets' }))
     })
 
     it('never asks for a grant where the app is not the host', async () => {
@@ -494,7 +512,7 @@ describe('useChatComposer attachments', () => {
       const first = makeComposer({ fetchImpl, hostWindow: picked.hostWindow })
       await first.composer.pickInPlace()
       expect(picked.postMessage).toHaveBeenCalledWith({ op: 'pick' })
-      expect(first.store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'a.txt', inPlace: true, outside: false }])
+      expect(first.store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'a.txt', inPlace: true, outside: false, sensitive: false }])
 
       const cancelled = nativeHost(null)
       const second = makeComposer({ fetchImpl: vi.fn() as unknown as typeof fetch, hostWindow: cancelled.hostWindow })

@@ -1660,6 +1660,32 @@ def _clear_desktop_drop_staging(
         pass
 
 
+def _tidy_desktop_drop_grants(grant_dir: Path) -> None:
+    """Keep the grant folder owner-only and drop grant files past their TTL.
+
+    Runs on every consume, so a grant that was never used (a page that never
+    asked, an app that quit) does not keep its paths on disk. Only plain files
+    are swept; the old shell's ``staged/`` folder is left to its own cleanup.
+    """
+    try:
+        grant_dir.chmod(0o700)
+    except OSError:
+        return
+    cutoff = time.time() - _DESKTOP_DROP_GRANT_TTL_SECONDS - 60
+    try:
+        entries = list(grant_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.endswith((".json", ".writing", ".consuming")):
+            continue
+        try:
+            if entry.is_file() and not entry.is_symlink() and entry.stat().st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
 def _consume_desktop_drop_grant(
     request: Request, grant_id: str, *, cap_total_bytes: bool = True
 ) -> list[Path]:
@@ -1677,6 +1703,7 @@ def _consume_desktop_drop_grant(
 
     config = request.app.state.config
     grant_dir = config.state_path.parent / "desktop-drop-grants"
+    _tidy_desktop_drop_grants(grant_dir)
     source = grant_dir / f"{grant_id}.json"
     consuming = grant_dir / f".{grant_id}.consuming"
     try:
@@ -1795,6 +1822,24 @@ def _in_place_path(raw: Path) -> tuple[Path, bool]:
     return real, S_ISDIR(mode)
 
 
+#: Folders under the home folder that hold credentials. A path in one is still
+#: handed over when the user drops it (Ciaobot sets no file policy), but the
+#: reference says so and the PWA warns before the message is sent.
+_SECRET_HOME_FOLDERS = (".ssh", ".aws", ".gnupg", "Library/Keychains")
+
+
+def _under(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _secret_folder_path(path: Path) -> bool:
+    try:
+        home = Path(os.path.realpath(Path.home()))
+    except (OSError, RuntimeError):
+        return False
+    return any(_under(path, Path(os.path.realpath(home / name))) for name in _SECRET_HOME_FOLDERS)
+
+
 def _inside_chat_roots(config, pcm, chat, path: Path) -> bool:
     """Whether ``path`` lies in one of the chat's own folders (workspace, vault, linked repo).
 
@@ -1824,20 +1869,31 @@ def _desktop_drop_in_place(request: Request, pcm, chat, paths: list[Path]) -> JS
     prompt, as for any other drop.
     """
     config = request.app.state.config
+    runtime_root = Path(os.path.realpath(config.state_path.parent))
     file_refs: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     for raw in paths:
         try:
             real, is_dir = _in_place_path(raw)
+            if _under(real, runtime_root):
+                raise ValueError(
+                    "it is in Ciaobot's own runtime folder, which holds its secrets"
+                )
         except ValueError as exc:
             errors.append({"filename": _drop_display_name(raw), "error": str(exc)})
             continue
         name = _drop_display_name(raw)
+        sensitive = _secret_folder_path(real)
         file_refs.append({
             "ref": pcm.register_file_ref(chat.chat_id, real, allow_dir=is_dir),
             "name": f"{name}/" if is_dir else name,
             "kind": "folder" if is_dir else "file",
-            "outside": not _inside_chat_roots(config, pcm, chat, real),
+            # The validated real path, for the chip to send as it is: an opaque
+            # ref expires (10 min, or an engine restart) while a chip waits.
+            # Only a loopback peer reaches this branch.
+            "path": str(real),
+            "outside": sensitive or not _inside_chat_roots(config, pcm, chat, real),
+            "sensitive": sensitive,
         })
     return JSONResponse({"file_refs": file_refs, "image_refs": [], "errors": errors, "notices": []})
 
@@ -1863,6 +1919,14 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         if mode not in ("import", "in_place"):
             grant_id = ""
             return JSONResponse({"error": "invalid desktop drop mode"}, status_code=400)
+        if mode == "in_place" and not is_loopback_client(request):
+            # Defence in depth: the grant can only be written on this machine,
+            # and the reply carries real paths, so only a local peer may use it.
+            grant_id = ""
+            return JSONResponse(
+                {"error": "use in place works only on the engine's own machine"},
+                status_code=403,
+            )
         try:
             paths = _consume_desktop_drop_grant(
                 request, grant_id, cap_total_bytes=mode == "import"

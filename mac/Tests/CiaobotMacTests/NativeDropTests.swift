@@ -104,6 +104,36 @@ final class NativeDropTests: XCTestCase {
         XCTAssertNil(capture.take(now: now.addingTimeInterval(NativeDropCapture.validity + 1)))
     }
 
+    func testADragThatBeganInsideTheAppRecordsNothing() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("ciaobot-native-drop-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        let file = URL(fileURLWithPath: "/Users/someone/.ssh/id_rsa")
+        pasteboard.writeObjects([file as NSURL])
+        XCTAssertEqual(FileDropWebView.dropURLs(source: NSView(), pasteboard: pasteboard), [],
+                       "a page-started drag chose its own file URL")
+        XCTAssertEqual(FileDropWebView.dropURLs(source: nil, pasteboard: pasteboard), [file])
+    }
+
+    func testWriterTightensAnExistingGrantFolder() throws {
+        let runtime = temp.appendingPathComponent(".runtime", isDirectory: true)
+        let directory = runtime.appendingPathComponent("desktop-drop-grants")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o755])
+        _ = try NativeDropGrantWriter(pointer: try pointer(runtimeRoot: runtime.path)).write([try dropped("a.txt")])
+        let mode = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o700)
+    }
+
+    func testClearForgetsTheLastDrop() throws {
+        let bridge = NativeDropBridge(writer: NativeDropGrantWriter(pointer: try pointer(runtimeRoot: temp.path)))
+        let h = makeHarness(bridge: bridge)
+        bridge.capture.record([try dropped("a.txt")])
+        guard case .success(let cleared)? = send(h, ["op": "clear"]) else { return XCTFail("expected a reply") }
+        XCTAssertTrue(cleared is NSNull)
+        XCTAssertNil(bridge.capture.take())
+    }
+
     func testFileURLsReadsOnlyFileURLsFromTheDragPasteboard() {
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("ciaobot-native-drop-\(UUID().uuidString)"))
         defer { pasteboard.releaseGlobally() }

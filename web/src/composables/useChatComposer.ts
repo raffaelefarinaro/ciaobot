@@ -10,7 +10,7 @@ import {
   type UploadProgressHandler,
 } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, writeChatDraft } from '../lib/chatDrafts'
-import { dropHost, requestNativeDropGrant, type DropHost, type DropZone } from '../lib/nativeDrop'
+import { clearNativeDropCapture, dropHost, requestNativeDropGrant, type DropHost, type DropZone } from '../lib/nativeDrop'
 
 /**
  * Composer, draft and attachment behaviour for one chat.
@@ -373,7 +373,15 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
         () => importDesktopDrop(grant.grantId, { chatId: id, projectId: toValue(options.projectId) || '' }, doFetch, 'in_place'))
       for (const failure of result.failures) store.pushErrorToast(`Could not use ${failure.filename}`, failure.error)
       store.addPendingFiles(id, result.files)
-      const outside = result.files.filter(f => f.outside).map(f => f.name)
+      const sensitive = result.files.filter(f => f.sensitive).map(f => f.name)
+      if (sensitive.length) {
+        store.pushToast({
+          chat_id: '',
+          title: sensitive.length === 1 ? `${sensitive[0]} is in a folder that holds secrets` : `${sensitive.length} items are in folders that hold secrets`,
+          body: 'Keys and credentials live there. Remove the chip unless the agent should read it: the permission mode decides, and bypass reads it without asking.',
+        })
+      }
+      const outside = result.files.filter(f => f.outside && !f.sensitive).map(f => f.name)
       if (outside.length) {
         store.pushToast({
           chat_id: '',
@@ -411,6 +419,8 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       await useInPlace('grant')
       return
     }
+    // Attached as a copy: the app must not keep this drop for a later grant.
+    if (host === 'native') clearNativeDropCapture(hostWindow)
     const dt = e.dataTransfer
     if (!dt) return
 

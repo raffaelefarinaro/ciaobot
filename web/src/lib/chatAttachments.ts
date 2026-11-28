@@ -22,7 +22,7 @@ const ATTACHED_HEADER = 'Attached files:'
 const BLOCK_RE = /(?:^|\n\n)Attached files:\n((?:- .+(?:\n|$))+)$/
 const LINE_RE = /^- (.+?): `(.+)`$/
 
-type FileRef = { ref: string; name?: string; outside?: boolean }
+type FileRef = { ref: string; name?: string; outside?: boolean; sensitive?: boolean; path?: string }
 type UploadFailure = { filename: string; error: string }
 /** A file the engine kept, but not the way it was sent (a HEIC photo it could not convert). */
 export type UploadNotice = { filename: string; message: string }
@@ -40,9 +40,25 @@ export type UploadProgressHandler = (loaded: number, total: number) => void
 export interface FormPostResult { status: number; body: unknown }
 export type FormPoster = (url: string, form: FormData, onProgress?: UploadProgressHandler) => Promise<FormPostResult>
 /** A file the server stored for a chat, staged in the composer before send.
- *  `inPlace`: a desktop drop used where it is (nothing copied); `outside`:
- *  its path is outside the chat's own folders. */
-export interface AttachedFile { ref: string; name: string; inPlace?: boolean; outside?: boolean }
+ *  `inPlace`: a desktop drop used where it is (nothing copied), with the
+ *  engine-validated `path` the send uses as it is (the opaque ref expires
+ *  after 10 minutes or an engine restart); `outside`: the path is outside the
+ *  chat's own folders; `sensitive`: it is in a folder that holds credentials. */
+export interface AttachedFile {
+  ref: string
+  name: string
+  inPlace?: boolean
+  path?: string
+  outside?: boolean
+  sensitive?: boolean
+}
+
+/** An engine-validated absolute path that quotes safely, or undefined. */
+function inPlacePath(value: unknown): string | undefined {
+  return typeof value === 'string' && value.startsWith('/') && !/[\x00-\x1f\x7f\x85\u2028\u2029`]/.test(value)
+    ? value
+    : undefined
+}
 /** An attachment parsed back out of a sent message (token before expansion, path after). */
 export interface MessageAttachment { name: string; ref: string | null; path: string | null }
 
@@ -116,7 +132,10 @@ function attachedFiles(entries: FileRef[] | undefined): AttachedFile[] {
 /** The labelled block a send appends; the engine expands each token in place. */
 export function composeAttachmentBlock(files: AttachedFile[]): string {
   if (!files.length) return ''
-  return [ATTACHED_HEADER, ...files.map(f => `- ${cleanName(f.name)}: ${formatAttachedFilePath(`ciao-drop:${f.ref}`)}`)].join('\n')
+  return [ATTACHED_HEADER, ...files.map(f => {
+    const target = f.inPlace && f.path ? f.path : `ciao-drop:${f.ref}`
+    return `- ${cleanName(f.name)}: ${formatAttachedFilePath(target)}`
+  })].join('\n')
 }
 
 /** Split a user message into its text and the trailing attachment block (token or expanded-path form). */
@@ -178,11 +197,17 @@ export async function importDesktopDrop(
   const files = attachedFiles(result.file_refs)
   return {
     files: mode === 'in_place'
-      ? files.map(file => ({
-        ...file,
-        inPlace: true,
-        outside: result.file_refs?.find(entry => entry.ref === file.ref)?.outside !== false,
-      }))
+      ? files.map(file => {
+        const entry = result.file_refs?.find(e => e.ref === file.ref)
+        const path = inPlacePath(entry?.path)
+        return {
+          ...file,
+          inPlace: true,
+          ...(path ? { path } : {}),
+          outside: entry?.outside !== false,
+          sensitive: entry?.sensitive === true,
+        }
+      })
       : files,
     imageRefs: result.image_refs || [],
     failures: result.errors || [],

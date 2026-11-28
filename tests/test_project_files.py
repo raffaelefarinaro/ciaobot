@@ -79,7 +79,9 @@ def _make_personal_file(root: Path, stem: str) -> Path:
     return md
 
 
-def _make_client(pcm: ProjectChatManager, config: CiaoConfig) -> TestClient:
+def _make_client(
+    pcm: ProjectChatManager, config: CiaoConfig, *, peer: str | None = None
+) -> TestClient:
     app = Starlette(
         routes=[
             Route("/api/projects/{project_id}/files", project_files_list, methods=["GET"]),
@@ -89,7 +91,7 @@ def _make_client(pcm: ProjectChatManager, config: CiaoConfig) -> TestClient:
     )
     app.state.project_chat_manager = pcm
     app.state.config = config
-    return TestClient(app)
+    return TestClient(app, client=(peer, 50000)) if peer else TestClient(app)
 
 
 def _write_desktop_drop_grant(
@@ -1131,8 +1133,8 @@ def _in_place_setup(tmp_path: Path):
     return folder, pcm, chat
 
 
-def _post_in_place(pcm: ProjectChatManager, chat, grant_id: str, **extra):
-    return _make_client(pcm, pcm._config).post(
+def _post_in_place(pcm: ProjectChatManager, chat, grant_id: str, *, peer: str = "127.0.0.1", **extra):
+    return _make_client(pcm, pcm._config, peer=peer).post(
         "/api/desktop-drop",
         json={"grant_id": grant_id, "chat_id": chat.chat_id, "mode": "in_place", **extra},
     )
@@ -1157,8 +1159,9 @@ def test_in_place_drop_references_file_and_folder_without_copying(tmp_path: Path
     file_ref, dir_ref = body["file_refs"]
     assert (file_ref["name"], file_ref["kind"], file_ref["outside"]) == ("report.pdf", "file", True)
     assert (dir_ref["name"], dir_ref["kind"], dir_ref["outside"]) == ("data set/", "folder", True)
-    # Nothing crosses the API as a path, and nothing was copied or converted.
-    assert str(outside) not in response.text
+    # The validated real path comes back for the chip; nothing was copied or converted.
+    assert file_ref["path"] == str(report.resolve())
+    assert dir_ref["path"] == str(data_dir.resolve())
     assert not (folder / "report.pdf").exists()
     assert not (folder / "report.md").exists()
     expanded = pcm.expand_file_refs(
@@ -1291,3 +1294,77 @@ def test_file_refs_expand_folders_only_when_registered_for_them(tmp_path: Path) 
 
     assert pcm.expand_file_refs(f"ciao-drop:{plain}", chat.chat_id) == f"ciao-drop:{plain}"
     assert pcm.expand_file_refs(f"ciao-drop:{allowed}", chat.chat_id) == str(folder.resolve())
+
+
+def test_in_place_drop_returns_the_validated_path_for_the_chip(tmp_path: Path) -> None:
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    source = tmp_path / "a.txt"
+    source.write_text("x", encoding="utf-8")
+
+    body = _post_in_place(pcm, chat, _write_desktop_drop_grant(pcm._config, [source])).json()
+
+    assert body["file_refs"][0]["path"] == str(source.resolve())
+    assert body["file_refs"][0]["sensitive"] is False
+
+
+def test_in_place_drop_needs_a_loopback_peer_and_keeps_the_grant(tmp_path: Path) -> None:
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    source = tmp_path / "a.txt"
+    source.write_text("x", encoding="utf-8")
+    grant_id = _write_desktop_drop_grant(pcm._config, [source])
+
+    remote = _post_in_place(pcm, chat, grant_id, peer="100.64.0.7")
+    local = _post_in_place(pcm, chat, grant_id)
+
+    assert remote.status_code == 403
+    assert "path" not in remote.text
+    assert local.status_code == 200
+
+
+def test_in_place_drop_refuses_the_engine_runtime_folder(tmp_path: Path) -> None:
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    runtime = pcm._config.state_path.parent
+    secret = runtime / "session.secret"
+    secret.write_text("s", encoding="utf-8")
+    grant_id = _write_desktop_drop_grant(pcm._config, [secret, runtime])
+
+    body = _post_in_place(pcm, chat, grant_id).json()
+
+    assert body["file_refs"] == []
+    assert [e["error"] for e in body["errors"]] == [
+        "it is in Ciaobot's own runtime folder, which holds its secrets"
+    ] * 2
+
+
+def test_in_place_drop_flags_secret_home_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    home = tmp_path / "home"
+    key = home / ".ssh" / "id_ed25519"
+    key.parent.mkdir(parents=True)
+    key.write_text("k", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+
+    body = _post_in_place(pcm, chat, _write_desktop_drop_grant(pcm._config, [key, key.parent])).json()
+
+    assert [(r["sensitive"], r["outside"]) for r in body["file_refs"]] == [(True, True), (True, True)]
+
+
+def test_consuming_a_grant_sweeps_stale_grants_and_tightens_the_folder(tmp_path: Path) -> None:
+    import os
+
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    source = tmp_path / "a.txt"
+    source.write_text("x", encoding="utf-8")
+    grant_dir = pcm._config.state_path.parent / "desktop-drop-grants"
+    stale = Path(_write_desktop_drop_grant(pcm._config, [source]))
+    stale_file = grant_dir / f"{stale}.json"
+    old = time.time() - 3600
+    os.utime(stale_file, (old, old))
+    grant_dir.chmod(0o755)
+    fresh = _write_desktop_drop_grant(pcm._config, [source])
+
+    assert _post_in_place(pcm, chat, fresh).status_code == 200
+    assert not stale_file.exists()
+    assert (grant_dir.stat().st_mode & 0o777) == 0o700

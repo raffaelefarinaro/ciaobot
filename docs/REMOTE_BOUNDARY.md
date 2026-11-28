@@ -205,7 +205,7 @@ carried by the session.
   (scheme, host and effective port);
   `GET /api/workspace-move` is session-only and reports `local: false` for a
   non-host browser;
-  `/api/workspace-open`, and starting a `system_setting` needs-you card (which runs `open` on a constant System Settings URL), check the loopback peer only. Each refuses a non-host
+  `/api/workspace-open`, starting a `system_setting` needs-you card (which runs `open` on a constant System Settings URL), and `POST /api/desktop-drop` with `mode: "in_place"` (the Mac app's *Use in place*, whose reply carries real paths; the grant itself can only be written on this machine) check the loopback peer only. Each refuses a non-host
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
   `command` to run on the host.
 - **Usage statistics are session-gated and workspace-checked.** `GET /api/stats` is an ordinary session-gated route, not loopback-only; its `workspace` query value is checked against the registry. The `usage_stats` agent operation is principal-scoped and takes no workspace argument. Both return aggregates, project names and ids only, never transcript text.

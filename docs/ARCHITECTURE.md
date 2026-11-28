@@ -465,17 +465,29 @@ or general filesystem capability to the remote page. That shell is retired
 (`#656`); its `ciao:native-file-*` page events stay only for an old one still in
 the field. Ciaobot for Mac writes the same grant for **Use in place**
 (`mac/Sources/CiaobotMac/NativeDrop.swift`): only in the main window on its own
-local engine, from a drop on that zone or an open panel, and the page sends it
-with `mode: "in_place"`. That mode reads and copies nothing. Each path must be
+local engine. The web view records the file URLs of every drop that began
+outside the app (a drag started inside a web view has a dragging source and is
+never recorded, so page content cannot choose a path) and keeps them for 30 s;
+the page asks for a grant from them only after a drop on the **Use in place**
+zone, and tells the app to forget them after any other drop. The open panel is
+the other source. The page sends the grant with `mode: "in_place"`, which needs
+a loopback TCP peer (`is_loopback_client`; 403 otherwise, before the grant is
+consumed). That mode reads and copies nothing. Each path must be
 absolute with no `..` part, a regular file or a folder this process can read, and,
 as dropped and with symlinks followed, free of control characters, Unicode line
 separators and backticks, so it stays inside the backticks of the prompt's
 `Attached files:` line; the reference names the real path, and a folder's path is
-handed over (`register_file_ref(..., allow_dir=True)`), never its contents. The
-byte cap applies only to imports. Each reference says whether the path is
-outside the chat's own folders (`_chat_dir_root_candidates`), for the PWA to say
-so; it widens nothing, since the agent CLI's permission mode decides what the
-agent may read.
+handed over (`register_file_ref(..., allow_dir=True)`), never its contents. A path in
+the engine's own runtime folder (its session secret and the grant folder) is
+refused. The byte cap applies only to imports. Each reference says whether the
+path is outside the chat's own folders (`_chat_dir_root_candidates`) and whether
+it is in a credentials folder (`~/.ssh`, `~/.aws`, `~/.gnupg`,
+`~/Library/Keychains`, also reported as outside), for the PWA to warn; it widens
+nothing, since the agent CLI's permission mode decides what the agent may read.
+It also returns the validated real path, which the chip sends as it is, because
+the opaque reference expires after 10 minutes or an engine restart while a chip
+waits. Every consume holds the grant folder at 0700 and deletes grant files past
+the five-minute TTL.
 `ciao/instance_lock.py`
 holds `.runtime/server.lock` for the engine process lifetime, so a normal
 server and `ciao dev` cannot run against the same registry concurrently.

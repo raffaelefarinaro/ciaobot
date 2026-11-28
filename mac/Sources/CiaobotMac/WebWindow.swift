@@ -1268,9 +1268,10 @@ struct WebWindow: NSViewRepresentable {
         /// checks: the coordinator's current view, the main frame of the exact
         /// origin, the committed document, and a body of exactly `{op}`.
         /// `grant` turns the drop the page just received into a grant (null
-        /// when there was none in the last 30 s); `pick` spends a trusted click
-        /// and opens a panel for files and folders (null when cancelled). The
-        /// reply carries only `{grantId, names}`, never a path.
+        /// when there was none in the last 30 s); `clear` forgets it (the page
+        /// sends it after a drop it attached as a copy); `pick` spends a
+        /// trusted click and opens a panel for files and folders (null when
+        /// cancelled). The reply carries only `{grantId, names}`, never a path.
         @MainActor
         func handleNativeDropMessage(
             isMainFrame: Bool,
@@ -1300,6 +1301,9 @@ struct WebWindow: NSViewRepresentable {
                 } catch {
                     reply(.failure(RefusedError()))
                 }
+            case "clear":
+                nativeDrop.capture.clear()
+                reply(.success(NSNull()))
             case "pick":
                 guard clickGesture.isPending(generation: committedDocumentGeneration, now: now) else {
                     return reply(.failure(RefusedError()))

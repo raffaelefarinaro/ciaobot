@@ -69,6 +69,8 @@ struct NativeDropGrantWriter {
         do {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true,
                                         attributes: [.posixPermissions: 0o700])
+            // An existing folder keeps its mode on create; hold it owner-only.
+            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
             let data = try JSONSerialization.data(withJSONObject: payload)
             let staging = directory.appendingPathComponent(".\(grantID).writing")
             guard manager.createFile(atPath: staging.path, contents: data,
@@ -109,6 +111,10 @@ final class NativeDropCapture {
         pending = urls.isEmpty ? nil : (urls, now)
     }
 
+    func clear() {
+        pending = nil
+    }
+
     func take(now: Date = Date()) -> [URL]? {
         defer { pending = nil }
         guard let pending else { return nil }
@@ -124,8 +130,18 @@ final class FileDropWebView: WKWebView {
     var onFileDrop: (([URL]) -> Void)?
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        onFileDrop?(Self.fileURLs(on: sender.draggingPasteboard))
+        onFileDrop?(Self.dropURLs(source: sender.draggingSource, pasteboard: sender.draggingPasteboard))
         return super.performDragOperation(sender)
+    }
+
+    /// Only a drag that began outside this process (Finder, another app) is
+    /// recorded. A drag that began in a web view has a source, and its
+    /// pasteboard was written by page content: a model-written artifact could
+    /// drag a `file:///` link it chose. Such a drop records nothing, which
+    /// also clears any earlier capture.
+    static func dropURLs(source: Any?, pasteboard: NSPasteboard) -> [URL] {
+        guard source == nil else { return [] }
+        return fileURLs(on: pasteboard)
     }
 
     static func fileURLs(on pasteboard: NSPasteboard) -> [URL] {

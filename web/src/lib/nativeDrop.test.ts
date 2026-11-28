@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { dropHost, dropZoneAt, parseNativeDropGrant, requestNativeDropGrant } from './nativeDrop'
+import { clearNativeDropCapture, dragHasFiles, dropHost, dropZoneAt, parseNativeDropGrant, requestNativeDropGrant } from './nativeDrop'
 
 const GRANT = '0f8fad5b-d9cb-469f-a165-70867728950e'
 
@@ -44,6 +44,21 @@ describe('requestNativeDropGrant', () => {
       .rejects.toThrow('The app would not hand over the files.')
     await expect(requestNativeDropGrant('grant', { location: { hostname: '127.0.0.1' } }))
       .rejects.toThrow('Only the Ciaobot app')
+  })
+})
+
+describe('dragHasFiles and clearNativeDropCapture', () => {
+  it('shows zones only for a drag that carries files', () => {
+    expect(dragHasFiles(['Files', 'text/uri-list'])).toBe(true)
+    expect(dragHasFiles(['text/plain'])).toBe(false)
+    expect(dragHasFiles(undefined)).toBe(false)
+  })
+
+  it('asks the app to forget the drop, and is silent without the bridge', async () => {
+    const postMessage = vi.fn(async () => { throw new Error('refused') })
+    clearNativeDropCapture(nativeWindow(postMessage))
+    expect(postMessage).toHaveBeenCalledWith({ op: 'clear' })
+    expect(() => clearNativeDropCapture({ location: { hostname: '127.0.0.1' } })).not.toThrow()
   })
 })
 
