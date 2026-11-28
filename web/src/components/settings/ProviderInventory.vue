@@ -2,8 +2,8 @@
   <section class="inventory" aria-label="OpenCode configured providers">
     <p class="hint inventory-note">OpenCode lists configured providers without checking their credentials.</p>
     <p v-if="!inventory" class="hint">Provider inventory unavailable on this engine.</p>
-    <p v-else-if="inventory.status === 'unknown'" class="hint">OpenCode could not report its configured providers.</p>
-    <p v-else-if="inventory.status === 'partial'" class="hint">Some providers may be missing from this inventory.</p>
+    <p v-else-if="inventory.status === 'unknown'" class="hint inventory-notice">OpenCode could not report its configured providers.</p>
+    <p v-else-if="inventory.status === 'partial'" class="hint inventory-notice">Some providers may be missing from this inventory.</p>
     <p v-else-if="!inventory.providers.length" class="hint">No configured providers reported.</p>
     <ul v-if="inventory && inventory.status !== 'unknown' && inventory.providers.length" class="inventory-list set-list">
       <CollapsibleRoot
@@ -23,7 +23,7 @@
           </div>
           <CollapsibleTrigger
             v-if="command"
-            class="set-link set-link--quiet provider-action"
+            class="set-link set-link--quiet provider-action provider-disclosure"
             :aria-label="`Reconnect ${provider.name} (${provider.id})`"
           >Reconnect</CollapsibleTrigger>
         </div>
@@ -81,7 +81,9 @@ function methodLabel(method: string): string {
   margin-bottom: var(--space-3);
 }
 .inventory-list { list-style: none; padding: 0; margin: var(--space-2) 0 0; }
-.inventory-row-head { justify-content: space-between; padding-block: var(--space-3); }
+.inventory-row-head { flex-wrap: wrap; justify-content: space-between; padding-block: var(--space-3); }
+.inventory-row-head > .set-row-main { flex: 1 1 12rem; }
+.inventory-row-head > .provider-disclosure { margin-inline-start: auto; }
 .inventory-name {
   display: flex;
   flex-wrap: wrap;
@@ -99,25 +101,25 @@ function methodLabel(method: string): string {
 }
 .inventory-status {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space-2);
   margin-top: var(--space-1);
   font-size: var(--text-sm);
 }
-.inventory-status::before {
+/* The dot carries the state beside its words: success for a configured row,
+   warning where the inventory itself is incomplete or unreadable. */
+.inventory-status::before,
+.inventory-notice::before {
   content: '';
+  display: inline-block;
   flex: 0 0 0.45em;
+  width: 0.45em;
   height: 0.45em;
+  margin-inline-end: var(--space-2);
   border-radius: 50%;
-  background: currentColor;
+  background: var(--success);
 }
+.inventory-notice::before { background: var(--warning); }
+.inventory-status::before { margin-inline-end: 0; }
 .inventory-connect { margin-top: var(--space-3); }
-@container (max-width: 480px) {
-  .inventory-row-head {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0;
-    padding-block: var(--space-2);
-  }
-}
 </style>

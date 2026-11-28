@@ -440,7 +440,7 @@
               <div>
                 <p class="section-title">Chat providers</p>
                 <p class="hint">
-                  Each provider CLI manages its own login and credentials. OpenCode configuration does not verify upstream credentials.
+                  Each provider CLI manages its own login and credentials.
                   The defaults below apply to new chats; any chat can override them from the picker.
                   Session insights is the model that reads chats into memory and names them. On Automatic it
                   is the chat's own model: a closed project uses its last-active chat, and a task resolution or
@@ -457,8 +457,17 @@
 
             <p v-if="workspaceModelsError" class="hint hint--warn" role="alert">{{ workspaceModelsError }}</p>
             <button v-if="workspaceModelsError" type="button" class="set-link" @click="fetchWorkspaceModels()">Retry model options</button>
+            <p v-if="providerKeys.connections" id="provider-verify-note" class="hint hint--compact provider-verify-note">
+              Verify re-reads each CLI's status and models. It does not test upstream credentials.
+            </p>
             <div v-if="providerKeys.connections" class="provider-connections set-list">
-              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
+              <CollapsibleRoot
+                v-for="(conn, connKey) in providerKeys.connections"
+                :key="connKey"
+                as="div"
+                class="credential-row set-row"
+                :unmount-on-hide="false"
+              >
                 <div class="set-row-head provider-row-head">
                   <div class="routine-info set-row-main">
                     <span class="routine-name set-row-title">{{ conn.label || connKey }}</span>
@@ -474,10 +483,16 @@
                     <button
                       type="button"
                       class="set-link set-link--quiet provider-action"
-                      title="Check that the CLI works"
+                      aria-describedby="provider-verify-note"
                       :disabled="providerConnectionPending === connKey"
                       @click="providerConnectionAction(String(connKey), 'verify')"
                     >Verify</button>
+                    <!-- Not for a missing CLI: its payload command is the install line, not a sign-in. -->
+                    <CollapsibleTrigger
+                      v-if="connKey !== 'opencode' && !isMissingInstall(conn.state)"
+                      class="set-link set-link--quiet provider-action provider-disclosure"
+                      :aria-label="`${conn.ok ? 'Reconnect' : 'Connect'} ${conn.label || connKey}`"
+                    >{{ conn.ok ? 'Reconnect' : 'Connect' }}</CollapsibleTrigger>
                     <DropdownMenuRoot
                       v-if="conn.ok"
                       :open="settingsMenu === `provider:${connKey}`"
@@ -514,11 +529,9 @@
                   <code>{{ conn.path_command }}</code>
                 </p>
                 <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :command="conn.command" :workspace="projectStore.activeWorkspace" />
-                <!-- Not for a missing CLI: its payload command is the install line, not a sign-in. -->
-                <details v-if="connKey !== 'opencode' && !isMissingInstall(conn.state)" class="provider-sign-in">
-                  <summary>{{ conn.ok ? `Reconnect ${conn.label || connKey}` : `Connect ${conn.label || connKey}` }}</summary>
+                <CollapsibleContent v-if="connKey !== 'opencode' && !isMissingInstall(conn.state)">
                   <ProviderSignInGuidance :command="conn.command" :context="conn.label || String(connKey)" :workspace="projectStore.activeWorkspace" />
-                </details>
+                </CollapsibleContent>
                 <!-- Full width, after the head: inside .set-row-main it shares a line with Connected / Verify and clips at phone width. -->
                 <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">
                   <p class="provider-release-note">Older than {{ conn.release_check.tested }}, the version this Ciaobot release was tested with. Update with:</p>
@@ -682,7 +695,7 @@
                       </div>
                     </template>
                 </details>
-              </div>
+              </CollapsibleRoot>
               <ProviderInventory v-if="!providerKeys.connections.opencode" :workspace="projectStore.activeWorkspace" />
             </div>
             <ProviderInventory v-else :workspace="projectStore.activeWorkspace" />
@@ -1211,6 +1224,9 @@ import { useTaskStore } from '../stores/tasks'
 import { invalidateProviderReads, providerGeneration, providerMutation, providerMutationIsCurrent, providerRead, providerReadIsCurrent, subscribeProviderRefresh, waitForProviderMutation } from '../lib/providerOperations'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import {
+  CollapsibleContent,
+  CollapsibleRoot,
+  CollapsibleTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuRoot,
@@ -3454,14 +3470,21 @@ a.btn-secondary {
   border-top: 0;
   overflow-wrap: anywhere;
 }
-.provider-row-head { justify-content: space-between; padding-block: 0; }
+.provider-row-head { flex-wrap: wrap; justify-content: space-between; padding-block: 0; }
+.provider-row-head > .set-row-main { flex: 1 1 12rem; }
+/* Actions stay right-aligned in the head. On a narrow pane they drop to a line
+   of their own, status at the start and the buttons at the end, never loose. */
 .provider-connection-actions {
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: var(--space-2);
+  margin-inline-start: auto;
 }
 .provider-overflow { width: var(--touch); height: var(--touch); }
+.provider-verify-note { max-width: 70ch; color: var(--fg3); margin: 0 0 var(--space-2); }
 @container (max-width: 480px) {
-  .provider-row-head { flex-direction: column; align-items: stretch; gap: var(--space-2); }
+  .provider-connection-actions { flex: 1 1 100%; }
+  .provider-connection-actions > .provider-state { margin-inline-end: auto; }
 }
 .provider-release-check { display: flex; flex-direction: column; gap: var(--space-2); }
 .provider-release-note { margin: 0; }
@@ -3646,8 +3669,10 @@ a.btn-secondary {
   font-weight: 600;
   color: var(--fg);
 }
-.provider-inline-defaults > :is(.set-subrow, .set-subrow-hint) {
-  padding-inline-start: 0;
+/* The provider's defaults are indented hairline rows (.set-subrow) under its
+   head, not a boxed grid of selects. */
+.provider-inline-defaults {
+  display: block;
 }
 @media (max-width: 720px) {
   .provider-defaults {
@@ -3881,21 +3906,22 @@ a.btn-secondary {
   text-align: center;
 }
 
-/* Keep inline provider disclosures in the same quiet action style. */
-:is(.provider-sign-in, .provider-brings) > summary {
+/* "What this CLI brings": the per-provider MCP and skill chip lists, folded
+   away by default so the providers tab stays scannable. The summary is the whole
+   touch target, so it keeps the 44px minimum. */
+.provider-brings > summary {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
   min-height: var(--touch);
-  min-width: var(--touch);
   color: var(--fg2);
   font-size: var(--text-sm);
   cursor: pointer;
   list-style: none;
 }
-:is(.provider-sign-in, .provider-brings) > summary::-webkit-details-marker { display: none; }
+.provider-brings > summary::-webkit-details-marker { display: none; }
 /* inline-flex drops the native marker, so draw the disclosure caret. */
-:is(.provider-sign-in, .provider-brings) > summary::before {
+.provider-brings > summary::before {
   content: '';
   flex: 0 0 auto;
   width: 6px;
@@ -3906,14 +3932,14 @@ a.btn-secondary {
   transform: rotate(-45deg);
   transition: transform 120ms var(--ease);
 }
-:is(.provider-sign-in, .provider-brings)[open] > summary::before { transform: rotate(45deg); }
+.provider-brings[open] > summary::before { transform: rotate(45deg); }
 @media (prefers-reduced-motion: reduce) {
-  :is(.provider-sign-in, .provider-brings) > summary::before { transition: none; }
+  .provider-brings > summary::before { transition: none; }
 }
 /* /settings/providers scrolls here; keep the card clear of the pane header. */
 #chat-providers, #install-app, #other-devices { scroll-margin-top: var(--space-4); }
-:is(.provider-sign-in, .provider-brings) > summary:hover { color: var(--fg); }
-:is(.provider-sign-in, .provider-brings) > summary:focus-visible {
+.provider-brings > summary:hover { color: var(--fg); }
+.provider-brings > summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);

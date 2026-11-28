@@ -70,6 +70,18 @@ type Story = StoryObj<typeof meta>
 
 const badge = (canvasElement: HTMLElement) => canvasElement.querySelector('.provider-state')
 
+// The dot is a real signal: its painted colour is the state's token, so a state
+// change is visible without reading the words.
+const dotColour = (el: Element | null) => getComputedStyle(el!, '::before').backgroundColor
+function tokenColour(name: string) {
+  const probe = document.createElement('span')
+  probe.style.backgroundColor = `var(${name})`
+  document.body.append(probe)
+  const colour = getComputedStyle(probe).backgroundColor
+  probe.remove()
+  return colour
+}
+
 // The host-terminal capability is cached per page; reset it so each story's
 // Install in Terminal button makes its own declared read.
 function installRender(connKey: string, conn: ProviderConnection) {
@@ -105,6 +117,7 @@ export const BadgeReady: Story = {
   play: async ({ canvasElement }) => {
     expect(badge(canvasElement)?.textContent).toBe('Connected')
     expect(badge(canvasElement)?.classList.contains('provider-state--ok')).toBe(true)
+    expect(dotColour(badge(canvasElement))).toBe(tokenColour('--success'))
   },
 }
 
@@ -113,6 +126,8 @@ export const BadgeFailed: Story = {
   play: async ({ canvasElement }) => {
     expect(badge(canvasElement)?.textContent).toBe('Not connected')
     expect(badge(canvasElement)?.classList.contains('provider-state--error')).toBe(true)
+    expect(dotColour(badge(canvasElement))).toBe(tokenColour('--error-text'))
+    expect(dotColour(badge(canvasElement))).not.toBe(tokenColour('--success'))
   },
 }
 

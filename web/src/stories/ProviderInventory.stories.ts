@@ -10,6 +10,17 @@ import type { ProviderInventoryData } from '../components/settings/ProviderInven
 // each story mounts the owner in its own app with Pinia, as WorkspaceTile does.
 type InventorySeed = { inventory?: ProviderInventoryData }
 
+// The status dot is a real signal: its painted colour is the state's token.
+const dotColour = (el: Element) => getComputedStyle(el, '::before').backgroundColor
+function tokenColour(name: string) {
+  const probe = document.createElement('span')
+  probe.style.backgroundColor = `var(${name})`
+  document.body.append(probe)
+  const colour = getComputedStyle(probe).backgroundColor
+  probe.remove()
+  return colour
+}
+
 function renderInventory(seed: InventorySeed) {
   return defineComponent({
     name: 'ProviderInventoryStory',
@@ -28,7 +39,7 @@ function renderInventory(seed: InventorySeed) {
         app.mount(host.value!)
       })
       onBeforeUnmount(() => app?.unmount())
-      return () => h('div', { ref: host, style: { containerType: 'inline-size' } })
+      return () => h('div', { ref: host })
     },
   })
 }
@@ -66,11 +77,15 @@ export const Configured: Story = {
     expect(text).toContain('Environment · Configured')
     expect(text).not.toContain('verification unknown')
     const canvas = within(canvasElement)
+    for (const status of canvasElement.querySelectorAll('.inventory-status')) {
+      expect(dotColour(status)).toBe(tokenColour('--success'))
+    }
     const reconnect = canvas.getByRole('button', { name: 'Reconnect Storybook One (storybook-one)' })
     await expect(reconnect).toHaveTextContent('Reconnect')
     await expect(reconnect).toHaveAttribute('aria-expanded', 'false')
     await userEvent.click(reconnect)
     await expect(reconnect).toHaveAttribute('aria-expanded', 'true')
+    await expect(reconnect).toHaveAttribute('data-state', 'open')
     await expect(canvas.getByRole('button', { name: 'Copy sign-in command for Storybook One (storybook-one)' })).toBeVisible()
     await userEvent.click(reconnect)
     await expect(reconnect).toHaveAttribute('aria-expanded', 'false')
@@ -88,6 +103,7 @@ export const PartiallyReported: Story = {
   render: () => renderInventory({ inventory: { status: 'partial', providers: [] } }),
   play: async ({ canvasElement }) => {
     expect(canvasElement.textContent).toContain('Some providers may be missing from this inventory.')
+    expect(dotColour(canvasElement.querySelector('.inventory-notice')!)).toBe(tokenColour('--warning'))
   },
 }
 

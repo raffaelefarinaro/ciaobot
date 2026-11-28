@@ -72,19 +72,25 @@ for (const mobile of [false, true]) {
     })
     await isolate(page, `provider-manual-${testInfo.workerIndex}-${mobile}`)
     await page.route('**/api/settings/providers', route => route.fulfill({ json: { connections: {
-      claude: { name: 'claude', label: 'Claude Code', ok: true, auth: 'oauth', command: 'claude auth login', account: 'Claude OAuth' },
-      opencode: { name: 'opencode', label: 'OpenCode', ok: true, auth: 'oauth', command: 'opencode auth login', credential_inventory: {
+      claude: { name: 'claude', label: 'Claude Code', ok: true, state: 'ready', auth: 'oauth', command: 'claude auth login', account: 'Claude OAuth' },
+      opencode: { name: 'opencode', label: 'OpenCode', ok: true, state: 'ready', auth: 'oauth', command: 'opencode auth login', credential_inventory: {
         status: 'complete', providers: [{ id: 'custom', name: 'Example', auth_types: ['oauth'], configured: true, verified: null }],
       } },
     } } }))
     await boot(page, '/settings/providers', '.provider-connections')
     await expect(page.getByText('OAuth · Configured')).toBeVisible()
-    const claudeDisclosure = page.getByText('Reconnect Claude Code', { exact: true })
+    // Verify says what it checks in visible text, wired as its description.
+    await expect(page.locator('#provider-verify-note')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Verify' }).first()).toHaveAccessibleDescription(/re-reads each CLI/)
+    // Claude and OpenCode share one Reconnect button: same text, caret turns on open.
+    const claudeDisclosure = page.getByRole('button', { name: 'Reconnect Claude Code', exact: true })
+    await expect(claudeDisclosure).toHaveText('Reconnect')
     await claudeDisclosure.focus()
     await page.keyboard.press('Enter')
-    await expect(claudeDisclosure.locator('..')).toHaveAttribute('open', '')
-    await page.keyboard.press('Enter')
-    await expect(claudeDisclosure.locator('..')).not.toHaveAttribute('open', '')
+    await expect(claudeDisclosure).toHaveAttribute('aria-expanded', 'true')
+    await expect(claudeDisclosure).toHaveAttribute('data-state', 'open')
+    await page.keyboard.press('Space')
+    await expect(claudeDisclosure).toHaveAttribute('aria-expanded', 'false')
     await expect(claudeDisclosure).toBeFocused()
     const disclosure = page.getByRole('button', { name: 'Reconnect Example (custom)', exact: true })
     const connect = page.getByRole('button', { name: 'Connect provider', exact: true })
@@ -107,7 +113,14 @@ for (const mobile of [false, true]) {
     const open = guidance.getByRole('button', { name: 'Open browser terminal for Example (custom)' })
     if (mobile) {
       const summaries = await page.locator('.provider-connections summary').all()
-      for (const target of [...summaries, disclosure, connect, open, guidance.getByRole('button', { name: 'Copy sign-in command for Example (custom)' })]) {
+      // Reconnect sits at the end of its row, never as loose text at the start.
+      const card = await page.locator('.provider-connections .credential-row').first().boundingBox()
+      const claudeBox = await claudeDisclosure.boundingBox()
+      expect(claudeBox!.x + claudeBox!.width).toBeGreaterThan(card!.x + card!.width * 0.6)
+      const row = await page.locator('.inventory li').first().boundingBox()
+      const opencodeBox = await disclosure.boundingBox()
+      expect(opencodeBox!.x + opencodeBox!.width).toBeGreaterThan(row!.x + row!.width * 0.6)
+      for (const target of [...summaries, claudeDisclosure, disclosure, connect, open, guidance.getByRole('button', { name: 'Copy sign-in command for Example (custom)' })]) {
         const box = await target.boundingBox()
         expect(box!.width).toBeGreaterThanOrEqual(44)
         expect(box!.height).toBeGreaterThanOrEqual(44)
