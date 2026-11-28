@@ -2044,23 +2044,6 @@ describe('ChatPanel recovery model picker', () => {
     wrapper.unmount()
   })
 
-  it('mcp shortcut remains available while a mode write is pending', async () => {
-    const { wrapper, store, sendMessage } = await mountPanel()
-    let resolveWrite!: (chat: ChatInfo) => void
-    vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveWrite = resolve }) as never)
-    await openComposerPicker(wrapper)
-    await choosePermissionMode(wrapper, 'Auto')
-    await flushPromises()
-    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
-    await textarea.setValue('/mcp')
-    await wrapper.get('.send-btn').trigger('click')
-    expect((wrapper.vm as unknown as { detailsTarget: string }).detailsTarget).toBe('mcp')
-    expect(sendMessage).not.toHaveBeenCalled()
-    resolveWrite({ ...store.chats[0], mode: 'auto' })
-    await flushPromises()
-    wrapper.unmount()
-  })
-
   it('recovery remains usable while a mode write is pending', async () => {
     const { wrapper, store } = await mountPanel()
     failWithUnsupportedModel(store)

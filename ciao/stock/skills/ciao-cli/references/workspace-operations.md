@@ -31,7 +31,7 @@
 
 ## Reloading tools
 
-Native provider TUI commands such as `/mcp`, `/reload-plugins` do not run here. Standalone `/mcp` is app navigation to Chat details → MCP, which runs the CLI's MCP command, for a supported chat; `/mcp ARG` is an ordinary prompt. When an MCP server, plugin or skill was added or changed, run `ciao chat reload`. For a server needing sign-in, direct the user to Chat details → MCP, which runs the agent's own MCP command in the in-app terminal (`claude mcp`, `opencode mcp`); Ciaobot does not run MCP sign-in itself.
+Native provider TUI commands such as `/mcp`, `/reload-plugins` do not run here. When an MCP server, plugin or skill was added or changed, run `ciao chat reload`. For a server needing sign-in, direct the user to Settings → MCP, whose button runs the agent's own MCP command in the in-app terminal (`claude mcp`, `opencode mcp`); Ciaobot does not run MCP sign-in itself.
 
 ## Projects
 
