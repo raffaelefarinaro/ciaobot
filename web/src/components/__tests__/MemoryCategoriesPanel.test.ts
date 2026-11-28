@@ -406,23 +406,33 @@ describe('MemoryCategoriesPanel', () => {
     wrapper.unmount()
   })
 
-  it('explains regions and note categories without changing or saving the registry', async () => {
-    // The reading is education, not a control: it teaches what a bounded region
-    // and a note category are, with examples, and it lives above the controls so
-    // the user's own list is the only thing that can change the registry.
+  it('explains when and where notes are saved without changing or saving the registry', async () => {
+    // The reading is education, not a control: it says what a category is, when
+    // a note is filed and where it goes, and it lives above the controls so the
+    // user's own list is the only thing that can change the registry.
     const wrapper = await mountPanel([...STOCK, ...SYSTEM])
 
+    expect(wrapper.get('.cat-lede').text()).toContain('own folder')
+    expect(wrapper.get('.cat-lede').text()).toContain('type:')
     const why = wrapper.get('.cat-why')
-    expect(why.text()).toContain('How memory is organized')
-    expect(why.text()).toContain('Profile & preferences')
-    expect(why.text()).toContain('bounded')
-    expect(why.text()).toContain('Notes, by category')
-    // One example of each kind, so the distinction is concrete rather than named.
-    expect(why.text()).toContain('jargon-free')
-    expect(why.text()).toContain('who someone is')
-    // A category organizes future notes; it is not an instruction to remember all.
-    expect(why.text()).toContain('future')
-    expect(why.text()).toContain('no empty folder is created')
+    expect(why.text()).toContain('When and where notes are saved')
+    expect(why.text()).toContain('After you archive a chat')
+    expect(why.text()).toContain('Workspace care tidies once a day')
+    expect(why.text()).toContain('nothing is saved for it until you approve')
+    expect(why.text()).toContain('Nothing from an automated run is saved')
+    expect(why.text()).toContain('People/<name>.md')
+    expect(why.text()).toContain('AGENTS.md')
+    expect(why.text()).toContain('No empty folders are created')
+    // The always-loaded block is a clause, not the lead.
+    expect(why.text()).not.toContain('Profile & preferences')
+
+    // The link leaves the app for the site's categories section, as the sidebar's does.
+    const link = why.get('a.cat-why-link')
+    expect(link.text()).toBe('Read how memory works')
+    expect(link.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/memory.html#categories')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toBe('noopener noreferrer')
+    expect(link.attributes('aria-label')).toBe('Read how memory works, opens the website in a new tab')
 
     // Static text: reading it neither saves nor requests anything.
     expect(apiPatch).not.toHaveBeenCalled()
@@ -446,7 +456,7 @@ describe('MemoryCategoriesPanel', () => {
     await nextTick()
 
     expect(wrapper.get('.skeleton').attributes('aria-label')).toBe('Loading categories')
-    expect(wrapper.get('.cat-why').text()).toContain('Notes, by category')
+    expect(wrapper.get('.cat-why').text()).toContain('When and where notes are saved')
     // …and it never reads as a claim about a vault with nothing in it.
     expect(wrapper.text()).not.toContain('no categories yet')
 
@@ -458,7 +468,7 @@ describe('MemoryCategoriesPanel', () => {
     await flushPromises()
     await nextTick()
 
-    expect(failed.get('.cat-why').text()).toContain('Profile & preferences')
+    expect(failed.get('.cat-why').text()).toContain('When and where notes are saved')
     expect(failed.get('.cat-failed-text').text()).toBe('vault unavailable')
     expect(failed.get('.cat-failed').get('.cat-btn').text()).toBe('Retry')
     expect(failed.text()).not.toContain('no categories yet')
