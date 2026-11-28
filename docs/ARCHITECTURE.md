@@ -35,7 +35,7 @@ Settings → MCP is one button per installed agent. Each button starts that agen
 ```
 README.md                      Product intro, quickstart, doc index.
 AGENTS.md                      Contributor guide for coding agents. Native providers load it at session start (Claude Code reads it directly since 2.1.277).
-INTEGRATIONS.md                Operator config (env vars, OAuth, MCP connectors, server runtime knobs).
+INTEGRATIONS.md                Agent CLI setup (Claude, Codex, OpenCode adapters) and the environment variables the engine reads or sets.
 PWA_API.md                     PWA API reference (endpoints, auth flow, state path).
 CONTRIBUTING.md                Contribution guide.
 docs/                          Long-form docs (this file, DEVELOPMENT.md).
@@ -975,7 +975,7 @@ Workspaces are archived the same way rather than deleted (`ciao/workspace_archiv
 ## Related docs
 
 - `docs/DEVELOPMENT.md`: setup, dev workflow, testing, change guidelines.
-- `INTEGRATIONS.md`: env vars, OAuth setup, MCP connectors, server runtime knobs.
+- `INTEGRATIONS.md`: agent CLI setup and the environment variables the engine reads or sets.
 - `PWA_API.md`: API endpoints, auth flow, state paths.
 - `docs/MEMORY_EVAL.md`: deterministic retrieval eval and the sandboxed live-vault probe runbook.
 - `docs/AGENT_CLI.md`: agent control-plane trust model, transport, telemetry, and the D-05/D-13 permission model.
