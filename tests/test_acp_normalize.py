@@ -159,7 +159,7 @@ def test_tool_call_update_refreshes_same_id_with_new_title_and_locations() -> No
 def test_usage_update_records_context_and_cost_without_event() -> None:
     n = _normalizer()
     assert n.feed({"sessionUpdate": "usage_update", "used": 10, "size": 200, "cost": {"amount": 0.5, "currency": "USD"}}) == []
-    assert n.usage == {"context_used": "10", "context_size": "200", "cost_usd": "0.5"}
+    assert n.usage == {"context_used": "10", "context_size": "200", "context_pct": "5.0%", "cost_usd": "0.5"}
     n.record_prompt_usage({"inputTokens": 3, "outputTokens": 4, "totalTokens": 7})
     assert n.usage["input_tokens"] == "3" and n.usage["total_tokens"] == "7"
 
@@ -197,7 +197,51 @@ def test_compaction_completed_sets_flag_and_status() -> None:
     assert n.compacted is True
 
 
-@pytest.mark.parametrize("status", ["in_progress", "failed", "cancelled"])
+def test_compaction_in_progress_reports_compacting() -> None:
+    n = _normalizer()
+    (event,) = n.feed({"sessionUpdate": "compaction_update", "compactionId": "c", "status": "in_progress"})
+    assert isinstance(event, SystemStatusEvent) and event.status == "Compacting context"
+    assert n.compacted is False
+
+
+# Real usage_update frames (wire shape, rate-limit _meta trimmed): claude-agent-acp 0.108.1 on
+# claude-haiku-5-5, and opencode 2.4.2 `opencode acp`. Both report used/size in tokens.
+_CLAUDE_USAGE = {"sessionUpdate": "usage_update", "used": 24992, "size": 1000000,
+                 "cost": {"amount": 0.00037696, "currency": "USD"},
+                 "_meta": {"_claude/origin": {"kind": "human"}, "_claude/model": "claude-haiku-5-5"}}
+_OPENCODE_USAGE = {"sessionUpdate": "usage_update", "used": 25821, "size": 1048576,
+                   "cost": {"amount": 0, "currency": "USD"}}
+
+
+@pytest.mark.parametrize(("frame", "pct"), [(_CLAUDE_USAGE, "2.5%"), (_OPENCODE_USAGE, "2.5%")])
+def test_usage_update_reports_the_context_percentage(frame: dict[str, Any], pct: str) -> None:
+    n = _normalizer()
+    assert n.feed(frame) == []
+    assert n.usage["context_pct"] == pct
+    assert (n.usage["context_used"], n.usage["context_size"]) == (str(frame["used"]), str(frame["size"]))
+
+
+@pytest.mark.parametrize(
+    ("used", "size", "pct"),
+    [(900, 1000, "90.0%"), (1200, 1000, "120.0%"), (0, 1000, "0.0%"), (5, 0, None), ("x", 10, None)],
+)
+def test_context_percentage_needs_a_window(used: object, size: object, pct: str | None) -> None:
+    n = _normalizer()
+    n.feed({"sessionUpdate": "usage_update", "used": used, "size": size})
+    assert n.usage.get("context_pct") == pct
+
+
+def test_compaction_drops_the_stale_occupancy_until_the_next_report() -> None:
+    n = _normalizer()
+    n.feed(_OPENCODE_USAGE)
+    n.feed({"sessionUpdate": "compaction_update", "compactionId": "c", "status": "completed"})
+    # opencode sends no usage_update after a compaction: the old figure must not ride on the result.
+    assert "context_pct" not in n.usage and "context_used" not in n.usage
+    n.feed({"sessionUpdate": "usage_update", "used": 10714, "size": 1000000})
+    assert n.usage["context_pct"] == "1.1%"
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
 def test_compaction_in_progress_does_not(status: str) -> None:
     n = _normalizer()
     assert n.feed({"sessionUpdate": "compaction_update", "compactionId": "c", "status": status}) == []
@@ -393,7 +437,8 @@ def test_fixture_replay_claude_turn_text_and_state() -> None:
     assert text.result == "Looking at the file.\n\nDone."
     assert text.final_text == "Done."
     assert n.compacted is True
-    assert n.usage == {"context_used": "2", "context_size": "200000"}
+    # The usage_update precedes the compaction, which leaves only the window size standing.
+    assert n.usage == {"context_size": "200000"}
 
 
 # -- subagents and skills (opencode `subagent`/`skill`, Claude `Agent`) -----------------

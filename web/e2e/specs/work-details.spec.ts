@@ -70,3 +70,19 @@ for (const mobile of [false, true]) {
     })
   })
 }
+
+test('the Context meter and Compact read an ACP turn\'s usage', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await isolate(page, `work-details-acp-usage-${testInfo.workerIndex}`)
+  await boot(page, '/chat/alpha-chat-2', COMPOSER)
+  // The fixture chat starts empty; its default transcript ends on a reply with ACP usage.
+  await page.request.post('/__fixture__/transcript', { data: {} })
+  await page.reload()
+  await expect(page.locator('.startup-overlay')).toHaveCount(0)
+  const surface = page.locator('#chat-work-rail')
+  const meter = surface.getByRole('meter', { name: 'Context window used' })
+  await expect(meter).toContainText('39% used')
+  await expect(meter).toHaveAttribute('title', '78.4k of 200k tokens')
+  await expect(surface.getByRole('button', { name: 'Compact' })).toBeEnabled()
+  await surface.locator('section.agent-context').screenshot({ path: testInfo.outputPath('context.png') })
+})

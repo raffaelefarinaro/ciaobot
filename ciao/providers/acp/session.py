@@ -920,7 +920,9 @@ class AcpSession:
         dumped = usage.model_dump(by_alias=True, exclude_none=True) if hasattr(usage, "model_dump") else dict(usage)
         fresh = UpdateNormalizer(self.spec, self.session_id)
         fresh.record_prompt_usage(dumped if isinstance(dumped, Mapping) else {})
-        return dict(fresh.usage)
+        # The turn's token counts join the session's context occupancy and cost, which arrive
+        # in usage_update frames before the response.
+        return {**self._normalizer.usage, **fresh.usage}
 
     def _unexpected_stop(self) -> ResultEvent:
         # Raw adapter stderr is logged for diagnosis and never placed in the event.

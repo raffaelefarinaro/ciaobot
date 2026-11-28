@@ -414,6 +414,38 @@ async def test_compaction_yields_one_context_compacted_event(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_result_usage_keeps_context_occupancy_beside_prompt_tokens(tmp_path: Path) -> None:
+    """Claude answers a prompt with token counts; the usage_update before it must not be dropped.
+
+    The frames are claude-agent-acp 0.108.1's, captured from a real haiku turn and then a /compact.
+    """
+    turn = [
+        {"update": {"sessionUpdate": "usage_update", "used": 24992, "size": 1000000,
+                    "cost": {"amount": 0.00037696, "currency": "USD"}}},
+        {"stop": "end_turn", "usage": {"inputTokens": 2, "outputTokens": 4, "cachedReadTokens": 24986,
+                                       "cachedWriteTokens": 0, "totalTokens": 24992}},
+    ]
+    compact = [
+        {"update": {"sessionUpdate": "compaction_update", "compactionId": "c1", "status": "in_progress"}},
+        {"update": {"sessionUpdate": "compaction_update", "compactionId": "c1", "status": "completed"}},
+        {"update": {"sessionUpdate": "usage_update", "used": 10714, "size": 1000000}},
+        {"stop": "end_turn", "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}},
+    ]
+    async with _started(tmp_path, prompts=[{"steps": turn}, {"steps": compact}]) as harness:
+        (result,) = [e for e in await _collect(harness) if isinstance(e, ResultEvent)]
+        assert result.usage["context_pct"] == "2.5%"
+        assert (result.usage["context_used"], result.usage["context_size"]) == ("24992", "1000000")
+        assert (result.usage["input_tokens"], result.usage["output_tokens"]) == ("2", "4")
+        assert result.usage["cost_usd"] == "0.00037696"
+
+        events = await _collect(harness, "/compact")
+        statuses = [e.status for e in events if isinstance(e, SystemStatusEvent)]
+        assert statuses == ["Compacting context", "Compacted context"]
+        (result,) = [e for e in events if isinstance(e, ResultEvent)]
+        assert (result.usage["context_used"], result.usage["context_pct"]) == ("10714", "1.1%")
+
+
+@pytest.mark.asyncio
 async def test_late_turn_with_only_usage_closes_silently(tmp_path: Path) -> None:
     async with _started(tmp_path, spec_quiet_period_s=0.2) as harness:
         seen: list[Any] = []

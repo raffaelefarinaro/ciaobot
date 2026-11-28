@@ -3811,12 +3811,48 @@ describe('ephemeral status events', () => {
     fakeSockets[0].onmessage?.({
       data: JSON.stringify({ type: 'status', message: 'compacting' }),
     })
-    expect(store.compactState[chatId]).toEqual({ running: true, tokens: null })
+    expect(store.compactState[chatId]).toEqual({ running: true })
 
     fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'status', message: 'Compacted context: 100,000 → 20,000 tokens' }),
+      data: JSON.stringify({ type: 'status', message: 'Compacted context' }),
     })
-    expect(store.compactState[chatId]).toEqual({ running: false, tokens: { pre: 100000, post: 20000 } })
+    expect(store.compactState[chatId]).toEqual({ running: false })
+    // The figure before the compaction no longer holds until the turn reports a new one.
+    expect(store.contextReports[chatId]?.usage).toBeNull()
+    // Dated after every held message, so a browser clock behind the server cannot order it first.
+    expect(Date.parse(store.contextReports[chatId]!.at)).toBeGreaterThanOrEqual(Date.now() - 1000)
+  })
+
+  test('dates the compaction placeholder after a reply stamped ahead of the browser clock', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-compact-skew'
+    store.activeChatId = chatId
+    const future = new Date(Date.now() + 3_600_000).toISOString()
+    store.messages[chatId] = [{ role: 'assistant', content: 'a', timestamp: future, usage: { context_pct: '40%' } }]
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({ data: JSON.stringify({ type: 'status', message: 'Compacted context' }) })
+    expect(Date.parse(store.contextReports[chatId]!.at)).toBeGreaterThan(Date.parse(future))
+  })
+
+  test('keeps the usage of a compaction turn that leaves no reply as the live context report', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-compact-usage'
+    store.activeChatId = chatId
+    store.messages[chatId] = [{ role: 'user', content: 'hi', timestamp: '' }]
+    store.connectWs(chatId)
+
+    // The engine's frames for a Claude /compact over ACP: progress, completion, then the result with the new usage.
+    for (const message of ['Compacting context', 'Compacted context']) {
+      fakeSockets[0].onmessage?.({ data: JSON.stringify({ type: 'status', message }) })
+    }
+    const usage = { input_tokens: '0', output_tokens: '0', context_used: '10714', context_size: '1000000', context_pct: '1.1%' }
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'result', text: '', is_error: false, usage, session_id: 's1', completed_at: '2026-11-28T10:05:00Z' }),
+    })
+    expect(store.contextReports[chatId]).toEqual({ usage, at: '2026-11-28T10:05:00Z' })
+    expect((store.messages[chatId] || []).some(m => m.role === 'assistant')).toBe(false)
   })
 
   test('settles a compaction still marked running when the turn result arrives', () => {

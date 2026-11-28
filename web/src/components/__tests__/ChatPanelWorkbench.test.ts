@@ -323,6 +323,43 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
+  it('feeds the Context meter and Compact from an ACP turn, then from a compaction that left no reply', async () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    // The usage an ACP turn carries: the engine's percentage beside the adapter's token counts.
+    const usage = { input_tokens: '2', output_tokens: '4', context_used: '24992', context_size: '1000000', context_pct: '2.5%', cost_usd: '0.00037696' }
+    const wrapper = await mountPanel([
+      { role: 'user', content: 'hi', timestamp: '2026-11-28T10:00:00Z', turn_index: 0 },
+      { role: 'assistant', content: 'hi', timestamp: '2026-11-28T10:00:02Z', effective_model: 'claude-haiku-5-5', usage },
+    ])
+    observers.forEach(fire => fire())
+    await nextTick()
+
+    const section = wrapper.get('#chat-work-rail').findComponent({ name: 'AgentContextSection' })
+    expect(section.props()).toMatchObject({ contextPct: 2.5, compacted: false, contextUsed: 24992, contextSize: 1000000 })
+
+    // A /compact turn ends without a reply; its usage arrives as the store's live report.
+    const store = useProjectStore()
+    store.contextReports['chat-1'] = { usage: null, at: '2026-11-28T10:05:00Z' }
+    await nextTick()
+    expect(section.props()).toMatchObject({ contextPct: null, compacted: true })
+    store.contextReports['chat-1'] = {
+      usage: { context_used: '10714', context_size: '1000000', context_pct: '1.1%' },
+      at: '2026-11-28T10:05:01Z',
+    }
+    await nextTick()
+    expect(section.props()).toMatchObject({ contextPct: 1.1, compacted: false, contextUsed: 10714 })
+    wrapper.unmount()
+  })
+
   it('shows Chat details as a rail on a wide pane, hidden from its heading and reopened from the info tab', async () => {
     // ChatPanel observes more than one element; report a wide pane to all.
     const observers: Array<() => void> = []

@@ -1373,6 +1373,8 @@
           :project="project"
           :context-pct="contextPct"
           :compacted="contextUsage.compacted"
+          :context-used="contextUsage.used"
+          :context-size="contextUsage.size"
           :compacting="compacting"
           :compact-disabled="compactDisabled"
           :reveal-key="contextRevealKey"
@@ -2221,11 +2223,11 @@ const shownTools = computed(() => railShowAll.value.tools ? railTools.value : ra
 // as a meter, because a percentage means nothing without the window's size
 // beside it. Providers report it as text ("13.2%"), so parseFloat, not
 // Number. Null when it reported none. A compaction newer than the last usage
-// rescales it by the compaction's post/pre tokens, or hides the meter when
-// those are unknown.
+// hides the figure until the provider reports a new one. A compaction turn
+// leaves no reply, so its report comes from the store's live context reports.
 const contextUsage = computed(() => latestContextUsage(
   renderItems.value,
-  chat.value ? store.compactState[chat.value.chat_id]?.tokens ?? null : null,
+  chat.value ? store.contextReports[chat.value.chat_id] ?? null : null,
 ))
 const contextPct = computed<number | null>(() => contextUsage.value.pct)
 const compacting = computed(() => Boolean(

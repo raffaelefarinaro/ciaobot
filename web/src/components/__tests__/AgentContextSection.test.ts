@@ -242,6 +242,15 @@ describe('AgentContextSection', () => {
     expect(wrapper.find('.agent-context-brief').exists()).toBe(false)
   })
 
+  it('shows the meter and Compact for an ACP usage report, with its tokens in the meter title', async () => {
+    const wrapper = await mountSection({ contextPct: 2.5, contextUsed: 24992, contextSize: 1000000 })
+    const meter = wrapper.get('[role="meter"]')
+    expect(meter.text()).toBe('2.5% used')
+    expect(meter.attributes('title')).toBe('25k of 1M tokens')
+    expect(meter.attributes('aria-valuetext')).toBe('2.5%, 25k of 1M tokens')
+    expect(wrapper.get('.agent-context-compact').text()).toBe('Compact')
+  })
+
   it('shows the context used from a string percentage', async () => {
     const wrapper = await mountSection({ contextPct: 13.2 })
     expect(wrapper.get('[role="meter"]').text()).toBe('13% used')
