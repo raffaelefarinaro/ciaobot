@@ -26,7 +26,7 @@ import {
 import { runningWorkFrom, type RunningWork, type WorkCard } from '../lib/runningWork'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
-import { parseCompactedStatus, type CompactTokens } from '../lib/contextUsage'
+import { isCompactedStatus, type LiveContextReport } from '../lib/contextUsage'
 import {
   isRestartDrainMessage,
   reloadWhenServerReady,
@@ -5726,9 +5726,11 @@ export const useProjectStore = defineStore('projects', () => {
   const compactRequests = ref<Record<string, boolean>>({})
 
   // Live compaction per chat, from the stream's status events, so an automatic
-  // compaction also shows on the Compact button. `tokens` are the
-  // compact_boundary pre/post counts once the compaction has finished.
-  const compactState = ref<Record<string, { running: boolean; tokens: CompactTokens | null }>>({})
+  // compaction also shows on the Compact button.
+  const compactState = ref<Record<string, { running: boolean }>>({})
+  // The newest context occupancy the stream reported per chat. A compaction
+  // turn leaves no reply to carry its usage, so the meter reads it from here.
+  const contextReports = ref<Record<string, LiveContextReport>>({})
   // A turn that ends mid-compaction (stop, error) must not leave the button stuck.
   function settleCompactState(chatId: string) {
     const cs = compactState.value[chatId]
@@ -6774,11 +6776,12 @@ export const useProjectStore = defineStore('projects', () => {
         // the live Thinking/Working trace (one line, updated in place)
         // instead of dropping them or stacking a chat bubble per tick.
         const isCompacting = /compact/i.test(message)
-        const compacted = parseCompactedStatus(message)
-        if (compacted) {
-          compactState.value[chatId] = { running: false, tokens: compacted.tokens }
+        if (isCompactedStatus(message)) {
+          compactState.value[chatId] = { running: false }
+          // The figure before the compaction no longer holds; the turn's result brings the new one.
+          contextReports.value[chatId] = { usage: null, at: new Date().toISOString() }
         } else if (isCompacting) {
-          compactState.value[chatId] = { running: true, tokens: null }
+          compactState.value[chatId] = { running: true }
         }
         if (isCompacting) {
           _pushStatusLine(chatId, message)
@@ -6941,11 +6944,14 @@ export const useProjectStore = defineStore('projects', () => {
           const chat = chats.value.find(c => c.chat_id === chatId)
           if (chat) chat.session_id = event.session_id
         }
+        const finishedAt = event.completed_at || new Date().toISOString()
+        // A compaction turn ends with no reply, so its usage would reach no message.
+        if (event.usage?.context_pct) contextReports.value[chatId] = { usage: event.usage, at: finishedAt }
         if (text.trim() || event.is_error) {
           msgs.push({
             role: 'assistant',
             content: text.trim(),
-            timestamp: event.completed_at || new Date().toISOString(),
+            timestamp: finishedAt,
             is_error: event.is_error,
             effective_model: event.effective_model,
             usage: event.usage,
@@ -7185,7 +7191,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, stopRecovery, tryChatRetryNow, continueRecovery, checkRecoveryStatus, acknowledgeRecoveryReconciled, unknownRecoveryOutcomes, recoveryOutcomeStorageUnavailable,
     switchChat, attachBesideChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
-    sendMessage, stopChat, compactChat, compactRequests, compactState, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages, addPendingFiles, removePendingFile,
+    sendMessage, stopChat, compactChat, compactRequests, compactState, contextReports, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages, addPendingFiles, removePendingFile,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

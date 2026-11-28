@@ -11,5 +11,6 @@
   ["tool_result", "toolu_bash", "toolu_task"],
   ["tool_result", "toolu_task", null],
   ["system", null, null],
+  ["system", null, null],
   ["text", null, null]
 ]

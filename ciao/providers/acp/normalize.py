@@ -323,8 +323,15 @@ class UpdateNormalizer:
         if kind == "session_info_update":
             return self._session_info(u)
         if kind == "compaction_update":
-            if u.get("status") == "completed":
+            status = u.get("status")
+            if status == "in_progress":
+                return [SystemStatusEvent(type="system", status="Compacting context")]
+            if status == "completed":
                 self.compacted = True
+                # The occupancy reported before the compaction no longer holds. Claude reports the
+                # new one in the usage_update that follows; opencode reports none until its next turn.
+                self.usage.pop("context_used", None)
+                self.usage.pop("context_pct", None)
                 return [SystemStatusEvent(type="system", status="Compacted context")]
             return []
         if kind in _SILENT_KINDS:
@@ -482,6 +489,11 @@ class UpdateNormalizer:
             self.usage["context_used"] = str(used)
         if size is not None:
             self.usage["context_size"] = str(size)
+        pct = context_pct(self.usage.get("context_used"), self.usage.get("context_size"))
+        if pct:
+            self.usage["context_pct"] = pct
+        else:
+            self.usage.pop("context_pct", None)
         cost = u.get("cost")
         if isinstance(cost, Mapping) and cost.get("amount") is not None:
             self.usage["cost_usd"] = str(cost["amount"])
@@ -501,6 +513,21 @@ class UpdateNormalizer:
             if option_id == self._model_config_id and value != previous:
                 events.append(ModelChangedEvent(type="model_changed", model=value))
         return events
+
+
+def context_pct(used: str | None, size: str | None) -> str:
+    """The share of the context window in use, as the PWA reads it ("13.2%"), or "" when unknown.
+
+    Both adapters report ``used`` and ``size`` of a ``usage_update`` in tokens (verified against
+    claude-agent-acp 0.108.1 and opencode 2.4.2). A window of 0 or a non-number yields "".
+    """
+    try:
+        used_tokens, window = float(used or ""), float(size or "")
+    except ValueError:
+        return ""
+    if not (window > 0 and used_tokens >= 0):
+        return ""
+    return f"{used_tokens / window * 100:.1f}%"
 
 
 _SILENT_KINDS = frozenset(

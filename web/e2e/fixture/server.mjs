@@ -127,7 +127,8 @@ const TRANSCRIPT = [
     sent_at: '2026-01-01T09:53:00Z',
     duration_ms: 60000,
     effective_model: 'synthetic-model',
-    usage: { input_tokens: 18, output_tokens: 6478, context_pct: '39.2%' },
+    // An ACP turn's usage: the engine's percentage beside the adapter's token counts.
+    usage: { input_tokens: 18, output_tokens: 6478, context_used: '78400', context_size: '200000', context_pct: '39.2%' },
     turn_index: 1,
   },
 ]

@@ -22,6 +22,8 @@
       aria-valuemin="0"
       aria-valuemax="100"
       aria-label="Context window used"
+      :aria-valuetext="contextTokensLabel ? `${contextPctLabel}, ${contextTokensLabel}` : undefined"
+      :title="contextTokensLabel || undefined"
     >
       <span class="agent-context-track"><span class="agent-context-fill" :style="{ width: `${Math.min(100, contextPct)}%` }"></span></span>
       <span class="agent-context-pct">{{ contextPctLabel }} used</span>
@@ -139,6 +141,9 @@ const props = defineProps<{
   contextPct: number | null
   /** A compaction is newer than the last reported usage, so the old figure no longer holds. */
   compacted?: boolean
+  /** Tokens in use and the window's size behind `contextPct`, when the provider reported them. */
+  contextUsed?: number | null
+  contextSize?: number | null
   /** A compact request is in flight. */
   compacting: boolean
   /** The chat is streaming or a compact request is in flight. */
@@ -278,6 +283,14 @@ const loadedTokens = computed(() => {
   if (props.project && briefText.value) total += briefTokens.value
   if (repoInstr.value) total += tokensFor(repoInstr.value.chars)
   return total
+})
+
+function shortTokens(tokens: number): string {
+  return tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M` : formatTokens(Math.round(tokens))
+}
+const contextTokensLabel = computed(() => {
+  if (props.contextPct == null || props.contextUsed == null || !props.contextSize) return ''
+  return `${shortTokens(props.contextUsed)} of ${shortTokens(props.contextSize)} tokens`
 })
 
 const contextPctLabel = computed(() => {

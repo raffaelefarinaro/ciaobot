@@ -35,6 +35,16 @@ export const Failed: Story = {
     expect(canvas.getByRole('button', { name: 'Retry' })).toBeTruthy()
   },
 }
+// An ACP chat: the engine's percentage with the adapter's token counts behind it.
+export const AcpUsage: Story = {
+  args: { contextPct: 2.5, contextUsed: 24992, contextSize: 1000000 },
+  play: async ({ canvas }) => {
+    const meter = canvas.getByRole('meter')
+    expect(meter.textContent).toContain('2.5% used')
+    expect(meter.getAttribute('title')).toBe('25k of 1M tokens')
+    expect(canvas.getByRole('button', { name: 'Compact' })).toBeTruthy()
+  },
+}
 export const Compacting: Story = {
   args: { compacted: true, compacting: true, compactDisabled: true, contextPct: null },
   play: async ({ canvas }) => { expect((canvas.getByRole('button', { name: 'Compacting…' }) as HTMLButtonElement).disabled).toBe(true) },
