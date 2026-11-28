@@ -904,10 +904,11 @@ def test_the_needs_you_standard_lives_in_the_preamble_and_the_prompt_points_at_i
     assert "Decide what to trim. (path: AGENTS.md)" in regions
     assert "Choose Optimize" not in regions
     # The item is written only for a region above 100% of its cap, and names only those.
-    assert "only when, after this step, at least one region is still above 100% of its cap" in regions
-    assert "Name only the regions above 100%" in regions
+    assert "`pct` in `ciao memory status` (`data.regions.*.pct`) of 100.5 or more" in regions
+    assert "Name only the regions with `pct` of 100.5 or more" in regions
     assert "Never write a percentage of 100% or less" in regions
-    assert "write no item when no region is above 100%" in regions
+    assert "write no item when no region is above 100" in regions
+    assert "(a `note:` is enough for a region from 85 up to 100.5)" in regions
     assert "at most a `note:`, never a needs-you item" in regions
 
 
