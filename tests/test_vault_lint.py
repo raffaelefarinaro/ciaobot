@@ -1050,6 +1050,37 @@ def test_ciaoignore_skips_generated_sources_from_every_check(tmp_path: Path):
     assert after["orphans"] == []
 
 
+def test_generated_workspace_files_are_never_hygiene_findings(tmp_path: Path):
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    (vault / "People").mkdir()
+    for name in (
+        "Care-Report.md", "Memory-Consolidations.md", "Unsure.md", "Learnings.md",
+        "Observations.md", "Memory-Review-Rules.md", "Task-Rules.md",
+        "Import-Report.md", ".care-notes.md",
+    ):
+        (vault / "Workspace" / name).write_text("# Generated\n", encoding="utf-8")
+    (vault / "People" / "Real.md").write_text("# Real\n[r](../Workspace/Learnings.md)\n", encoding="utf-8")
+    (vault / "Workspace" / "Mine.md").write_text("# Mine\n", encoding="utf-8")
+
+    issues = vault_lint.run_validation(vault)
+    flagged = {e["source"] for e in issues["frontmatter_errors"]}
+    assert flagged == {"People/Real.md", "Workspace/Mine.md"}
+    assert issues["broken_markdown_links"] == []
+    assert not any(o.startswith("Workspace/") and o != "Workspace/Mine.md" for o in issues["orphans"])
+
+
+def test_ciaoignore_exact_path_skips_hygiene_findings(tmp_path: Path):
+    vault = tmp_path / "memory-vault"
+    (vault / "People").mkdir(parents=True)
+    (vault / "People" / "Gen.md").write_text("# Gen\n", encoding="utf-8")
+    (vault / "People" / "Real.md").write_text("# Real\n", encoding="utf-8")
+    (vault / ".ciaoignore").write_text("People/Gen.md\n", encoding="utf-8")
+    issues = vault_lint.run_validation(vault)
+    assert [e["source"] for e in issues["frontmatter_errors"]] == ["People/Real.md"]
+    assert issues["orphans"] == ["People/Real.md"]
+
+
 def test_ciaoignored_files_remain_valid_link_targets(tmp_path: Path):
     vault = tmp_path / "memory-vault"
     vault.mkdir()
