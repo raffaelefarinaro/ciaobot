@@ -110,6 +110,22 @@ describe('MemoryUnsurePanel', () => {
     expect(wrapper.get('.mu').attributes('aria-busy')).toBe('true')
   })
 
+  it('counts one thing as waiting: the unticked lines, the same number the sidebar badge shows', async () => {
+    // A category line (settled in a chat) and a malformed line are still the person's to decide; ticked lines are not.
+    answer(listOf([
+      item('a'), item('b', { kind: 'category' }), item('c', { malformed: true }),
+      item('d', { checked: true }), item('e', { checked: true, kind: 'rule' }),
+    ]))
+    const wrapper = await mountPanel()
+    const { useUnsureStore } = await import('../../stores/unsure')
+    const waiting = useUnsureStore().list!.counts.waiting
+    expect(waiting).toBe(3)
+    // The header's total is that number (it opens on "1 of 3"); the approved group is its own, uncounted.
+    expect(wrapper.get('[data-unsure-count]').text()).toBe(`1 of ${waiting}`)
+    expect(wrapper.findAll('[data-unsure-row]:not(.mu-row--approved)')).toHaveLength(waiting)
+    expect(wrapper.get('.mu-group-title').text()).toBe('Approved, not saved yet 2')
+  })
+
   it('lists the waiting items with their reason and chats, and opens the first one in full', async () => {
     const full = item('a', {
       title: 'Should I remember that Mo now works at Acme?',

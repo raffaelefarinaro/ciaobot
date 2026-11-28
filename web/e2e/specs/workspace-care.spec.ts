@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { boot, horizontalOverflow, isolate } from '../support/app'
 import { careReports } from '../../src/lib/careReportFixture'
+import { UNSURE_FIXTURE_ITEMS, unsureFixtureList } from '../../src/stories/unsureFixture'
 import type { CareReport } from '../../src/lib/careReport'
 
 /**
@@ -177,6 +178,24 @@ test.describe('Workspace care', () => {
     await expect(heading).toBeInViewport()
     await expect(dialog.getByRole('heading', { name: /^Care report/ })).not.toBeInViewport()
     await page.screenshot({ path: 'test-results/workspace-care-see-details.png' })
+  })
+
+  test('the Unsure item carries no number: its button and the sidebar badge show the live count', async ({ page }) => {
+    await answerCare(page, careReports.needsYou)
+    const list = unsureFixtureList('alpha', UNSURE_FIXTURE_ITEMS)
+    await page.route(/\/api\/memory\/unsure(\?.*)?$/, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(list),
+    }))
+    await boot(page, '/memory/care', '.mc-need')
+    const waiting = list.counts.waiting
+    expect(waiting).toBeGreaterThan(0)
+    const need = page.locator('.mc-need').nth(2)
+    await expect(need.locator('.mc-need-title')).toHaveText('Suggestions are waiting for your decision.')
+    await expect(need.getByRole('button', { name: /^Open Unsure/ })).toHaveText(`Open Unsure · ${waiting}`)
+    // The same number as the Unsure row in the sidebar.
+    await expect(page.locator('a[href="/memory/unsure"] .memory-nav-count')).toHaveText(String(waiting))
   })
 
   test('what needs you leads and the steps and notes fold below it', async ({ page }) => {

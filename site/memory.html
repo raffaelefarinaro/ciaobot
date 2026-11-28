@@ -45,6 +45,7 @@
       <ul class="toc" aria-label="On this page">
         <li><a href="#loop">The loop</a></li>
         <li><a href="#layers">Three layers</a></li>
+        <li><a href="#categories">Categories</a></li>
         <li><a href="#control">You can always check</a></li>
         <li><a href="#care">Workspace care</a></li>
         <li><a href="#backup">Back it up</a></li>
@@ -108,6 +109,16 @@
       </ul>
     </section>
 
+    <section id="categories" aria-labelledby="categories-h">
+      <h2 id="categories-h">Categories: what is saved, and where</h2>
+      <p>A category is a kind of note, usually with its own folder (People, Projects, Places and so on), and the <code>type:</code> line each note is written with. Memory › Categories lists them and lets you turn them on or off.</p>
+      <ul>
+        <li><strong>When.</strong> After you archive a chat, the memory pass files what it is sure about, and Workspace care tidies the notes once a day. What it is unsure about waits in Memory › Unsure, and nothing is saved for it until you approve. Nothing from an automated run is saved, because that was not you. A pattern seen in fewer than three chats waits on the Unsure list until it has shown up in three.</li>
+        <li><strong>Where.</strong> A fact about a person goes to <code>People/&lt;name&gt;.md</code> and a project fact goes to that project's note. Your general rules and preferences go to core memory, the short block in <code>AGENTS.md</code> that every chat loads. Other notes go to the folder of the matching category, and reusable how-to lessons go to <code>Workspace/Learnings.md</code>.</li>
+        <li><strong>Changing the list.</strong> Turning a category off keeps its notes but stops new ones being filed there. Adding one gives future notes of that kind their own folder. No empty folders are created. A note that fits no category is raised on the Unsure list as a question to add one.</li>
+      </ul>
+    </section>
+
     <section id="control" aria-labelledby="control-h">
       <h2 id="control-h">You can always check</h2>
       <ul>
@@ -116,8 +127,8 @@
         <li><strong>Git is the undo.</strong> The agent writes to your notes directly, and the folder is a Git repository, so every change is in its history and can be reverted.</li>
         <li><strong>Memory Map.</strong> See the whole vault as a graph of notes and links, or as a list, and open any note from it.</li>
         <li><strong>Old notes are flagged, never deleted.</strong> You decide whether to retire them, and retired notes stay readable.</li>
-        <li><strong>What is not saved.</strong> Nothing from an automated run, because that was not you. A pattern seen in fewer than three chats is counted quietly, not saved as a fact. That a task was finished is not saved either, because the task already records it.</li>
-        <li><strong>Categories decide what gets its own note.</strong> Add one in the Categories tab of Memory.</li>
+        <li><strong>What is not saved.</strong> Nothing from an automated run, because that was not you. A pattern seen in fewer than three chats waits on the Unsure list until it has shown up in three. That a task was finished is not saved either, because the task already records it.</li>
+        <li><strong>Categories decide what gets its own note.</strong> See <a href="#categories">Categories</a>.</li>
       </ul>
     </section>
 

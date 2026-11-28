@@ -424,9 +424,14 @@ const ACTION_LABELS: Record<'proposal' | 'unsure' | 'optimize' | 'file', string>
  * The label of an item's way to its file: the destination button of a
  * proposal, Unsure or the guide, or the quiet "Open note" beside a decision.
  * '' when there is none: the report itself is reached through "See details".
+ * The report is a snapshot of the last run, so the Unsure item's sentence
+ * carries no number; `waiting` is the live count of unticked lines
+ * (`/api/memory/unsure`, the same number as the sidebar badge) and goes on the
+ * button, "Open Unsure · 57". Nothing is added while it is unknown or 0.
  */
-export function needActionLabel(action: CareNeedAction): string {
-  return action === 'none' || action === 'report' ? '' : ACTION_LABELS[action]
+export function needActionLabel(action: CareNeedAction, waiting = 0): string {
+  if (action === 'none' || action === 'report') return ''
+  return action === 'unsure' && waiting > 0 ? `${ACTION_LABELS.unsure} · ${waiting.toLocaleString()}` : ACTION_LABELS[action]
 }
 
 /**
