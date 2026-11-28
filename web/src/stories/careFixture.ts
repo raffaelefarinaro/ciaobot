@@ -7,6 +7,7 @@ import type { CareReport } from '../lib/careReport'
 import { CARE_PROPOSAL_PATH, CARE_WORKSPACE, careReports } from '../lib/careReportFixture'
 import type { FixtureRoute } from './fixtureBoundary'
 import { held, json } from './homeWindowsFixture'
+import { unsureFixtureList } from './unsureFixture'
 
 export { careReports, CARE_PROPOSAL_PATH, CARE_WORKSPACE }
 
@@ -29,6 +30,11 @@ export function careRoute(report: CareReport | CareReport[] | 'held' | 'failed')
         : json(report)
     },
   }
+}
+
+/** The Unsure read the page makes for the Open Unsure button's live count: the shared synthetic list. */
+export function careUnsureRoute(): FixtureRoute {
+  return { method: 'GET', path: `/api/memory/unsure?workspace=${CARE_WORKSPACE}`, respond: () => json(unsureFixtureList(CARE_WORKSPACE)) }
 }
 
 /** The care schedule's run-now, accepted, and the automations re-read that follows it. */
