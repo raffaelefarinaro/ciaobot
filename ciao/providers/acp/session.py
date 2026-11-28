@@ -503,9 +503,18 @@ class AcpSession:
 
         A subagent sent to the background (OpenCode always does this) is tracked the same way, with
         no pid: it ends when the provider reports the child's terminal status, and its end notice
-        names it as a subagent rather than a shell.
+        names it as a subagent rather than a shell. A child session no subagent call claims (its own
+        top-level ``Subagent`` node, ``child:<session>``) is tracked from that node: OpenCode's own
+        continuation can launch a subagent whose call never reaches the client, and the child is
+        then the only sign of the work.
         """
         for event in events:
+            if (
+                isinstance(event, ToolUseEvent) and event.type == "tool_use" and event.tool_name == "Subagent"
+                and event.parent_tool_use_id is None and (event.tool_use_id or "").startswith("child:")
+            ):
+                self._shells.track_unpolled(event.tool_use_id or "", command=event.tool_input, subagent=True)
+                continue
             if isinstance(event, ToolUseEvent) and event.type == "tool_use" and event.tool_name == "Agent" and event.tool_use_id:
                 # A re-announce carries the description: the latest one is kept.
                 self._subagent_calls[event.tool_use_id] = event.tool_input

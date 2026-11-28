@@ -349,3 +349,80 @@ def test_a_background_subagent_is_tracked_but_not_counted_as_a_running_shell() -
     assert shells.tracking and shells.count == 1
     shells.release("call-sh")
     assert shells.tracking and shells.count == 0
+
+
+# -- a subagent launched by OpenCode's own continuation: only its child session reaches us -----
+
+# Shapes from a real Workspace care run: after subagent A finished, OpenCode's continuation
+# launched subagent B, and no subagent call for B reached the client, only B's child session.
+_CONTINUATION = Path(__file__).parent / "fixtures" / "acp" / "opencode_continuation_subagent.jsonl"
+_CHILD_B = "child:ses_dde8ee974ffeWXuOEWEM82ZMrG"
+
+
+def _feed(session: AcpSession, provider: OpencodeAcpProvider, normalizer: UpdateNormalizer, line: str) -> None:
+    message = json.loads(line)
+    if message.get("method") == "session/update":
+        events = normalizer.feed(message["params"]["update"])
+    elif message.get("method") == _CHILD_METHOD:
+        events = provider.ext_update(normalizer, _CHILD_METHOD, message["params"])
+    else:
+        return
+    session._finish_shells(events)
+    session._track_shells(events)
+
+
+@pytest.mark.asyncio
+async def test_a_child_no_call_claims_is_background_work_until_it_ends(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_e0815d817ffeh7L7ocNuPWytBu")
+    session = _session_stub()
+    ended: list[Any] = []
+    session._touch_late = lambda events, *, substantive: ended.extend(events)  # type: ignore[method-assign]
+    # Turn 1: subagent A is launched by a call and finishes.
+    for line in _SUBAGENT_RUN.read_text(encoding="utf-8").splitlines():
+        _feed(session, provider, normalizer, line)
+    await _settle_ends(session)
+    assert not session.background_shells_running
+
+    lines = _CONTINUATION.read_text(encoding="utf-8").splitlines()
+    for line in lines[:-1]:
+        _feed(session, provider, normalizer, line)
+    # B runs: its child session is the only sign, and it counts as background work.
+    assert session.background_shells_running
+    assert session.running_shells == 0  # a subagent, not a shell
+
+    _feed(session, provider, normalizer, lines[-1])
+    await _settle_ends(session)
+    assert not session.background_shells_running
+    ends = [event for event in ended if event.type == "shell_finished"]
+    assert [(event.tool_use_id, event.subagent, event.command) for event in ends][-1] == (
+        _CHILD_B, True, "Review recent memory",
+    )
+
+
+def test_a_child_claimed_after_its_own_node_opened_closes_that_node_too(tmp_path: Path) -> None:
+    # The child's title did not match the call's description, so it opened its own node; the
+    # launch acknowledgement then claimed it. Its end must close both, or the node stays running.
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    session = _session_stub()
+    session._touch_late = lambda events, *, substantive: None  # type: ignore[method-assign]
+    created = provider.ext_update(normalizer, _CHILD_METHOD, {
+        "rootSessionId": "ses_root", "childSessionId": "ses_b", "parentSessionId": "ses_root",
+        "depth": 1, "title": "Other", "type": "status", "status": "created",
+    })
+    session._track_shells(created)
+    assert session._shells.tracking
+    normalizer.feed({"sessionUpdate": "tool_call", "toolCallId": "call_a", "name": "subagent", "kind": "think",
+                     "title": "subagent", "rawInput": {"agent": "general", "description": "Scan"}})
+    normalizer.feed({"sessionUpdate": "tool_call_update", "toolCallId": "call_a", "status": "completed",
+                     "rawOutput": {"metadata": {"sessionID": "ses_b", "status": "running"}}})
+    done = provider.ext_update(normalizer, _CHILD_METHOD, {
+        "rootSessionId": "ses_root", "childSessionId": "ses_b", "parentSessionId": "ses_root",
+        "depth": 1, "title": "Other", "type": "status", "status": "completed",
+    })
+    assert {(event.tool_use_id, event.type) for event in done} == {
+        ("child:ses_b", "tool_result"), ("call_a", "tool_result"),
+    }
+    session._finish_shells(done)
+    assert not session._shells.tracking

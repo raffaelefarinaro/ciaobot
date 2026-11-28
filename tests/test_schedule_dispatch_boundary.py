@@ -1787,3 +1787,131 @@ async def test_a_held_shell_notice_keeps_the_run_waiting_with_the_real_predicate
     assert archived_at_wake == [[]]
     assert host.classified_text == ["All 7 steps done."]
     assert result["status"] == "ok" and rows[0].status == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
+async def test_a_follow_up_that_launches_another_subagent_keeps_the_run_waiting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A real care run: turn 1 launches subagent A; A's end gives turn 2, in which OpenCode's own
+    # continuation launches subagent B (only B's child session reaches the client); B's end gives
+    # turn 3, the final answer. Pending work is read from a real ACP session fed the captured
+    # wire shapes, so only the tracking of B can keep the run waiting after turn 2.
+    import json
+
+    from ciao.providers.acp.agents import OPENCODE, OpencodeAcpProvider
+    from ciao.providers.acp.normalize import UpdateNormalizer
+    from ciao.providers.acp.session import AcpSession
+    from ciao.providers.acp.shell_liveness import ShellLiveness
+
+    fixtures = Path(__file__).parent / "fixtures" / "acp"
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_e0815d817ffeh7L7ocNuPWytBu")
+    session = AcpSession.__new__(AcpSession)
+    session.shells_hook = None
+    session._shells_reported = 0
+    session._shells = ShellLiveness()
+    session._shell_task = None
+    session._shell_commands = {}
+    session._subagent_calls = {}
+    session._deferred_ends = []
+    session._end_tasks = set()
+    session._ended_shells = {}
+    session.continuation_hook = None
+    session._late_speaking = False
+    session._prompt_active = False
+    session._touch_late = lambda events, *, substantive: None  # type: ignore[method-assign]
+
+    def feed(line: str) -> list[object]:
+        message = json.loads(line)
+        if message.get("method") == "session/update":
+            events = normalizer.feed(message["params"]["update"])
+        elif message.get("method") == "opencode/session/child_update":
+            events = provider.ext_update(normalizer, "opencode/session/child_update", message["params"])
+        else:
+            return []
+        session._finish_shells(events)
+        session._track_shells(events)
+        return list(events)
+
+    run = (fixtures / "opencode_subagent_run.jsonl").read_text(encoding="utf-8").splitlines()
+    # The child's completion is the first child frame after the prompt's own result (id 3).
+    a_end = next(i for i, line in enumerate(run) if '"stopReason"' in line)
+    continuation = (fixtures / "opencode_continuation_subagent.jsonl").read_text(encoding="utf-8").splitlines()
+    for line in run[:a_end]:
+        feed(line)
+    assert session.background_shells_running  # A runs
+
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host._follow_up_pending = lambda chat_id: session.background_shells_running  # type: ignore[method-assign]
+    rows = _capture_run_records(monkeypatch)
+    archived_after_turn_2: list[list[str]] = []
+
+    async def drain_turn(events: list[dict[str, object]]) -> None:
+        stream = ChatStream(background=True)
+        host._broker.register("chat-1", stream)
+        for event in events:
+            stream.publish(event)
+        await _until_read(stream)
+        stream.finish()
+        host._broker.clear("chat-1", stream)
+
+    async def provider_side() -> None:
+        await asyncio.sleep(0.05)
+        for line in run[a_end:]:
+            feed(line)  # A ends
+        # Turn 2: the continuation launches B; only B's child session is seen.
+        turn_2: list[dict[str, object]] = []
+        for line in continuation[:-1]:
+            for event in feed(line):
+                if getattr(event, "tool_name", "") == "Subagent":
+                    turn_2.append({"type": "tool_use", "tool_name": "Subagent",
+                                   "tool_use_id": getattr(event, "tool_use_id", "")})
+        turn_2.append({"type": "result", "text": "The recent-memory review is now running.", "is_error": False})
+        await drain_turn(turn_2)
+        await asyncio.sleep(0.1)  # well past a poll: the run must still be waiting on B
+        archived_after_turn_2.append(list(host.archives))
+        feed(continuation[-1])  # B ends
+        await drain_turn([{"type": "result", "text": "Care finished: 7 of 7 steps.", "is_error": False}])
+
+    task = asyncio.create_task(provider_side())
+    result = await _dispatch(host)
+    await task
+
+    assert archived_after_turn_2 == [[]]
+    assert host.classified_text == ["Care finished: 7 of 7 steps."]
+    assert host.archives == ["chat-1"]
+    assert result["status"] == "ok" and rows[0].status == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fast_poll")
+async def test_a_first_turn_whose_only_launch_is_a_child_session_waits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _archiving_host(tmp_path, [
+        {"type": "tool_use", "tool_name": "Subagent", "tool_use_id": "child:ses_b", "tool_input": "Review"},
+        {"type": "result", "text": "Review is running.", "is_error": False},
+    ])
+    host.follow_up_pending = True
+    _capture_run_records(monkeypatch)
+
+    async def child_finishes() -> None:
+        await asyncio.sleep(0.05)
+        stream = ChatStream(background=True)
+        host._broker.register("chat-1", stream)
+        stream.publish(_FOLLOW_UP_RESULT)
+        await _until_read(stream)
+        host.follow_up_pending = False
+        stream.finish()
+        host._broker.clear("chat-1", stream)
+
+    task = asyncio.create_task(child_finishes())
+    result = await _dispatch(host)
+    await task
+
+    assert host.classified_text == ["All 7 steps done."]
+    assert result["status"] == "ok"
