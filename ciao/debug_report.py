@@ -2,9 +2,9 @@
 
 Combines the rotating server error log (``ciao.error_log``) with recent
 failed background-job runs (``ciao.job_runs``) so the agent can triage
-and fix its own runtime problems.  Consumed by the dev-mode
-``GET /api/debug/issues`` endpoint (the "Fix issues in chat" button) and
-by the ``{{ISSUE_REPORT}}`` schedule placeholder.
+and fix its own runtime problems.  Consumed by the startup triage
+(``ciao.startup_triage``), the ``{{ISSUE_REPORT}}`` schedule placeholder and,
+scoped to one workspace, ``ciao context logs``.
 """
 
 from __future__ import annotations

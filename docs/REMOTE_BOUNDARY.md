@@ -174,8 +174,7 @@ carried by the session.
   retarget during the report build withholds it rather than hand workspace A's
   failures to workspace B. A user schedule's `{{ERROR_LOG}}` becomes an
   omission notice, and a clean user run never clears the engine error log.
-  The trusted exceptions are the operator debug report (`GET /api/debug/issues`), startup
-  triage, and packaged `scope=system` routines: they may read engine-wide
+  The trusted exceptions are startup triage and packaged `scope=system` routines: they may read engine-wide
   evidence and clear the consumed error log after a clean run. An
   agent-created schedule is always `scope=user`; the control plane exposes no
   field that creates a system one.

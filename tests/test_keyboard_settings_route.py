@@ -90,12 +90,12 @@ def test_keyboard_patch_rejects_unrelated_fields_without_writes_or_events(tmp_pa
     response = client.patch("/api/settings/keyboard", json={
         "revision": initial["revision"],
         "keyboard_send_mode": "enter",
-        "dev_mode": True,
+        "log_level": "debug",
     })
 
     assert response.status_code == 400
     assert client.get("/api/settings/keyboard").json() == initial
-    assert store.settings.dev_mode is False
+    assert store.settings.log_level == ""
     assert published == []
 
 

@@ -115,7 +115,7 @@ def test_patch_insights_enabled_is_ignored(tmp_path):
     [
         {"keyboard_send_mode": "enter"},
         {"theme": "dark"},
-        {"server_defaults": {"log_level": "debug"}, "dev_mode": True},
+        {"server_defaults": {"log_level": "debug"}, "log_level": "debug"},
     ],
 )
 def test_routines_patch_rejects_keyboard_and_appearance_fields(tmp_path, unrelated):
@@ -127,7 +127,6 @@ def test_routines_patch_rejects_keyboard_and_appearance_fields(tmp_path, unrelat
 
     assert response.status_code == 400
     assert asdict(store.settings) == before
-    assert config.dev_mode is False
 
 
 def test_legacy_ignored_key_does_not_allow_other_unrelated_keys(tmp_path):
@@ -235,8 +234,7 @@ def test_routines_no_longer_reports_the_on_device_model(tmp_path):
 
 
 def test_server_settings_patch_keeps_the_running_values(monkeypatch, tmp_path):
-    """The bind address and log level are saved now and used at the next start;
-    developer mode applies at once."""
+    """The bind address and log level are saved now and used at the next start."""
     monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
 
@@ -247,14 +245,14 @@ def test_server_settings_patch_keeps_the_running_values(monkeypatch, tmp_path):
 
     res = client.patch(
         "/api/settings/routines",
-        json={"pwa_host": "127.0.0.1", "log_level": "debug", "dev_mode": True},
+        json={"pwa_host": "127.0.0.1", "log_level": "debug"},
     )
 
     assert res.status_code == 200
     data = res.json()
-    assert (data["pwa_host"], data["log_level"], data["dev_mode"]) == ("127.0.0.1", "debug", True)
+    assert (data["pwa_host"], data["log_level"]) == ("127.0.0.1", "debug")
+    assert "dev_mode" not in data
     assert data["server_running"] == {"pwa_host": "0.0.0.0", "log_level": "info"}
-    assert config.dev_mode is True
     assert config.pwa_host == "0.0.0.0"
 
 

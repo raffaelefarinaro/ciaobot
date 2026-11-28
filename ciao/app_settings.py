@@ -10,8 +10,7 @@ config object so call sites keep reading ``config.*`` and PATCHes take
 effect without a restart. Empty string means "no override, use the
 config/env default".
 
-The server fields (bind address, log level, developer mode and the source
-checkout) used to be workspace `.env` variables. `CiaoConfig.from_env` reads
+The server fields (bind address, log level and the source checkout) used to be workspace `.env` variables. `CiaoConfig.from_env` reads
 them from this file at startup with :func:`read_app_settings`, because the bind
 address and the log level are needed before the server exists; a value found
 in an older `.env` is imported once (:meth:`AppSettingsStore.import_legacy_env`)
@@ -94,7 +93,6 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
 _BOOLEAN_FIELDS = {
     "backup_enabled",
     "backup_paused",
-    "dev_mode",
     "font_scale_migrated",
     "legacy_env_imported",
     "resume_after_restart",
@@ -103,7 +101,7 @@ _BOOLEAN_FIELDS = {
 _INTERNAL_FIELDS = {"font_scale_migrated", "legacy_env_imported"}
 # Booleans whose default is False and that are only written once true, so a
 # file never grows keys that say nothing.
-_SPARSE_BOOLEANS = {"dev_mode", "font_scale_migrated", "legacy_env_imported"}
+_SPARSE_BOOLEANS = {"font_scale_migrated", "legacy_env_imported"}
 
 # The server's bind address when none is set: every interface, so the PWA is
 # reachable over LAN and Tailscale. The password and the login rate limit are
@@ -117,10 +115,8 @@ DEFAULT_LOG_LEVEL = "info"
 LEGACY_ENV_SETTINGS: dict[str, str] = {
     "PWA_HOST": "pwa_host",
     "CIAO_LOG_LEVEL": "log_level",
-    "CIAO_DEV_MODE": "dev_mode",
     "CIAO_APP_REPO": "app_repo",
 }
-_TRUTHY = {"true", "1", "yes", "y", "on"}
 _HOSTNAME_RE = re.compile(
     r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
@@ -255,11 +251,7 @@ class AppSettings:
     # Root log level name; "" = DEFAULT_LOG_LEVEL. "debug" also writes
     # .runtime/server_debug.log. Read at startup. Was CIAO_LOG_LEVEL.
     log_level: str = ""
-    # Developer controls in Settings, /api/debug/issues and the source-checkout
-    # deploy. Was CIAO_DEV_MODE.
-    dev_mode: bool = False
-    # Absolute path of the Ciaobot source checkout for developer-mode Deploy and
-    # Restart; "" = the checkout the running engine lives in, if any. Was
+    # Absolute path of the Ciaobot source checkout that Restart redeploys from; "" = the checkout the running engine lives in, if any. Was
     # CIAO_APP_REPO.
     app_repo: str = ""
 
@@ -661,9 +653,7 @@ class AppSettingsStore:
             raw = str(legacy.get(name, "") or "").strip()
             if not raw:
                 continue
-            if key == "dev_mode":
-                self.settings.dev_mode = raw.lower() in _TRUTHY
-            elif key == "log_level":
+            if key == "log_level":
                 level = _normalize_log_level(raw)
                 if not level:
                     logger.warning("Not importing unrecognized CIAO_LOG_LEVEL %r", raw)
@@ -716,7 +706,6 @@ class AppSettingsStore:
                 )
         d = self._defaults
         s = self.settings
-        config.dev_mode = s.dev_mode
         config.app_repo = Path(s.app_repo).expanduser().resolve() if s.app_repo else None
         # Per-provider default models / thinking / routine models have no
         # env-backed default; absence means "use the provider's own default".

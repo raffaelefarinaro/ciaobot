@@ -37,7 +37,6 @@ def _completed() -> subprocess.CompletedProcess:
 async def _deploy(tmp_path, monkeypatch: pytest.MonkeyPatch, platform: str):
     monkeypatch.setattr(sys, "platform", platform)
     config = SimpleNamespace(
-        dev_mode=True,
         workspace_root=tmp_path / "ws",
         app_repo=str(_repo(tmp_path)),
     )

@@ -51,16 +51,6 @@ describe('SettingsServer', () => {
     expect(wrapper.text()).not.toContain('Restart Ciaobot to listen')
   })
 
-  it('toggles developer mode', async () => {
-    const { wrapper, saveRoutines } = mountCard({ dev_mode: false })
-    await expandDeveloper(wrapper)
-    const toggle = wrapper.get('[role="switch"]')
-    expect(toggle.attributes('aria-checked')).toBe('false')
-
-    await toggle.trigger('click')
-    expect(saveRoutines).toHaveBeenCalledWith({ dev_mode: true })
-  })
-
   it('saves the source checkout and the log level', async () => {
     const { wrapper, saveRoutines } = mountCard({ app_repo: '' })
     await expandDeveloper(wrapper)
@@ -75,7 +65,7 @@ describe('SettingsServer', () => {
   it('is disabled until the settings have loaded', async () => {
     const { wrapper } = mountCard(null)
     await expandDeveloper(wrapper)
-    expect(wrapper.get('[role="switch"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.checkout-row button').attributes('disabled')).toBeDefined()
     expect(wrapper.findAll('select')[0].attributes('disabled')).toBeDefined()
   })
 

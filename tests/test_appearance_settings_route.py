@@ -106,11 +106,11 @@ def test_unrelated_settings_keys_are_refused(tmp_path):
     revision = client.get("/api/settings/appearance").json()["revision"]
     response = client.patch(
         "/api/settings/appearance",
-        json={"text_contrast": "soft", "dev_mode": True, "pwa_host": "0.0.0.0", "revision": revision},
+        json={"text_contrast": "soft", "log_level": "debug", "pwa_host": "0.0.0.0", "revision": revision},
     )
     assert response.status_code == 400
-    assert "dev_mode" in response.json()["error"] and "pwa_host" in response.json()["error"]
-    assert store.settings.dev_mode is False
+    assert "log_level" in response.json()["error"] and "pwa_host" in response.json()["error"]
+    assert store.settings.log_level == ""
     assert store.settings.text_contrast == ""
 
 

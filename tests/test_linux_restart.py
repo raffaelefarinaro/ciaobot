@@ -46,16 +46,14 @@ async def test_restart_hook_runs_only_after_response_is_sent():
     assert calls == [75]
 
 
-@pytest.mark.parametrize("platform,dev_mode,expected", [
-    ("linux", False, True), ("linux", True, False), ("darwin", False, False),
-])
-async def test_local_status_advertises_linux_restart_only(monkeypatch, platform, dev_mode, expected):
+@pytest.mark.parametrize("platform,expected", [("linux", True), ("darwin", False)])
+async def test_local_status_advertises_linux_restart_only(monkeypatch, platform, expected):
     import json
     import sys
 
     monkeypatch.setattr(sys, "platform", platform)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        config=SimpleNamespace(dev_mode=dev_mode),
+        config=SimpleNamespace(),
         local_session_manager=SimpleNamespace(status=lambda: {}),
     )))
     response = await local_status(request)
@@ -84,7 +82,7 @@ def _checkout(tmp_path):
     return repo
 
 
-async def _status_restart_only(monkeypatch, *, platform, dev_mode, app_repo, bundled):
+async def _status_restart_only(monkeypatch, *, platform, app_repo, bundled):
     import json
     import sys
 
@@ -92,50 +90,43 @@ async def _status_restart_only(monkeypatch, *, platform, dev_mode, app_repo, bun
         _run_as_bundled_app(monkeypatch)
     monkeypatch.setattr(sys, "platform", platform)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        config=SimpleNamespace(app_repo=str(app_repo), dev_mode=dev_mode),
+        config=SimpleNamespace(app_repo=str(app_repo)),
         local_session_manager=SimpleNamespace(status=lambda: {}),
     )))
     response = await local_status(request)
     return json.loads(response.body)["restart_only"]
 
 
-@pytest.mark.parametrize("dev_mode", [False, True])
-async def test_bundled_mac_app_is_restart_only(tmp_path, monkeypatch, dev_mode):
+async def test_bundled_mac_app_is_restart_only(tmp_path, monkeypatch):
     # Even with CIAO_APP_REPO naming a real checkout: pip cannot replace the
     # embedded runtime, so redeploy can never succeed from a packaged app.
     assert await _status_restart_only(
-        monkeypatch, platform="darwin", dev_mode=dev_mode,
+        monkeypatch, platform="darwin",
         app_repo=_checkout(tmp_path), bundled=True,
     ) is True
 
 
-async def test_mac_dev_checkout_keeps_redeploy(tmp_path, monkeypatch):
+async def test_mac_checkout_keeps_redeploy(tmp_path, monkeypatch):
     assert await _status_restart_only(
-        monkeypatch, platform="darwin", dev_mode=True,
+        monkeypatch, platform="darwin",
         app_repo=_checkout(tmp_path), bundled=False,
     ) is False
 
 
 async def test_mac_install_without_checkout_is_restart_only(tmp_path, monkeypatch):
     assert await _status_restart_only(
-        monkeypatch, platform="darwin", dev_mode=False,
+        monkeypatch, platform="darwin",
         app_repo=tmp_path / "site-packages", bundled=False,
     ) is True
 
 
-async def test_linux_dev_mode_without_checkout_is_restart_only(tmp_path, monkeypatch):
-    # Deploy would only stop at "locate checkout", so offer the restart.
+async def test_linux_checkout_is_restart_only(tmp_path, monkeypatch):
+    # Linux source installs are updated by the administrator (docs/LINUX.md):
+    # the service account owns neither the checkout nor the virtualenv.
     assert await _status_restart_only(
-        monkeypatch, platform="linux", dev_mode=True,
-        app_repo=tmp_path / "site-packages", bundled=False,
-    ) is True
-
-
-async def test_linux_dev_checkout_keeps_redeploy(tmp_path, monkeypatch):
-    assert await _status_restart_only(
-        monkeypatch, platform="linux", dev_mode=True,
+        monkeypatch, platform="linux",
         app_repo=_checkout(tmp_path), bundled=False,
-    ) is False
+    ) is True
 
 
 async def test_deploy_refuses_bundled_app_before_any_step(tmp_path, monkeypatch):
@@ -222,12 +213,12 @@ async def test_restart_only_for_installer_mode(tmp_path, monkeypatch):
     _run_as_installer(monkeypatch)
     monkeypatch.setattr(sys, "platform", "darwin")
 
-    # Even with a checkout configured and dev mode on, an installer engine has
-    # nothing to redeploy from, so Settings must offer Restart only.
-    assert routes_api._restart_only(None, dev_mode=True) is True
+    # Even with a checkout configured, an installer engine has nothing to
+    # redeploy from, so Settings must offer Restart only.
+    assert routes_api._restart_only(None) is True
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         config=SimpleNamespace(app_repo=str(_checkout(tmp_path))),
-        local_session_manager=SimpleNamespace(status=lambda: {"dev_mode": True}),
+        local_session_manager=SimpleNamespace(status=lambda: {}),
     )))
     response = await local_status(request)
     assert json.loads(response.body)["restart_only"] is True

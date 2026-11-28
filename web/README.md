@@ -759,7 +759,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `ciao-appearance` as paint caches only. Access & devices holds the PWA password, Other
   devices (`#other-devices` lives on `/settings/access`) and Network access.
   Advanced holds This host, Memory backup, the Ciaobot folder, Workspace health,
-  the Developer switches and, in developer mode, Debug. `SettingsServer` takes a
+  and the Developer switches (source checkout, log level). `SettingsServer` takes a
   `section` prop (`network` or `developer`) so its two cards render on
   different pages.
   The Settings rail has two groups (`SETTINGS_NAV_GROUPS` in `lib/settingsNav.ts`):

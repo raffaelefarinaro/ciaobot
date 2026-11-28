@@ -799,7 +799,7 @@
 }
 
 /* A hairline row with its label or explanation on the left and a switch on
-   the right (Developer mode, claude.ai connectors). */
+   the right (claude.ai connectors). */
 .settings-switch-row {
   display: flex;
   align-items: center;
