@@ -1123,7 +1123,6 @@
             @focus="handleInputFocus"
             @click="refreshComposerPickers"
           ></textarea>
-          <p v-if="isMcpToken" :id="domId('mcp-shortcut-hint')" class="hint">{{ mcpUnavailableReason || 'Open MCP settings — no message is sent' }}</p>
           <div
             class="input-actions composer-bar"
             ref="composerBarEl"
@@ -1245,15 +1244,7 @@
               :shells="runningWork.shells"
               :now="nowTs"
             />
-            <span v-if="inputText.trim() && !isMcpToken" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
-            <button
-              v-if="view.isStreaming && isMcpToken"
-              type="button"
-              class="btn-small"
-              :aria-label="mcpActionLabel"
-              :aria-describedby="domId('mcp-shortcut-hint')"
-              @click="send"
-            >{{ mcpActionLabel }}</button>
+            <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <!-- While streaming: empty composer → stop; any draft → queue. -->
             <button
               class="send-btn"
@@ -1261,7 +1252,6 @@
               :disabled="!showStopAction && !canSend"
               :title="primaryActionTitle"
               :aria-label="primaryActionLabel"
-              :aria-describedby="isMcpToken && !showStopAction ? domId('mcp-shortcut-hint') : undefined"
               @click="primaryAction"
             >
               <svg v-if="showStopAction" class="stop-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /></svg>
@@ -1350,12 +1340,6 @@
             <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
           </button>
         </div>
-      </section>
-      <section v-if="!chat.archived" class="cd-section cd-block chat-rail-mcp" :aria-labelledby="domId('chat-rail-mcp')">
-        <div class="cd-head"><h3 :id="domId('chat-rail-mcp')" class="cd-heading chat-mcp-heading" tabindex="-1">MCP</h3></div>
-        <ProviderMcpButton v-if="mcpConnection" :connection="mcpConnection" :chat-id="chat.chat_id" />
-        <p v-if="mcpUnavailableReason" class="hint">{{ mcpUnavailableReason }}</p>
-        <p v-if="mcpLoadError" role="alert">{{ mcpLoadError }}</p>
       </section>
       <!-- The linked repository; the header's `code` badge opens here. -->
       <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
@@ -1466,7 +1450,7 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, ProviderConfigSettings, ProviderConnection } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1479,7 +1463,6 @@ import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
 import { useFileMentions, type FileMentionContext } from '../composables/useFileMentions'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
-import ProviderMcpButton from './ProviderMcpButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
@@ -1715,16 +1698,14 @@ const hasComposerContent = computed(() =>
 // Send waits for every upload in flight to settle, so a file is never sent
 // before the server has it.
 const uploadsInFlight = computed(() => uploads.value.length > 0)
-const isMcpToken = computed(() => inputText.value.trim().toLowerCase() === '/mcp')
 const modeWritePending = computed(() => (store.pendingChatModeWrites[chat.value?.chat_id || ''] || 0) > 0)
-const canSend = computed(() => isMcpToken.value || (!modeWritePending.value && hasComposerContent.value && !uploadsInFlight.value))
+const canSend = computed(() => !modeWritePending.value && hasComposerContent.value && !uploadsInFlight.value)
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
-const showStopAction = computed(() => view.isStreaming && (isMcpToken.value || !hasComposerContent.value))
+const showStopAction = computed(() => view.isStreaming && !hasComposerContent.value)
 const composerBarEl = ref<HTMLElement | null>(null)
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
-  if (isMcpToken.value) return mcpActionLabel.value
   if (modeWritePending.value) return 'Wait for the permission mode to save'
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message (sends when current turn finishes)'
@@ -1732,7 +1713,6 @@ const primaryActionTitle = computed(() => {
 })
 const primaryActionLabel = computed(() => {
   if (showStopAction.value) return 'Stop generation'
-  if (isMcpToken.value) return mcpActionLabel.value
   if (modeWritePending.value) return 'Wait for the permission mode to save'
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message'
@@ -1756,32 +1736,6 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
-// Chat details shows one button that opens the chat's agent CLI MCP settings.
-// The command is the provider row's `mcp_command`, read once from the engine
-// the first time Chat details opens; the browser never builds it.
-const mcpConnection = ref<ProviderConnection | null>(null)
-const mcpLoadError = ref('')
-let mcpLoading = false
-const mcpUnavailableReason = computed(() => mcpConnection.value && !mcpConnection.value.mcp_command
-  ? "No MCP command is available for this chat's agent."
-  : '')
-const mcpActionLabel = computed(() => mcpUnavailableReason.value ? 'Why MCP settings are unavailable' : 'Open MCP settings')
-async function loadMcpConnection() {
-  if (mcpConnection.value || mcpLoading) return
-  mcpLoading = true
-  mcpLoadError.value = ''
-  try {
-    const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
-    const row = res.connections?.[chat.value?.provider ?? '']
-    if (row) mcpConnection.value = row
-    else mcpLoadError.value = "Could not find this chat's agent."
-  } catch (e) {
-    mcpLoadError.value = `Could not look up the MCP command: ${(e as Error)?.message || e}`
-  } finally {
-    mcpLoading = false
-  }
-}
-
 const titleRail = useChatRail(() => view.chat?.chat_id ?? '', props.beside ? id => emit('select-chat', id) : undefined)
 const titleRailOn = computed(() => titleRail.items.value.length > 1)
 // Mid-swipe the transcript leans toward the next chat (a quarter of the strip's
@@ -2279,7 +2233,6 @@ const isWidePane = ref(false)
 const railOpen = ref(!props.filePinned && !chatDetailsClosed())
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
-watch([railShown, drawerShown], ([rail, drawer]) => { if (rail || drawer) void loadMcpConnection() }, { immediate: true })
 let panelObserver: ResizeObserver | null = null
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !panelEl.value) return
@@ -2307,12 +2260,11 @@ const railHideButton = ref<HTMLButtonElement | null>(null)
  * drops on a trigger that just unmounted. The drawer's focus trap places it,
  * so the named section has to be its initial focus rather than a later move.
  */
-type DetailsTarget = 'close' | 'context' | 'repo' | 'mcp'
+type DetailsTarget = 'close' | 'context' | 'repo'
 const detailsTarget = ref<DetailsTarget>('close')
 const detailsFocusEl = computed<HTMLElement | null>(() => {
   if (detailsTarget.value === 'context') return railContextEl.value ?? railHideButton.value
   if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
-  if (detailsTarget.value === 'mcp') return railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading') ?? railHideButton.value
   return railHideButton.value
 })
 // Bumped when a caller points at the agent context, so its Always loaded
@@ -2336,12 +2288,8 @@ function showDetails(target: DetailsTarget = 'close') {
   void nextTick(() => {
     reveal()
     const el = detailsFocusEl.value
-    el?.focus({ preventScroll: target === 'mcp' })
-    if (el && target === 'mcp' && railEl.value) {
-      const rail = railEl.value
-      const header = rail.querySelector<HTMLElement>('.chat-rail-head')
-      rail.scrollTo({ top: Math.max(0, rail.scrollTop + el.getBoundingClientRect().top - rail.getBoundingClientRect().top - (header?.getBoundingClientRect().height ?? 0) - 8), behavior: 'auto' })
-    } else if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
+    el?.focus()
+    if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
   })
 }
 function closeDetails() {
@@ -3935,7 +3883,6 @@ function cancelStartupFocus(): void {
 
 function focusComposerOnOpen(): void {
   if (props.inactive) return
-  if (detailsTarget.value === 'mcp' && (railShown.value || drawerShown.value)) return
   if (window.innerWidth < COMPOSER_FOCUS_MIN_WIDTH) return
   if (questionCardVisible.value || pendingApprovals.value.length) return
   focusComposer()
@@ -4736,15 +4683,6 @@ function handleInputFocus() {
 
 function send() {
   if (chat.value.archived) return
-  if (isMcpToken.value) {
-    if (mcpUnavailableReason.value) return
-    composer.clearDraft(chat.value.chat_id)
-    slash.dismiss()
-    mentionPicker.dismiss()
-    showDetails('mcp')
-    nextTick(autoResize)
-    return
-  }
   if (modeWritePending.value) return
   if (uploadsInFlight.value) return
   const text = inputText.value.trim()
@@ -5714,7 +5652,6 @@ onMounted(() => {
   background: transparent;
   color: var(--fg2);
 }
-.chat-mcp-heading:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
 .work-inspector-trigger--header:hover {
   color: var(--fg);
   border-color: transparent;

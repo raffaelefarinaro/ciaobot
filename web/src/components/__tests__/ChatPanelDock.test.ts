@@ -214,7 +214,7 @@ describe('ChatPanel automation origin', () => {
     expect(row.get('.cd-primary').text()).toBe('schedule-1')
     expect(row.get('.cd-detail').text()).toBe('Automation')
     expect(origin.findAll('button')).toHaveLength(0)
-    expect(rail.findAll('.cd-heading').map(h => h.text())).toEqual(['Origin', 'Open', 'MCP', 'Files'])
+    expect(rail.findAll('.cd-heading').map(h => h.text())).toEqual(['Origin', 'Open', 'Files'])
     vi.unstubAllGlobals()
     wrapper.unmount()
   })

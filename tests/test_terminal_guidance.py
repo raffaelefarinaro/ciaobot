@@ -319,14 +319,14 @@ def _assert_mcp_recovery_location(index: str, settings: str, cli: str) -> None:
             "- **Asked in a chat", "- **Say the next step", "- **MCP servers in Settings",
             "- **Adding a server", "- **Claude Code**", "- **OpenCode**",
             "- **A workspace's `.mcp.json`", "- **Reloading after a change",
-            "- **Chat MCP navigation", "- **The manual bridge", "- **Never report a step",
+            "- **The manual bridge", "- **Never report a step",
         ))
     )
     reload = cli.split("## Reloading tools", 1)[1].split("## Projects", 1)[0]
     row = next(line for line in cli.splitlines() if line.startswith("| `chat needs-action KIND"))
     intro = row.split(" `command --command-file", 1)[0]
     for text in (index, settings_mcp, reload):
-        assert "Chat details → MCP" in text
+        assert "Settings → MCP" in text
     for text in (index, settings_mcp, reload, intro):
         assert not re.search(
             r"(?:mcp|sign[ -]in|auth(?:entication)?).{0,60}"
@@ -347,12 +347,6 @@ def _assert_manual_bridge_claims_no_managed_sign_in(text: str) -> None:
     assert not re.search(r"supports callback paste-back", text, re.IGNORECASE)
 
 
-def _assert_mcp_shortcut_contract(text: str) -> None:
-    assert re.search(r"Standalone case-insensitive `/mcp` opens the current chat's MCP sidebar only for an actual Claude or OpenCode chat with a resolved owning workspace", text)
-    assert re.search(r"unsupported provider or unresolved workspace the app shows a local reason, preserves raw text and staged state, and sends no turn", text)
-    assert re.search(r"`/mcp ARG` and other arguments are ordinary prompts, not native TUI commands", text)
-
-
 def _mcp_sources() -> tuple[str, str, str]:
     return (
         _section(_skill(), "Connecting providers"),
@@ -366,10 +360,10 @@ def test_guidance_places_mcp_signin_in_chat_details_not_inline_cards() -> None:
 
 
 @pytest.mark.parametrize(("source", "old", "new"), [
-    (0, "sign-in use **Chat details → MCP**, which runs", "sign-in use **Chat details → MCP**; MCP authentication card above the composer, which runs"),
+    (0, "whose button runs", "whose button; MCP authentication card above the composer, runs"),
     (1, "A server that still needs a sign-in is signed in with the CLI's own MCP command.", "A server that still needs a sign-in is signed in with the CLI's own MCP command. Sign-in requests fold under one row."),
     (2, " `permission_mode --mode", " `mcp_auth --server NAME`: ask the user to sign in to an MCP server. `permission_mode --mode"),
-    (2, "direct the user to Chat details → MCP, which runs the agent's own MCP command", "direct the user to the MCP authentication card above the composer, which runs the agent's own MCP command"),
+    (2, "direct the user to Settings → MCP, whose button runs the agent's own MCP command", "direct the user to the MCP authentication card above the composer, which runs the agent's own MCP command"),
 ])
 def test_mcp_location_contract_rejects_inline_mutations(source: int, old: str, new: str) -> None:
     texts = list(_mcp_sources())
@@ -385,26 +379,6 @@ def test_sidebar_terminal_guidance_keeps_user_control_boundaries() -> None:
         assert fact in terminal
 
 
-def test_mcp_shortcut_guidance_is_app_navigation_for_supported_providers() -> None:
-    guidance = _reference("install-and-settings.md")
-    _assert_mcp_shortcut_contract(next(line for line in guidance.splitlines() if line.startswith("- **Chat MCP navigation.")))
-
-
-@pytest.mark.parametrize(("old", "new"), [
-    ("preserves raw text and staged state", "discards raw text and staged state"),
-    ("preserves raw text and staged state", "preserves raw text but discards staged state"),
-    ("sends no turn", "sends a turn"),
-    ("unsupported provider or unresolved workspace", "unsupported provider and resolved workspace"),
-    ("ordinary prompts, not native TUI commands", "native TUI commands, not ordinary prompts"),
-])
-def test_mcp_shortcut_contract_rejects_opposite_outcomes(old: str, new: str) -> None:
-    guidance = _reference("install-and-settings.md")
-    navigation = next(line for line in guidance.splitlines() if line.startswith("- **Chat MCP navigation."))
-    assert old in navigation
-    with pytest.raises(AssertionError):
-        _assert_mcp_shortcut_contract(navigation.replace(old, new))
-
-
 def test_manual_bridge_claims_no_managed_mcp_sign_in() -> None:
     guidance = _reference("install-and-settings.md")
     bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
@@ -414,8 +388,8 @@ def test_manual_bridge_claims_no_managed_mcp_sign_in() -> None:
 def test_mcp_recovery_copies_only_and_requires_user_terminal_step() -> None:
     guidance = _reference("install-and-settings.md")
     bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
-    for fact in ("Terminal recovery", "copies only", "Chat details → Open → Terminal",
-                 "Workspace if offered", "review, paste and run", "never types"):
+    for fact in ("only copies the command", "Chat details → Open → Terminal",
+                 "Workspace if offered", "review, paste and run"):
         assert fact in bridge
     offer = next(line for line in guidance.splitlines() if line.startswith("- **The agent offers, the user runs.**"))
     assert "suggestion card types" in offer

@@ -25,7 +25,7 @@ function connection(over: Partial<ProviderConnection> = {}): ProviderConnection 
   }
 }
 
-function mountButton(props: { connection: ProviderConnection; chatId?: string }) {
+function mountButton(props: { connection: ProviderConnection }) {
   return mount(ProviderMcpButton, { props })
 }
 
@@ -41,16 +41,10 @@ describe('ProviderMcpButton', () => {
     expect(wrapper.find('[role="status"]').exists()).toBe(false)
   })
 
-  it('launches mcp_command and then types mcp_slash, with the chat when one is given', async () => {
+  it('launches mcp_command and then types mcp_slash in the project terminal', async () => {
     runMock.mockResolvedValue('typed')
-    const withChat = mountButton({ connection: connection(), chatId: 'c1' })
-    await withChat.get('button').trigger('click')
-    await flushPromises()
-    expect(runMock).toHaveBeenCalledWith('claude', { chatId: 'c1', followUp: '/mcp' })
-
-    runMock.mockClear()
-    const projectScoped = mountButton({ connection: connection() })
-    await projectScoped.get('button').trigger('click')
+    const wrapper = mountButton({ connection: connection() })
+    await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(runMock).toHaveBeenCalledWith('claude', { followUp: '/mcp' })
   })
@@ -92,7 +86,7 @@ describe('ProviderMcpButton', () => {
 
   it('shows one status line when the terminal was not ready and the command was copied', async () => {
     runMock.mockResolvedValue('copied')
-    const wrapper = mountButton({ connection: connection(), chatId: 'c1' })
+    const wrapper = mountButton({ connection: connection() })
     await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(wrapper.get('[role="status"]').text()).toContain('The terminal was not ready, so the command was copied.')

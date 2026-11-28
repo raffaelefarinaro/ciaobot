@@ -188,18 +188,14 @@ describe('ChatPanel slash-command picker', () => {
     wrapper.unmount()
   })
 
-  it('selects the picker before navigating on the next modifier chord', async () => {
+  it('Enter selects the picked command without sending it', async () => {
     const wrapper = await mountPanel()
     const input = wrapper.get('textarea.chat-input')
     await input.setValue('/mc')
     expect(wrapper.find('.commands-picker').exists()).toBe(true)
     await input.trigger('keydown', { key: 'Enter' })
     expect(textareaValue(wrapper).trim()).toBe('/mcp')
-    expect(wrapper.find('.chat-rail').exists()).toBe(false)
-    await input.trigger('keydown', { key: 'Enter', metaKey: true })
-    await flushPromises()
-    expect(textareaValue(wrapper)).toBe('')
-    expect(wrapper.find('.chat-rail').exists()).toBe(true)
+    expect(wrapper.find('.commands-picker').exists()).toBe(false)
     wrapper.unmount()
   })
 })

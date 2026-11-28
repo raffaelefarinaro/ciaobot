@@ -4,10 +4,10 @@ import { useRunInTerminal } from '../composables/useRunInTerminal'
 import type { ProviderConnection } from '../lib/types'
 
 // The launch command and the follow-up are the provider row's `mcp_command` and
-// `mcp_slash`. The browser never builds either.
+// `mcp_slash`. The browser never builds either. Settings → MCP is the only
+// place it appears.
 const props = defineProps<{
   connection: ProviderConnection
-  chatId?: string
 }>()
 
 const terminal = useRunInTerminal()
@@ -16,10 +16,7 @@ const runNote = ref('')
 async function openInTerminal() {
   const cmd = props.connection.mcp_command
   if (!cmd || terminal.busy.value) return
-  const result = await terminal.run(cmd, {
-    chatId: props.chatId,
-    followUp: props.connection.mcp_slash,
-  })
+  const result = await terminal.run(cmd, { followUp: props.connection.mcp_slash })
   runNote.value = result === 'typed'
     ? ''
     : result === 'copied'

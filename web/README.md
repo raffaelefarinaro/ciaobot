@@ -391,7 +391,7 @@ Model chips (chat composer, Home, task hand-over) read `<provider> · <model>` w
 
 ### Chat permission mode picker
 
-The normal chat composer model picker changes the saved permission mode for that chat through the existing chat update API. The control is `PermissionModeMenu.vue`, a Reka radio menu button (the shared `MenuSelect.vue`, which the narrow footer's Thinking control also uses) under the model list: the button names the current mode and what it allows, the menu lists the four modes, and the button is `aria-disabled` while a write is pending. A pick with a pointer keeps the picker open: `ModelSelector` ignores outside-interaction events that come from a menu layer or from a menu item already unmounted by the pick. `model-picker-footer.spec.ts` picks with a mouse and a tap. Changes apply to subsequent turns, not a reply already running; queued or external turns may start before the write settles. The picker shows that as one line (*Applies to your next message, not a reply already running.*) and keeps the full sentence as the button's `aria-describedby` and the line's tooltip. While pending, ordinary sends from that composer are paused without clearing the draft, while `/mcp`, Stop and recovery remain available. `touch-targets.spec.ts` covers the picker and its menu at constrained viewport sizes, a 195px-wide (200% zoom) phone and touch targets; component coverage lives in `ChatPanelRetry.test.ts`, `PermissionModeMenu.test.ts`, `ModelSelector.test.ts` and `ComposerModelPickerLayout.test.ts`.
+The normal chat composer model picker changes the saved permission mode for that chat through the existing chat update API. The control is `PermissionModeMenu.vue`, a Reka radio menu button (the shared `MenuSelect.vue`, which the narrow footer's Thinking control also uses) under the model list: the button names the current mode and what it allows, the menu lists the four modes, and the button is `aria-disabled` while a write is pending. A pick with a pointer keeps the picker open: `ModelSelector` ignores outside-interaction events that come from a menu layer or from a menu item already unmounted by the pick. `model-picker-footer.spec.ts` picks with a mouse and a tap. Changes apply to subsequent turns, not a reply already running; queued or external turns may start before the write settles. The picker shows that as one line (*Applies to your next message, not a reply already running.*) and keeps the full sentence as the button's `aria-describedby` and the line's tooltip. While pending, ordinary sends from that composer are paused without clearing the draft, while Stop and recovery remain available. `touch-targets.spec.ts` covers the picker and its menu at constrained viewport sizes, a 195px-wide (200% zoom) phone and touch targets; component coverage lives in `ChatPanelRetry.test.ts`, `PermissionModeMenu.test.ts`, `ModelSelector.test.ts` and `ComposerModelPickerLayout.test.ts`.
 
 An attended shell permission card displays the exact current command submitted by the provider, bounded at 4096 characters. It stays unformatted, pre-wrapped and keyboard-scrollable so multiline and JSON-looking commands remain literal on mobile. Approve and Deny are distinct controls with 44px minimum height; Approve grants only once. The full command is held by the current stream for authenticated reconnect replay, not persisted in the chat registry. A shell attention marker alone never rebuilds an actionable card, and engine startup clears stale markers.
 
@@ -781,18 +781,10 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   It falls back to a copy of the launch command when the terminal is not ready. *Ask Ciao to add one* still starts a chat titled "Add an MCP server".
   Changes apply to new chats; a running chat loads them after `ciao chat reload`.
   The page does not read MCP servers or turn them on or off. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability. While Verify or logout is pending, and after an ambiguous result, that provider's choices and default are removed from model pickers and an uncertainty message remains until a later provider action and model refresh complete; other providers stay available. A canceled logout confirmation changes nothing.
-  Chat details has an MCP section that holds the same `ProviderMcpButton.vue`
-  for the chat's own agent. ChatPanel reads `/api/settings/providers` once, the
-  first time the details rail or drawer opens, and keeps the row for that pane;
-  a failed read shows a one-line alert. There is no health observer, no
-  connection marker on the details trigger or the ⋯ menu, and no sign-in card:
-  signing in happens in the agent's own MCP command. The standalone trimmed,
-  case-insensitive `/mcp` opens Chat details on the MCP heading and sends
-  nothing; when the agent's row has no `mcp_command` it shows why instead.
-  Arguments are ordinary messages. Opening clears only text, preserving all
-  four staged arrays, history, queue, offline state and uploads. While
-  streaming Stop remains primary with a separate Open action; IME, picker,
-  touch and pane guards still apply.
+  Chat details has no MCP control: its Skills and MCP list shows what the chat
+  used (tool use, not health), and there is no health observer, connection
+  marker on the details trigger or the ⋯ menu, or sign-in card. A composer draft
+  of `/mcp` is an ordinary message.
 
   Shared settings styling lives in `components/settings/settingsPanels.css`,
   loaded by both sides with `<style scoped src>` — a parent's scoped rules

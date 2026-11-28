@@ -923,15 +923,10 @@ launch command when the terminal is not ready. It does not edit provider files
 or start an MCP process. *Ask Ciao to add one*
 still opens a chat titled "Add an MCP server".
 
-The frontend MCP surface is `web/src/components/ProviderMcpButton.vue`, used in
-Settings → MCP and in Chat details (`ChatPanel.vue`). Chat details reads
-`/api/settings/providers` once, the first time it opens, and passes the chat's
-provider row; the button starts that row's `mcp_command` in the chat's
-terminal (`composables/useRunInTerminal.ts`), types `mcp_slash` after it, and
-copies the launch command when the terminal is not ready. The page keeps no MCP health or sign-in state and shows no
-MCP card. Generic reviewed command cards and Settings terminal actions
-remain separate.
-The standalone composer `/mcp` opens Chat details on the MCP section; it is not the provider CLI command. Shared settings styling lives
+The frontend MCP surface is `web/src/components/ProviderMcpButton.vue`, used
+only in Settings → MCP; Chat details has no MCP control. The page keeps no MCP
+health or sign-in state and shows no MCP card. Generic reviewed command cards
+and Settings terminal actions remain separate. Shared settings styling lives
 in `components/settings/settingsPanels.css`, pulled into both `SettingsView`
 and the panel with `<style scoped src>`. Origin badges for skills, subagents,
 and commands come from the Vue-free `lib/assetOrigin.ts`.

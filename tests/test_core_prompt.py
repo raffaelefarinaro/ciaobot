@@ -308,5 +308,5 @@ def test_system_prompt_points_operator_steps_to_sidebar_terminal() -> None:
     payload = mi.system_prompt_payload("")
     assert payload is not None
     text = payload["append"]
-    for fact in ("Chat details → Open → Terminal", "engine's computer", "cannot drive", "bypass permissions", "dedicated sign-in", "`/mcp`", "navigation", "provider TUI"):
+    for fact in ("Chat details → Open → Terminal", "engine's computer", "cannot drive", "bypass permissions", "dedicated sign-in", "provider TUI"):
         assert fact in text

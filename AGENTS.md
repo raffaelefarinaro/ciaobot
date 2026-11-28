@@ -84,7 +84,7 @@ Before changing code:
 - For UI changes, verify keyboard focus, browser zoom, and 44px mobile touch
   targets. Every new feature must be visually inspected in the browser before
   pushing.
-- Keyboard shortcuts, Enter-to-send and the standalone `/mcp` token are specified in
+- Keyboard shortcuts and Enter-to-send are specified in
   `web/README.md` and `DESIGN.md`; read them before touching those paths.
 - OpenCode provider changes run over `opencode acp` at OpenCode 2.3.2 or newer.
   Replay the ACP fixtures and run one tiny real turn against the installed
