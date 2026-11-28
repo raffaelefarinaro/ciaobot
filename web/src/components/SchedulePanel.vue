@@ -1,5 +1,5 @@
 <template>
-  <div class="schedule-panel" data-rail-host>
+  <div ref="panelEl" class="schedule-panel" data-rail-host>
     <PaneHeader
       v-if="!schedule && !showNew"
       page-tag="Automations"
@@ -65,13 +65,13 @@
             :disabled="isStarting && !runningChatId"
             @click="onRunButtonClick"
           >{{ showRunning ? 'Running...' : 'Run now' }}</button>
-          <button class="btn-small desktop-only" :disabled="scheduleUpdating" @click="onToggleEnabled">
+          <button v-if="!narrowPane" class="btn-small desktop-only" :disabled="scheduleUpdating" @click="onToggleEnabled">
             {{ enabledToggleLabel(schedule) }}
           </button>
           <!-- The shared ⋯ menu. A system routine has nothing in it on a wide
                pane (Run now and the toggle are inline, it cannot be deleted),
                so its trigger shows only once the toggle folds into it. -->
-          <span class="item-menu-slot" :class="{ 'mobile-only-trigger': schedule.scope === 'system' }">
+          <span v-if="narrowPane || schedule.scope !== 'system'" class="item-menu-slot">
           <ItemHeaderMenu label="More automation actions">
             <DropdownMenuItem as-child>
               <button
@@ -81,7 +81,7 @@
                 @click="onRunButtonClick"
               >{{ showRunning ? 'Running...' : 'Run now' }}</button>
             </DropdownMenuItem>
-            <DropdownMenuItem as-child>
+            <DropdownMenuItem v-if="narrowPane" as-child>
               <button type="button" class="menu-toggle-item" :disabled="scheduleUpdating" @click="onToggleEnabled">
                 {{ enabledToggleLabel(schedule) }}
               </button>
@@ -750,7 +750,23 @@ function onEditKeydown(event: KeyboardEvent) {
   void cancelCardEdit()
 }
 
+// The header folds its pause toggle into the ⋯ menu on a pane this narrow.
+// Measured here rather than by a container query: the menu is portalled out of
+// the pane, where a container query never matches, so it and the inline
+// button must be chosen by the same script flag, exactly one of them drawn.
+const NARROW_PANE_PX = 820
+const panelEl = ref<HTMLElement | null>(null)
+const narrowPane = ref(false)
+let paneObserver: ResizeObserver | undefined
+
 onMounted(() => {
+  const measure = () => { const w = panelEl.value?.clientWidth ?? 0
+    narrowPane.value = w > 0 && w <= NARROW_PANE_PX }
+  measure()
+  if (panelEl.value && typeof ResizeObserver !== 'undefined') {
+    paneObserver = new ResizeObserver(measure)
+    paneObserver.observe(panelEl.value)
+  }
   if (!store.schedulesLoaded) refreshSchedules()
   pollTimer = window.setInterval(refreshSchedules, 30_000)
   document.addEventListener('visibilitychange', onVisibilityChange)
@@ -758,6 +774,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  paneObserver?.disconnect()
   systemWorkspaceSequence++
   cardSaveSequence++
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
@@ -2035,23 +2052,9 @@ function closeSchedule() {
 }
 .btn-run:hover:not(:disabled) { background: var(--accent-strong); }
 .desktop-only { display: inline-flex; }
-.menu-toggle-item { display: none !important; }
 .item-menu-slot { display: inline-flex; }
 
-@container chat-pane (max-width: 820px) {
-  .header-actions .desktop-only { display: none; }
-  .menu-toggle-item { display: flex !important; }
-}
-
-@container chat-pane (min-width: 821px) {
-  /* A system routine has no Delete, so on a wide pane its menu would be empty. */
-  .mobile-only-trigger { display: none; }
-}
-
 @media (max-width: 768px) {
-  .desktop-only { display: none; }
-  .menu-toggle-item { display: flex !important; }
-  .mobile-only-trigger { display: inline-flex; }
   .prompt-heading { align-items: flex-start; }
   .prop-row { flex-direction: column; gap: 2px; }
   .prop-row dt { flex: none; }
