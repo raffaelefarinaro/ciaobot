@@ -96,6 +96,29 @@ export const useUnsureStore = defineStore('unsure', () => {
     }
   }
 
+  /**
+   * Put back a line the person just removed (the page's Undo): the exact line,
+   * before the item it preceded when that one is still there. Resolves '' when
+   * it was written, else a sentence for the person.
+   */
+  async function restore(line: string, before = ''): Promise<string> {
+    const ws = workspace.value
+    if (!ws) return ''
+    try {
+      const body = await api.post<UnsureList>('/api/memory/unsure', { workspace: ws, op: 'restore', line, before })
+      if (ws === workspace.value) {
+        seq += 1
+        list.value = body
+        settled.value = true
+        loading.value = false
+        error.value = ''
+      }
+      return ''
+    } catch (cause) {
+      return cause instanceof Error ? cause.message : String(cause)
+    }
+  }
+
   // Coming back to the app re-reads the list: a care run or an edit in the file
   // may have changed it while the tab was hidden.
   if (typeof document !== 'undefined') {
@@ -112,5 +135,5 @@ export const useUnsureStore = defineStore('unsure', () => {
     (next, previous) => { if (previous && next !== previous) void refresh() },
   )
 
-  return { list, workspace, settled, loading, error, busy, show, refresh, act }
+  return { list, workspace, settled, loading, error, busy, show, refresh, act, restore }
 })

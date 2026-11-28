@@ -257,7 +257,7 @@ def test_route_takes_no_path_and_rejects_bad_bodies(setup: SimpleNamespace) -> N
     assert post("/api/memory/unsure", json={"workspace": "personal", "op": "erase", "id": ul.line_id(PLAIN)}).status_code == 400
     assert post("/api/memory/unsure", json={"workspace": "personal", "op": "tick", "id": "../etc"}).status_code == 400
     assert post("/api/memory/unsure", content=b"[1]").status_code == 400
-    assert post("/api/memory/unsure", content=b"{" + b" " * 2048 + b"}").status_code == 413
+    assert post("/api/memory/unsure", content=b"{" + b" " * (40 * 1024) + b"}").status_code == 413
     # A path in the body is ignored: the file is fixed under the workspace's vault.
     other = setup.root / "elsewhere.md"
     other.write_text(PLAIN + "\n", encoding="utf-8")
@@ -392,3 +392,84 @@ def test_route_names_a_link_with_its_own_code(setup: SimpleNamespace, tmp_path: 
     resp = setup.client.get("/api/memory/unsure?workspace=personal")
     assert resp.status_code == 422
     assert resp.json()["code"] == "not_plain_file"
+
+
+def test_parser_reads_the_destination_and_the_quoted_line() -> None:
+    line = (
+        '- [ ] Should I remember that Mo now works at Acme? He said so. "Mo works at Acme since November 2026." '
+        "— unsure because two notes disagree; to: People/Mo.md; source: chat-1a2b3c4d and chat-5e6f7a8b; 2026-11-26"
+    )
+    item = ul.parse_item(line)
+    assert item["title"] == "Should I remember that Mo now works at Acme?"
+    assert item["proposal"] == "Mo works at Acme since November 2026."
+    assert item["destination"] == "People/Mo.md"
+    assert item["source"] == "chat-1a2b3c4d and chat-5e6f7a8b"
+    assert item["reason"] == "two notes disagree"
+    # Either order closes the tail, and a reason with "; " in it is kept whole.
+    swapped = ul.parse_item("- [ ] Q? — unsure because a; b; source: chat-1; to: profile; 2026-11-20")
+    assert (swapped["reason"], swapped["source"], swapped["destination"]) == ("a; b", "chat-1", "profile")
+    # A drop or restore line's quoted entry is its proposal, even when it is the whole text.
+    assert ul.parse_item(DROP)["proposal"] == "Prefers terse replies"
+    assert ul.parse_item(RESTORE)["proposal"] == "Lives in Zurich"
+    # Lines written before `to:` existed carry no destination and no invented line.
+    plain = ul.parse_item(PLAIN)
+    assert (plain["destination"], plain["proposal"]) == ("", "")
+
+
+def test_an_item_renders_its_destination_before_its_source() -> None:
+    item = ul.UnsureItem("Mo works at Acme?", reason="one chat", source="chat-1", destination="People/Mo.md")
+    line = ul.render_line(item, today="2026-11-26")
+    assert line == "- [ ] Mo works at Acme? — unsure because one chat; to: People/Mo.md; source: chat-1; 2026-11-26"
+    assert ul.parse_item(line)["destination"] == "People/Mo.md"
+
+
+def test_restore_puts_a_removed_line_back_where_it_was(tmp_path: Path) -> None:
+    path = _write(tmp_path, LIST)
+    ul.change_line(tmp_path, "remove", ul.line_id(DROP))
+    body = ul.restore_line(tmp_path, DROP, before=ul.line_id(OBSERVATION))
+    assert path.read_text(encoding="utf-8") == LIST
+    assert [i["raw"] for i in body["items"]].count(DROP) == 1
+    # Again: the list already holds it, so nothing changes.
+    ul.restore_line(tmp_path, DROP, before=ul.line_id(OBSERVATION))
+    assert path.read_text(encoding="utf-8") == LIST
+
+
+def test_restore_without_its_neighbour_goes_to_the_end(tmp_path: Path) -> None:
+    path = _write(tmp_path, "# Unsure\n\n" + PLAIN + "\n\n")
+    ul.restore_line(tmp_path, DROP, before=ul.line_id("- [ ] gone since"))
+    assert path.read_text(encoding="utf-8") == "# Unsure\n\n" + PLAIN + "\n" + DROP + "\n"
+    (tmp_path / "Workspace" / "Unsure.md").unlink()
+    ul.restore_line(tmp_path, PLAIN)
+    assert path.read_text(encoding="utf-8") == "# Unsure\n" + PLAIN + "\n"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        OBSERVATION,  # ticked: a care run would act on it
+        "- a plain bullet",
+        "- [ ] ",
+        PLAIN + "\n- [x] smuggled",
+        PLAIN + "\r",
+        "- [ ] api_key: sk-live-abcdef0123456789 — unsure because x; source: y; 2026-11-20",
+        "- [ ] " + "w" * ul.MAX_RESTORE_CHARS,
+    ],
+)
+def test_restore_refuses_anything_but_one_unticked_item_line(tmp_path: Path, line: str) -> None:
+    path = _write(tmp_path, LIST)
+    with pytest.raises(ul.UnsureError) as caught:
+        ul.restore_line(tmp_path, line)
+    assert (caught.value.status, caught.value.code) == (400, "bad_request")
+    assert path.read_text(encoding="utf-8") == LIST
+
+
+def test_route_restores_a_removed_line(setup: SimpleNamespace) -> None:
+    path = _write(setup.vault, LIST)
+    post = setup.client.post
+    assert post("/api/memory/unsure", json={"workspace": "personal", "op": "remove", "id": ul.line_id(DROP)}).status_code == 200
+    resp = post("/api/memory/unsure", json={"workspace": "personal", "op": "restore", "line": DROP, "before": ul.line_id(OBSERVATION)})
+    assert resp.status_code == 200
+    assert path.read_text(encoding="utf-8") == LIST
+    assert post("/api/memory/unsure", json={"workspace": "personal", "op": "restore"}).status_code == 400
+    assert post("/api/memory/unsure", json={"workspace": "personal", "op": "restore", "line": OBSERVATION}).json()["code"] == "bad_request"
+    assert post("/api/memory/unsure", json={"workspace": "personal", "op": "restore", "line": DROP, "before": "../x"}).status_code == 400

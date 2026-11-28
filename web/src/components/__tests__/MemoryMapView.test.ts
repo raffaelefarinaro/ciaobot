@@ -614,7 +614,7 @@ describe('MemoryMapView sections', () => {
     expect(apiGet).toHaveBeenCalledWith('/api/memory/unsure?workspace=personal')
     const panel = wrapper.get('.mu')
     expect(panel.findAll('.mu-row-title').map(t => t.text())).toEqual(['Do you prefer tea?', 'Ada is a client.'])
-    expect(panel.text()).toContain('Approved: applied by the next care run.')
+    expect(panel.text()).toContain('Approved, not saved yet')
     // The rail: how it works, with the counts, and the Always loaded window.
     const rail = wrapper.get('.mm-review-rail')
     expect(rail.findAll('.docked-window').length).toBe(2)

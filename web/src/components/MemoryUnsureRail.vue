@@ -11,8 +11,12 @@
       </div>
     </div>
     <p class="unsure-rail-text">
-      Approve an item and the next Workspace care run writes it where it belongs. Reject removes it.
-      Discuss opens a chat to settle it with Ciaobot.
+      Open an item to read it in full and see what approving saves, and where. Approve ticks the line and the next
+      Workspace care run writes it; Dismiss removes the line; Skip leaves it for later. Acting moves to the next item.
+    </p>
+    <p class="unsure-rail-text">
+      Keys: <kbd>A</kbd> approve, <kbd>D</kbd> dismiss, <kbd>S</kbd> skip, arrows move. On a phone, swipe the card right to approve
+      or left to dismiss.
     </p>
     <p class="unsure-rail-text">
       A new category, a change to a code repository's instructions and a rule change are settled in a chat, so Approve opens one.
@@ -48,6 +52,13 @@ const counts = computed(() => (unsure.list?.workspace === store.activeWorkspace 
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
+}
+.unsure-rail-text kbd {
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
 }
 .unsure-rail-text {
   margin: 10px 0 0;

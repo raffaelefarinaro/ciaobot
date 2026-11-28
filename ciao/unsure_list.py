@@ -1,7 +1,7 @@
 """Direct writes to the Unsure list, `<vault>/Workspace/Unsure.md`.
 
 The list is one plain Markdown file: a `# Unsure` heading and one task line per
-item, `- [ ] [<kind>: ]<text> — unsure because <reason>; source: <where>; <date>`.
+item, `- [ ] [<kind>: ]<text> — unsure because <reason>; [to: <destination>; ]source: <where>; <date>`.
 A person ticks a line to approve it or deletes it to reject it. The format and
 what a ticked line means are in the stock memory guide
 (`references/unsure-and-proposals.md`).
@@ -12,7 +12,8 @@ text, so a retry or a second run adds nothing) and never write credential-shaped
 text. The Memory · Unsure page reads the list parsed (:func:`read_list`) and
 ticks, unticks or removes one line (:func:`change_line`) under the same lock,
 naming the line by a hash of its exact text so a page showing an older copy of
-the list cannot act on a line that has changed since.
+the list cannot act on a line that has changed since. It can also put back one
+unticked line the person just removed (:func:`restore_line`, the page's Undo).
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ class UnsureItem:
     reason: str = ""
     source: str = ""
     kind: str = ""
+    destination: str = ""
 
     def as_bullet(self) -> str:
         """The line this item renders as today."""
@@ -77,6 +79,8 @@ def render_line(item: UnsureItem, *, today: str) -> str:
     tail: list[str] = []
     if item.reason:
         tail.append(f"unsure because {_flat(item.reason)}")
+    if item.destination:
+        tail.append(f"to: {_flat(item.destination)}")
     if item.source:
         tail.append(f"source: {_flat(item.source)}")
     tail.append(today)
@@ -184,6 +188,12 @@ _KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _TAIL = re.compile(r"\s+—\s+(?=(?:unsure|removed) because\b)", re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[.?!](?=\s+[\"'“(A-Z0-9]|\s*$)")
 _ID = re.compile(r"^[0-9a-f]{16}-\d{1,5}$")
+# The exact line an approval writes, or the entry it removes or puts back, quoted
+# after the item's first sentence (straight or curly quotes; the last one wins).
+_QUOTED = re.compile(r"\"([^\"]+)\"|“([^”]+)”")
+# The longest line the page's Undo may put back. The page sends the line it
+# removed; one past this is refused rather than written.
+MAX_RESTORE_CHARS = 4000
 
 
 class UnsureError(RuntimeError):
@@ -266,6 +276,8 @@ def parse_item(line: str, item_id: str | None = None) -> dict[str, Any]:
         "reason": "",
         "source": "",
         "date": "",
+        "destination": "",
+        "proposal": "",
         "malformed": False,
     }
     match = _ITEM.match(raw)
@@ -283,8 +295,16 @@ def parse_item(line: str, item_id: str | None = None) -> dict[str, Any]:
         fields = [f.strip() for f in parts[1].split(";")]
         if len(fields) > 1 and _DATE.match(fields[-1]):
             item["date"] = fields.pop()
-        if len(fields) > 1 and re.match(r"^sources?:", fields[-1], re.IGNORECASE):
-            item["source"] = fields.pop().split(":", 1)[1].strip()
+        # The source and the destination (`to:`) close the tail, in either order.
+        while len(fields) > 1:
+            named = re.match(r"^(sources?|to):\s*(.*)$", fields[-1], re.IGNORECASE | re.DOTALL)
+            if named is None:
+                break
+            key = "destination" if named.group(1).lower() == "to" else "source"
+            if item[key]:
+                break
+            item[key] = named.group(2).strip()
+            fields.pop()
         reason = "; ".join(fields)
         item["reason"] = re.sub(r"^(?:unsure|removed) because\s+", "", reason, flags=re.IGNORECASE)
     for kind, pattern in _KINDS:
@@ -296,6 +316,10 @@ def parse_item(line: str, item_id: str | None = None) -> dict[str, Any]:
             break
     item["text"] = head
     item["title"] = _title(head)
+    # An old line may be nothing but the quoted entry: then that is the proposal.
+    quoted = _QUOTED.findall(head[len(item["title"]):]) or _QUOTED.findall(head if _QUOTED.fullmatch(head) else "")
+    if quoted:
+        item["proposal"] = next(part for part in quoted[-1] if part).strip()
     if not item["title"]:
         item["malformed"] = True
         item["title"] = body
@@ -377,6 +401,50 @@ def _payload(text: str | None) -> dict[str, Any]:
 def read_list(vault_root: Path) -> dict[str, Any]:
     """The parsed list: `{found, items, counts: {waiting, ticked}}`. Raises :class:`UnsureError`."""
     return _payload(_checked_read(vault_root))
+
+
+def restore_line(
+    vault_root: Path, line: str, before: str = "", *, lock_timeout_s: float = PAGE_LOCK_TIMEOUT_S
+) -> dict[str, Any]:
+    """Put back one unticked item line the page removed: its Undo.
+
+    The line must be one unticked `- [ ]` line with text, at most
+    :data:`MAX_RESTORE_CHARS` characters, with nothing credential-shaped in it, so
+    the page can never add a line a care run would act on. It goes back before
+    the item whose id is `before` when that line is still there, else at the end;
+    a list that already holds the exact line is left as it is. Same lock and
+    atomic write as :func:`change_line`. Raises :class:`UnsureError`
+    (`bad_request`) or :class:`ciao.file_kernel.QueueLockError`. Returns the list
+    after the write.
+    """
+    match = _ITEM.match(line) if "\n" not in line and "\r" not in line else None
+    if match is None or match.group(2) != " " or not match.group(4).strip():
+        raise UnsureError("only an unticked item line can be put back", 400, "bad_request")
+    if len(line) > MAX_RESTORE_CHARS or redact_text(line) != line:
+        raise UnsureError("this line cannot be put back from the page", 400, "bad_request")
+    if before and not is_line_id(before):
+        raise UnsureError("op and id are required", 400, "bad_request")
+    path = unsure_path(Path(vault_root).resolve())
+    with queue_lock(path, timeout_s=lock_timeout_s):
+        text = _checked_read(vault_root)
+        if text is None or not text.strip():
+            text = HEADING + "\n\n"
+        pieces = _split(text)
+        listed = _listed(pieces)
+        if any(existing == line for _, existing, _ in listed):
+            return _payload(text)
+        at = next((index for index, _, item_id in listed if before and item_id == before), None)
+        if at is None:
+            # At the end of the list: after its last non-blank line, ending in one newline.
+            end = len(pieces)
+            while end > 0 and not pieces[end - 1].strip():
+                end -= 1
+            pieces = pieces[:end] + [line, ""]
+        else:
+            pieces.insert(at, line)
+        updated = "\n".join(pieces)
+        write_queue_atomically(path, updated)
+    return _payload(updated)
 
 
 def change_line(
