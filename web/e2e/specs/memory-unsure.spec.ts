@@ -102,7 +102,7 @@ test.describe('Memory › Unsure', () => {
     expect(state.posts[1]).toEqual({ workspace: 'alpha', op: 'remove', id: SECOND.id })
     await page.getByRole('button', { name: 'Undo' }).click()
     await expect(detailTitle(page)).toHaveText(SECOND.title)
-    expect(state.posts[2]).toEqual({ workspace: 'alpha', op: 'restore', line: SECOND.raw, before: THIRD.id })
+    expect(state.posts[2]).toEqual({ workspace: 'alpha', op: 'restore', line: SECOND.raw, before: THIRD.id, after: FIRST.id.replace(/^./, 't'), section: 'Unsure' })
 
     // Arrows move; focus on a row moves with them.
     await page.locator('[data-unsure-row][aria-selected="true"]').focus()

@@ -38,7 +38,10 @@
           {{ effect.line }}
         </p>
         <p v-if="rule" class="mud-effect-line"><span class="mud-effect-role">Rule {{ item.qualifier }}:</span> {{ rule.from }} → {{ rule.to }}</p>
-        <p v-if="effect.where" class="mud-effect-where">
+        <p v-if="effect.blocked" class="mud-effect-where mud-effect-blocked" role="note">
+          <svg class="mud-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v6M12 16.5v.5" /></svg> Not allowed as a destination: <span class="mud-mono">{{ effect.where }}</span>
+        </p>
+        <p v-else-if="effect.where" class="mud-effect-where">
           <svg class="mud-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h7l4 4v14H7z" /><path d="M14 3v4h4" /></svg> {{ whereLead }} <button
             v-if="effect.whereIsNote && whereFile"
             type="button"
@@ -167,6 +170,7 @@ function openFile(path: string): void {
 .mud-effect-role { color: var(--fg3); font-weight: 600; }
 .mud-effect-where { margin: 0; color: var(--fg3); font-size: var(--text-sm); line-height: 1.6; overflow-wrap: anywhere; }
 .mud-effect-where .mud-icon { margin-right: 2px; vertical-align: -2px; }
+.mud-effect-blocked { color: var(--fg); font-weight: 600; }
 .mud-effect-how { margin: 0; color: var(--fg3); font-size: var(--text-sm); line-height: 1.45; }
 .mud-icon { flex: none; }
 .mud-mono { font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }

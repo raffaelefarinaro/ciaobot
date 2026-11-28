@@ -356,14 +356,14 @@ function locked(item: UnsureItem): boolean {
 }
 /** Approve opens a chat for what care cannot apply, so only a tick waits on care. */
 function approveLocked(item: UnsureItem): boolean {
-  return appliesUnattended(item) && locked(item)
+  return approveEffect(item).blocked || (appliesUnattended(item) && locked(item))
 }
 function approveLabel(item: UnsureItem): string {
   return appliesUnattended(item) ? `Approve: ${item.title}` : `Approve in a chat: ${item.title}`
 }
 
 // ── Saying what happened ────────────────────────────────────────────────────
-interface LastAction { op: 'approve' | 'dismiss'; raw: string; before: string; title: string }
+interface LastAction { op: 'approve' | 'dismiss'; raw: string; before: string; after: string; section: string; title: string }
 const notice = ref<{ text: string; undo: boolean } | null>(null)
 /** Where the notice shows: over the open item's buttons, under the card, or at the top once no item is open. */
 const noticeAt = computed(() => (!selected.value ? 'top' : deck.value ? (selected.value.checked ? 'top' : 'deck') : 'detail'))
@@ -415,6 +415,12 @@ function focusCurrent(): void {
 
 // ── Acting ──────────────────────────────────────────────────────────────────
 async function decide(op: 'approve' | 'dismiss', item: UnsureItem): Promise<void> {
+  // A destination the engine refuses is never approved, by a swipe, a key or a click.
+  if (op === 'approve' && approveEffect(item).blocked) {
+    deckRef.value?.reset()
+    say('This line names a place Ciaobot will not write to, so it cannot be approved here. Dismiss it, or discuss it.')
+    return
+  }
   if (op === 'approve' && !appliesUnattended(item)) {
     deckRef.value?.reset()
     await discussItem(item)
@@ -427,7 +433,9 @@ async function decide(op: 'approve' | 'dismiss', item: UnsureItem): Promise<void
   }
   const place = Math.max(0, waiting.value.indexOf(item))
   const at = items.value.indexOf(item)
+  // Its neighbours and heading, so an Undo puts it back where it was.
   const before = items.value[at + 1]?.id ?? ''
+  const after = items.value[at - 1]?.id ?? ''
   acting.value = true
   const problem = await unsure.act(op === 'approve' ? 'tick' : 'remove', item)
   acting.value = false
@@ -438,7 +446,7 @@ async function decide(op: 'approve' | 'dismiss', item: UnsureItem): Promise<void
     await settleFocus()
     return
   }
-  lastAction.value = { op, raw: item.raw, before, title: item.title }
+  lastAction.value = { op, raw: item.raw, before, after, section: item.section, title: item.title }
   pick('')
   selectedPlace.value = place
   const done = op === 'approve'
@@ -496,7 +504,7 @@ async function undo(): Promise<void> {
     const now = items.value.find(i => i.raw === ticked(action.raw))
     problem = now ? await unsure.act('untick', now) : 'That line is no longer on the list, so there is nothing to undo.'
   } else {
-    problem = await unsure.restore(action.raw, action.before)
+    problem = await unsure.restore(action.raw, action.before, action.after, action.section)
   }
   undoing.value = false
   if (problem) { notice.value = { text: problem, undo: false }; say(problem); return }
@@ -538,15 +546,20 @@ function onWindowKeydown(event: KeyboardEvent): void {
   if (fileViewer.isOpen || document.querySelector('[data-dismissable-layer], [aria-modal="true"]')) return
   const item = selected.value
   if (!item) return
-  event.preventDefault()
+  // The arrows belong to the list (its own handler) so the page and the detail
+  // still scroll with them; only the phone's card, which has no list, takes them.
   if (key === 'next' || key === 'previous') {
+    if (!deck.value || !(event.target instanceof Node) || !root.value.contains(event.target)) return
+    event.preventDefault()
     move(key === 'next' ? 1 : -1)
     say(where())
     return
   }
+  event.preventDefault()
   if (key === 'skip') { skip(); return }
   if (item.checked) { say('This one is already approved.'); return }
   if (key === 'approve') {
+    if (approveEffect(item).blocked) { say('This line names a place Ciaobot will not write to, so it cannot be approved here. Dismiss it, or discuss it.'); return }
     if (!appliesUnattended(item)) { void discussItem(item); return }
     fling('approve')
     return

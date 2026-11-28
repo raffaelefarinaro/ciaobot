@@ -171,6 +171,8 @@ defineExpose({ fling, reset })
   box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
   /* Vertical scrolling stays the browser's; sideways is the swipe. */
   touch-action: pan-y;
+  /* A sideways drag must not also swipe the browser back or forward. */
+  overscroll-behavior-x: none;
   user-select: none;
   -webkit-user-select: none;
   transition: transform 180ms var(--ease), border-color 120ms var(--ease);

@@ -136,7 +136,7 @@ export const Unsure: Story = {
     expect(canvasElement.querySelector('[data-unsure-count]')?.textContent).toBe('1 of 12')
     await userEvent.keyboard('s')
     await waitFor(() => expect(canvasElement.querySelector('[data-unsure-count]')?.textContent).toBe('2 of 12'))
-    await userEvent.keyboard('{ArrowUp}')
+    await userEvent.click(canvasElement.querySelector<HTMLElement>('[data-unsure-row]')!)
     await waitFor(() => expect(canvas.getByRole('heading', { name: NORTHWIND, level: 3 })).toBeTruthy())
     await userEvent.click(canvas.getByRole('button', { name: `Approve: ${NORTHWIND}` }))
     await waitFor(() => expect(canvas.getByText(`Approved “${NORTHWIND}”. The next Workspace care run saves it.`)).toBeTruthy())

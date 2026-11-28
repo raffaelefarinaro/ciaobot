@@ -434,13 +434,32 @@ def test_restore_puts_a_removed_line_back_where_it_was(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == LIST
 
 
-def test_restore_without_its_neighbour_goes_to_the_end(tmp_path: Path) -> None:
-    path = _write(tmp_path, "# Unsure\n\n" + PLAIN + "\n\n")
+def test_restore_without_its_neighbours_goes_to_the_end(tmp_path: Path) -> None:
+    path = _write(tmp_path, "# Unsure\n\n" + PLAIN + "\n")
     ul.restore_line(tmp_path, DROP, before=ul.line_id("- [ ] gone since"))
     assert path.read_text(encoding="utf-8") == "# Unsure\n\n" + PLAIN + "\n" + DROP + "\n"
     (tmp_path / "Workspace" / "Unsure.md").unlink()
     ul.restore_line(tmp_path, PLAIN)
-    assert path.read_text(encoding="utf-8") == "# Unsure\n" + PLAIN + "\n"
+    assert path.read_text(encoding="utf-8") == "# Unsure\n\n" + PLAIN + "\n"
+
+
+def test_restore_goes_back_under_its_own_heading(tmp_path: Path) -> None:
+    a, b, c = (f"- [ ] Item {n}? — unsure because x; source: chat-1; 2026-11-20" for n in "abc")
+    original = "\n".join(["# Unsure", "", "## People", a, b, "", "## Projects", c, ""])
+    path = _write(tmp_path, original)
+    assert [i["section"] for i in ul.parse_list(original)] == ["People", "People", "Projects"]
+    # b was the last line under People: it goes back after a, not before c under Projects.
+    ul.change_line(tmp_path, "remove", ul.line_id(b))
+    ul.restore_line(tmp_path, b, before=ul.line_id(c), after=ul.line_id(a), section="People")
+    assert path.read_text(encoding="utf-8") == original
+    # c was the only line under Projects: it goes back under that heading, not after b.
+    ul.change_line(tmp_path, "remove", ul.line_id(c))
+    ul.restore_line(tmp_path, c, after=ul.line_id(b), section="Projects")
+    assert path.read_text(encoding="utf-8") == original
+    # a was the first under People, with b after it.
+    ul.change_line(tmp_path, "remove", ul.line_id(a))
+    ul.restore_line(tmp_path, a, before=ul.line_id(b), section="People")
+    assert path.read_text(encoding="utf-8") == original
 
 
 @pytest.mark.parametrize(
@@ -453,6 +472,17 @@ def test_restore_without_its_neighbour_goes_to_the_end(tmp_path: Path) -> None:
         PLAIN + "\r",
         "- [ ] api_key: sk-live-abcdef0123456789 — unsure because x; source: y; 2026-11-20",
         "- [ ] " + "w" * ul.MAX_RESTORE_CHARS,
+        "- [ ] q\u2028- [x] evil",  # line separator
+        "- [ ] q\u2029- [x] evil",  # paragraph separator
+        "- [ ] q\x85- [x] evil",  # NEL
+        "- [ ] q\x0b- [x] evil",  # VT
+        "- [ ] q\x0c- [x] evil",  # FF
+        "- [ ] q\x00 nul",
+        "- [ ] q\u202e bidi override",
+        "- [ ] q\u200b zero width",
+        "- [ ] q\tTab",
+        "\t- [ ] indented with a tab",
+        "  - [ ] indented with spaces",
     ],
 )
 def test_restore_refuses_anything_but_one_unticked_item_line(tmp_path: Path, line: str) -> None:
@@ -473,3 +503,55 @@ def test_route_restores_a_removed_line(setup: SimpleNamespace) -> None:
     assert post("/api/memory/unsure", json={"workspace": "personal", "op": "restore"}).status_code == 400
     assert post("/api/memory/unsure", json={"workspace": "personal", "op": "restore", "line": OBSERVATION}).json()["code"] == "bad_request"
     assert post("/api/memory/unsure", json={"workspace": "personal", "op": "restore", "line": DROP, "before": "../x"}).status_code == 400
+    assert post("/api/memory/unsure", json={"workspace": "personal", "op": "restore", "line": DROP, "after": 3}).status_code == 400
+    assert post("/api/memory/unsure", json={"workspace": "personal", "op": "restore", "line": DROP, "section": "a\u2028b"}).status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("destination", "allowed"),
+    [
+        ("People/Mo.md", True),
+        ("projects/active/Northwind/Northwind.md", True),
+        ("profile", True),
+        ("memory", True),
+        ("", False),
+        ("../../.ssh/authorized_keys", False),
+        ("../People/Mo.md", False),
+        ("/etc/passwd.md", False),
+        ("~/notes/x.md", False),
+        ("People/./Mo.md", False),
+        ("People//Mo.md", False),
+        ("People/.hidden.md", False),
+        (".ciaoignore", False),
+        ("People\\Mo.md", False),
+        ("C:/x.md", False),
+        ("People/Mo.txt", False),
+        ("People/Mo", False),
+        ("Workspace/Care-Report.md", False),
+        ("Workspace/Unsure.md", False),
+        ("workspace/Proposals/x.md", False),
+        ("automations/daily/PROMPT.md", False),
+        ("AGENTS.md", False),
+        ("agents.md", False),
+        ("People/Mo\u202e.md", False),
+        ("regions", False),
+    ],
+)
+def test_the_parser_flags_a_destination_an_approval_may_not_write(destination: str, allowed: bool) -> None:
+    line = f"- [ ] Mo works at Acme? \"Mo works at Acme.\" — unsure because x; to: {destination}; source: chat-1; 2026-11-20"
+    item = ul.parse_item(line)
+    if destination:
+        assert item["destination"] == destination
+    assert item["destination_ok"] is allowed
+    assert ul.destination_allowed(destination) is allowed
+
+
+def test_the_route_hands_the_page_the_destination_flag(setup: SimpleNamespace) -> None:
+    hostile = '- [ ] Mo works at Acme? "x" — unsure because y; to: ../../.ssh/authorized_keys; source: chat-1; 2026-11-20'
+    fine = '- [ ] Mo works at Acme too? "x" — unsure because y; to: People/Mo.md; source: chat-1; 2026-11-20'
+    _write(setup.vault, "# Unsure\n" + hostile + "\n" + fine + "\n")
+    items = setup.client.get("/api/memory/unsure?workspace=personal").json()["items"]
+    assert [(i["destination"], i["destination_ok"]) for i in items] == [
+        ("../../.ssh/authorized_keys", False),
+        ("People/Mo.md", True),
+    ]

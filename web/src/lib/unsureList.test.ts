@@ -10,7 +10,7 @@ function item(over: Partial<UnsureItem> = {}): UnsureItem {
   return {
     id: 'a'.repeat(16), checked: false, kind: '', qualifier: '', title: 'Mo works at Acme now?',
     text: 'Mo works at Acme now? He said so once.', reason: 'only one chat says it',
-    source: 'chat-7', date: '2026-11-20', destination: '', proposal: '',
+    source: 'chat-7', date: '2026-11-20', destination: '', destination_ok: false, section: '', proposal: '',
     raw: '- [ ] Mo works at Acme now? He said so once. — unsure because only one chat says it; source: chat-7; 2026-11-20',
     malformed: false, ...over,
   }
@@ -99,10 +99,16 @@ describe('unsureList', () => {
     const plain = approveEffect(item())
     expect(plain).toMatchObject({ chat: false, line: '', where: '' })
     expect(plain.how).toContain('This line does not say where.')
-    const full = approveEffect(item({ proposal: 'Mo works at Acme.', destination: 'People/Mo.md' }))
+    const full = approveEffect(item({ proposal: 'Mo works at Acme.', destination: 'People/Mo.md', destination_ok: true }))
     expect(full).toMatchObject({ chat: false, line: 'Mo works at Acme.', lineRole: 'write', where: 'People/Mo.md', whereIsNote: true })
     expect(full.how).toBe('The next Workspace care run writes it there and takes the line off this list.')
-    expect(approveEffect(item({ destination: 'profile' }))).toMatchObject({ where: 'profile', whereIsNote: false })
+    expect(approveEffect(item({ destination: 'profile', destination_ok: true }))).toMatchObject({ where: 'profile', whereIsNote: false, blocked: false })
+    // A destination the engine refused is shown as blocked and never as a note to open.
+    for (const destination of ['../../.ssh/authorized_keys', 'Workspace/Care-Report.md', 'automations/x/PROMPT.md']) {
+      const refused = approveEffect(item({ destination, destination_ok: false, proposal: 'x' }))
+      expect(refused).toMatchObject({ blocked: true, whereIsNote: false, where: destination })
+      expect(approveEffect(item({ kind: 'observation', destination, destination_ok: false })).blocked).toBe(true)
+    }
     const drop = approveEffect(item({ kind: 'drop', qualifier: 'memory', proposal: 'Rotate on Fridays' }))
     expect(drop).toMatchObject({ lineRole: 'remove', where: 'memory', line: 'Rotate on Fridays' })
     expect(drop.how).toContain('Workspace/Memory-Consolidations.md')
@@ -135,13 +141,15 @@ describe('unsureList', () => {
   })
 
   it('leaves a key to a text field, a menu or a dialog, but not to the queue\'s own list', () => {
-    document.body.innerHTML = '<div id="q"><ul role="listbox"><li id="o">x</li></ul></div><input id="i"><div role="menu"><button id="m">m</button></div><div contenteditable="true"><span id="c">c</span></div><button id="b">b</button>'
+    document.body.innerHTML = '<div class="chat-split-side"><button id="s">s</button></div><div id="q"><ul role="listbox"><li id="o">x</li></ul></div><input id="i"><div role="menu"><button id="m">m</button></div><div contenteditable="true"><span id="c">c</span></div><button id="b">b</button>'
     const queue = document.getElementById('q')
     const at = (id: string) => document.getElementById(id)
     expect(keyBelongsElsewhere(at('i'), queue)).toBe(true)
     expect(keyBelongsElsewhere(at('m'), queue)).toBe(true)
     expect(keyBelongsElsewhere(at('c'), queue)).toBe(true)
     expect(keyBelongsElsewhere(at('o'), queue)).toBe(false)
+    // A chat or terminal in the slot beside the page.
+    expect(keyBelongsElsewhere(at('s'), queue)).toBe(true)
     expect(keyBelongsElsewhere(at('b'), queue)).toBe(false)
     expect(keyBelongsElsewhere(document.body, queue)).toBe(false)
     document.body.innerHTML = ''

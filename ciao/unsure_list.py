@@ -13,7 +13,7 @@ text. The Memory · Unsure page reads the list parsed (:func:`read_list`) and
 ticks, unticks or removes one line (:func:`change_line`) under the same lock,
 naming the line by a hash of its exact text so a page showing an older copy of
 the list cannot act on a line that has changed since. It can also put back one
-unticked line the person just removed (:func:`restore_line`, the page's Undo).
+unticked line back, the one the person just removed (:func:`restore_line`, the page's Undo).
 """
 
 from __future__ import annotations
@@ -22,12 +22,14 @@ import hashlib
 import os
 import re
 import stat as stat_module
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao.care_report import vault_relative_path
 from ciao.file_kernel import queue_lock, write_queue_atomically
 from ciao.redact import redact_text
 
@@ -191,6 +193,18 @@ _ID = re.compile(r"^[0-9a-f]{16}-\d{1,5}$")
 # The exact line an approval writes, or the entry it removes or puts back, quoted
 # after the item's first sentence (straight or curly quotes; the last one wins).
 _QUOTED = re.compile(r"\"([^\"]+)\"|“([^”]+)”")
+# A Markdown heading outside fenced code: the section an item sits under.
+_HEADING_LINE = re.compile(r"^ {0,3}#{1,6}\s+(.*?)\s*#*\s*$")
+# What a `to:` field may name: one of these regions, or a vault note outside the
+# folders the engine and the person keep for themselves (`Workspace/` holds this
+# list, the care report and proposals; `automations/` holds schedule prompts) and
+# not the workspace guide. Anything else is shown as not allowed and never
+# approved from the page; the care step leaves such a line ticked.
+DESTINATION_REGIONS = ("profile", "memory")
+_DESTINATION_DENIED_DIRS = ("workspace", "automations")
+# Characters a put-back line may not hold: controls (tab included), format
+# characters (bidi overrides, zero-width), and line and paragraph separators.
+_FORBIDDEN_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
 # The longest line the page's Undo may put back. The page sends the line it
 # removed; one past this is refused rather than written.
 MAX_RESTORE_CHARS = 4000
@@ -258,6 +272,23 @@ def _title(text: str) -> str:
     return head[: match.end()].strip() if match else head
 
 
+def destination_allowed(destination: str) -> bool:
+    """Whether a line's `to:` names a place an approval may write.
+
+    A region in :data:`DESTINATION_REGIONS`, or a vault-relative `.md` note
+    (no leading `/` or `~`, no `..` or dot segment, no control character: the
+    rules of :func:`ciao.care_report.vault_relative_path`) outside `Workspace/`
+    and `automations/`, and not `AGENTS.md`. Empty is not allowed: there is
+    nothing to show.
+    """
+    if destination in DESTINATION_REGIONS:
+        return True
+    if vault_relative_path(destination) != destination or not destination.lower().endswith(".md"):
+        return False
+    first = destination.split("/", 1)[0].lower()
+    return first not in _DESTINATION_DENIED_DIRS and destination.lower() != "agents.md"
+
+
 def parse_item(line: str, item_id: str | None = None) -> dict[str, Any]:
     """One line of the list as the page shows it. Never raises.
 
@@ -277,7 +308,9 @@ def parse_item(line: str, item_id: str | None = None) -> dict[str, Any]:
         "source": "",
         "date": "",
         "destination": "",
+        "destination_ok": False,
         "proposal": "",
+        "section": "",
         "malformed": False,
     }
     match = _ITEM.match(raw)
@@ -314,6 +347,7 @@ def parse_item(line: str, item_id: str | None = None) -> dict[str, Any]:
             item["qualifier"] = kind_match.group(1) if kind_match.groups() else ""
             head = head[kind_match.end():]
             break
+    item["destination_ok"] = destination_allowed(item["destination"])
     item["text"] = head
     item["title"] = _title(head)
     # An old line may be nothing but the quoted entry: then that is the proposal.
@@ -326,9 +360,33 @@ def parse_item(line: str, item_id: str | None = None) -> dict[str, Any]:
     return item
 
 
+def _sections(pieces: list[str]) -> list[str]:
+    """For each line, the text of the nearest heading above it outside fenced code ("" for none)."""
+    sections: list[str] = []
+    current = ""
+    fenced = False
+    for piece in pieces:
+        line = _bare(piece)
+        if _FENCE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            heading = _HEADING_LINE.match(line)
+            if heading is not None:
+                current = heading.group(1)
+        sections.append(current)
+    return sections
+
+
 def parse_list(text: str) -> list[dict[str, Any]]:
-    """Every item on the list in file order; headings, prose and fenced code are skipped."""
-    return [parse_item(line, item_id) for _, line, item_id in _listed(_split(text))]
+    """Every item on the list in file order, with the heading it sits under; headings, prose and fenced code are skipped."""
+    pieces = _split(text)
+    sections = _sections(pieces)
+    items = []
+    for index, line, item_id in _listed(pieces):
+        item = parse_item(line, item_id)
+        item["section"] = sections[index]
+        items.append(item)
+    return items
 
 
 def _is_link(info: os.stat_result) -> bool:
@@ -403,48 +461,95 @@ def read_list(vault_root: Path) -> dict[str, Any]:
     return _payload(_checked_read(vault_root))
 
 
-def restore_line(
-    vault_root: Path, line: str, before: str = "", *, lock_timeout_s: float = PAGE_LOCK_TIMEOUT_S
-) -> dict[str, Any]:
-    """Put back one unticked item line the page removed: its Undo.
+def _allowed_line(line: str) -> bool:
+    """One line with no control, format or separator character, starting at its bullet."""
+    if not line or line[0] not in "-*":
+        return False
+    return not any(unicodedata.category(ch) in _FORBIDDEN_CATEGORIES for ch in line)
 
-    The line must be one unticked `- [ ]` line with text, at most
-    :data:`MAX_RESTORE_CHARS` characters, with nothing credential-shaped in it, so
-    the page can never add a line a care run would act on. It goes back before
-    the item whose id is `before` when that line is still there, else at the end;
-    a list that already holds the exact line is left as it is. Same lock and
-    atomic write as :func:`change_line`. Raises :class:`UnsureError`
-    (`bad_request`) or :class:`ciao.file_kernel.QueueLockError`. Returns the list
-    after the write.
+
+def restore_line(
+    vault_root: Path,
+    line: str,
+    before: str = "",
+    after: str = "",
+    section: str = "",
+    *,
+    lock_timeout_s: float = PAGE_LOCK_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Add one unticked item line: the page's Undo of a dismissal.
+
+    The line must be one unticked `- [ ]` item with text, starting at its
+    bullet (no leading whitespace), at most :data:`MAX_RESTORE_CHARS` characters,
+    with no character in Unicode categories Cc (tab included), Cf, Zl or Zp and
+    nothing credential-shaped, so the page can never add a ticked line, a second
+    line or one a care run would act on. It goes back where it was: after the item
+    whose id is `after`, or before the one whose id is `before`, whichever is
+    still under the heading `section` the line sat under; else at the end of that
+    heading's part of the file; else at the end. A list that already holds the
+    exact line is left as it is. Same lock and atomic write as
+    :func:`change_line`. Raises :class:`UnsureError` (`bad_request`) or
+    :class:`ciao.file_kernel.QueueLockError`. Returns the list after the write.
     """
-    match = _ITEM.match(line) if "\n" not in line and "\r" not in line else None
+    match = _ITEM.match(line) if _allowed_line(line) else None
     if match is None or match.group(2) != " " or not match.group(4).strip():
-        raise UnsureError("only an unticked item line can be put back", 400, "bad_request")
+        raise UnsureError("only one unticked item line can be added back", 400, "bad_request")
     if len(line) > MAX_RESTORE_CHARS or redact_text(line) != line:
-        raise UnsureError("this line cannot be put back from the page", 400, "bad_request")
-    if before and not is_line_id(before):
+        raise UnsureError("this line cannot be added back from the page", 400, "bad_request")
+    if (before and not is_line_id(before)) or (after and not is_line_id(after)) or not _allowed_line("-" + section):
         raise UnsureError("op and id are required", 400, "bad_request")
     path = unsure_path(Path(vault_root).resolve())
     with queue_lock(path, timeout_s=lock_timeout_s):
         text = _checked_read(vault_root)
         if text is None or not text.strip():
-            text = HEADING + "\n\n"
+            fresh = HEADING + "\n\n" + line + "\n"
+            write_queue_atomically(path, fresh)
+            return _payload(fresh)
         pieces = _split(text)
         listed = _listed(pieces)
         if any(existing == line for _, existing, _ in listed):
             return _payload(text)
-        at = next((index for index, _, item_id in listed if before and item_id == before), None)
-        if at is None:
-            # At the end of the list: after its last non-blank line, ending in one newline.
-            end = len(pieces)
-            while end > 0 and not pieces[end - 1].strip():
-                end -= 1
-            pieces = pieces[:end] + [line, ""]
-        else:
-            pieces.insert(at, line)
+        sections = _sections(pieces)
+        at = _restore_place(pieces, sections, listed, before, after, section)
+        pieces.insert(at, line)
+        if at == len(pieces) - 1:
+            pieces.append("")
         updated = "\n".join(pieces)
         write_queue_atomically(path, updated)
     return _payload(updated)
+
+
+def _restore_place(
+    pieces: list[str], sections: list[str], listed: list[tuple[int, str, str]], before: str, after: str, section: str
+) -> int:
+    """The line index a put-back line goes in at (see :func:`restore_line`)."""
+    where = {item_id: index for index, _, item_id in listed}
+
+    def same(index: int) -> bool:
+        # No section given (an older page): any neighbour that is still there will do.
+        return not section or sections[index] == section
+
+    if after in where and same(where[after]):
+        return where[after] + 1
+    if before in where and same(where[before]):
+        return where[before]
+    # The end of the heading's part (or of the file): before the next heading,
+    # after the last non-blank line.
+    if section:
+        starts = [i for i, piece in enumerate(pieces) if sections[i] == section and _HEADING_LINE.match(_bare(piece))]
+        if not starts:
+            return _end_of(pieces, len(pieces))
+        stop = next((i for i in range(starts[0] + 1, len(pieces)) if sections[i] != section), len(pieces))
+        return _end_of(pieces, stop)
+    return _end_of(pieces, len(pieces))
+
+
+def _end_of(pieces: list[str], stop: int) -> int:
+    """Just after the last non-blank line before `stop`."""
+    end = stop
+    while end > 0 and not pieces[end - 1].strip():
+        end -= 1
+    return end
 
 
 def change_line(

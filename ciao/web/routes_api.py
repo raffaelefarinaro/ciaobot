@@ -4387,8 +4387,9 @@ async def unsure_list(request: Request) -> JSONResponse:
     :func:`ciao.unsure_list.read_list`) plus the file's display path. POST
     `{"workspace", "op": "tick" | "untick" | "remove", "id"}` changes the one
     item line with that id under the list's file lock and answers the list as
-    written; `{"workspace", "op": "restore", "line", "before"?}` puts back one
-    unticked line the page removed (its Undo, :func:`ciao.unsure_list.restore_line`). Every refusal carries a `code`: `line_changed` (409, the page
+    written; `{"workspace", "op": "restore", "line", "before"?, "after"?, "section"?}`
+    adds one unticked line back where the page removed it from (its Undo,
+    :func:`ciao.unsure_list.restore_line`). Every refusal carries a `code`: `line_changed` (409, the page
     reads again), `care_running` (423: the care run edits the file with its own
     tools, which do not take the lock), `not_plain_file` (422), `too_large`
     (413), `busy` (503, lock held past 2 s), `vault_unavailable` (503),
@@ -4411,8 +4412,10 @@ async def unsure_list(request: Request) -> JSONResponse:
         target = str(body.get("id", ""))
         line = body.get("line")
         before = body.get("before", "")
+        after = body.get("after", "")
+        section = body.get("section", "")
         if op == "restore":
-            if not isinstance(line, str) or not isinstance(before, str):
+            if not all(isinstance(value, str) for value in (line, before, after, section)):
                 return _unsure_error("line is required", 400, "bad_request")
         elif op not in ("tick", "untick", "remove") or not is_unsure_line_id(target):
             return _unsure_error("op and id are required", 400, "bad_request")
@@ -4429,7 +4432,7 @@ async def unsure_list(request: Request) -> JSONResponse:
         return _unsure_error("Workspace care is running and may be editing the list; try again when it finishes", 423, "care_running")
     try:
         if request.method == "POST" and op == "restore":
-            payload = await asyncio.to_thread(restore_line, vault, str(line), str(before))
+            payload = await asyncio.to_thread(restore_line, vault, str(line), str(before), str(after), str(section))
         elif request.method == "POST":
             payload = await asyncio.to_thread(change_line, vault, op, target)
         else:

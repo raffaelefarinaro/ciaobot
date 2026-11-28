@@ -22,6 +22,10 @@ export interface UnsureItem {
   date: string
   /** Where an approved line goes (its `to:` field): a vault note path or a region; '' when the line does not say. */
   destination: string
+  /** The engine's check of `destination`: a region it may name or a vault note outside `Workspace/`, `automations/` and the guide. False when empty. */
+  destination_ok: boolean
+  /** The heading the line sits under ('' for none), so an Undo puts it back there. */
+  section: string
   /** The quoted line after the first sentence: what approving writes, or the entry it removes or puts back; '' when none. */
   proposal: string
   /** The line exactly as the file has it. */
@@ -227,6 +231,8 @@ export function foundDate(date: string, now = new Date()): string {
  */
 export interface ApproveEffect {
   chat: boolean
+  /** The line names a destination the engine refuses: it is shown as not allowed and cannot be approved here. */
+  blocked: boolean
   line: string
   lineRole: 'write' | 'remove' | 'restore'
   where: string
@@ -237,8 +243,14 @@ export interface ApproveEffect {
 
 export function approveEffect(item: UnsureItem): ApproveEffect {
   const destination = item.destination
-  const isNote = /\.md$/i.test(destination)
-  const base = { line: item.proposal, lineRole: 'write' as const, where: destination, whereIsNote: isNote }
+  const isNote = /\.md$/i.test(destination) && item.destination_ok
+  const base = { line: item.proposal, lineRole: 'write' as const, where: destination, whereIsNote: isNote, blocked: false }
+  if (destination && !item.destination_ok && (item.kind === '' || item.kind === 'observation') && !item.malformed) {
+    return {
+      ...base, chat: false, blocked: true,
+      how: 'This line names a place Ciaobot will not write to, so it cannot be approved here. Dismiss it, or discuss it.',
+    }
+  }
   if (item.malformed) {
     return { ...base, chat: true, line: '', where: '', whereIsNote: false, how: 'This line is not in the list\'s format, so care will not act on it. Approve opens a chat about it.' }
   }
@@ -309,6 +321,8 @@ export function keyBelongsElsewhere(target: EventTarget | null, queue: Element |
   if (!(target instanceof Element)) return false
   if (target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]')) return true
   if (target instanceof HTMLElement && target.isContentEditable) return true
+  // A chat or terminal in the slot beside the page keeps its own keys.
+  if (target.closest('.chat-split-side')) return true
   const owner = target.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="tablist"], [role="slider"], .title-rail')
   return !!owner && !(queue && queue.contains(owner))
 }

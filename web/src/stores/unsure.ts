@@ -97,15 +97,15 @@ export const useUnsureStore = defineStore('unsure', () => {
   }
 
   /**
-   * Put back a line the person just removed (the page's Undo): the exact line,
-   * before the item it preceded when that one is still there. Resolves '' when
+   * Add back a line the person just removed (the page's Undo): the exact line,
+   * next to the item before or after it, under the heading it sat under. Resolves '' when
    * it was written, else a sentence for the person.
    */
-  async function restore(line: string, before = ''): Promise<string> {
+  async function restore(line: string, before = '', after = '', section = ''): Promise<string> {
     const ws = workspace.value
     if (!ws) return ''
     try {
-      const body = await api.post<UnsureList>('/api/memory/unsure', { workspace: ws, op: 'restore', line, before })
+      const body = await api.post<UnsureList>('/api/memory/unsure', { workspace: ws, op: 'restore', line, before, after, section })
       if (ws === workspace.value) {
         seq += 1
         list.value = body

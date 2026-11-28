@@ -18,7 +18,7 @@ function listOf(raws: string[]): UnsureList {
     workspace: 'work', path: 'memory-vault/work/Workspace/Unsure.md', found: true,
     items: raws.map((raw, n) => ({
       id: `${String(n).repeat(16)}-0`, raw, checked: raw.startsWith('- [x]'), kind: '', qualifier: '',
-      title: raw, text: raw, reason: '', source: '', date: '', destination: '', proposal: '', malformed: false,
+      title: raw, text: raw, reason: '', source: '', date: '', destination: '', destination_ok: false, section: '', proposal: '', malformed: false,
     })),
     counts: { waiting: raws.length, ticked: 0 },
   }
@@ -37,8 +37,8 @@ describe('unsure store', () => {
     store.show('work')
     await vi.waitFor(() => expect(store.list?.items).toHaveLength(1))
     apiPost.mockResolvedValueOnce(listOf(['- [ ] a', '- [ ] b']))
-    expect(await store.restore('- [ ] a', '1111111111111111-0')).toBe('')
-    expect(apiPost).toHaveBeenCalledWith('/api/memory/unsure', { workspace: 'work', op: 'restore', line: '- [ ] a', before: '1111111111111111-0' })
+    expect(await store.restore('- [ ] a', '1111111111111111-0', '', 'People')).toBe('')
+    expect(apiPost).toHaveBeenCalledWith('/api/memory/unsure', { workspace: 'work', op: 'restore', line: '- [ ] a', before: '1111111111111111-0', after: '', section: 'People' })
     expect(store.list?.items.map(i => i.raw)).toEqual(['- [ ] a', '- [ ] b'])
   })
 

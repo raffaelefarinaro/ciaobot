@@ -34,7 +34,7 @@ function item(id: string, over: Partial<UnsureItem> = {}): UnsureItem {
   return {
     id: id.repeat(16).slice(0, 16), checked: false, kind: '', qualifier: '',
     title: `Item ${id}?`, text: `Item ${id}? More detail.`, reason: 'only one chat says it',
-    source: 'chat-0123abcd', date: '2026-11-20', destination: '', proposal: '', raw: `- [ ] Item ${id}? More detail. — unsure because only one chat says it; source: chat-0123abcd; 2026-11-20`,
+    source: 'chat-0123abcd', date: '2026-11-20', destination: '', destination_ok: false, section: 'Unsure', proposal: '', raw: `- [ ] Item ${id}? More detail. — unsure because only one chat says it; source: chat-0123abcd; 2026-11-20`,
     malformed: false, ...over,
   }
 }
@@ -114,7 +114,7 @@ describe('MemoryUnsurePanel', () => {
     const full = item('a', {
       title: 'Should I remember that Mo now works at Acme?',
       text: 'Should I remember that Mo now works at Acme? He said so. "Mo works at Acme."',
-      proposal: 'Mo works at Acme.', destination: 'People/Mo.md', reason: 'the [Mo note](../People/Mo.md) says otherwise',
+      proposal: 'Mo works at Acme.', destination: 'People/Mo.md', destination_ok: true, reason: 'the [Mo note](../People/Mo.md) says otherwise',
     })
     answer(listOf([full, item('b', { kind: 'observation' }), item('c', { checked: true })]))
     const wrapper = await mountPanel()
@@ -142,7 +142,7 @@ describe('MemoryUnsurePanel', () => {
   })
 
   it('opens the note a reason links to and the destination note in the file viewer', async () => {
-    answer(listOf([item('a', { reason: 'the [Mo note](../People/Mo.md) says otherwise', proposal: 'Mo works at Acme.', destination: 'People/Mo.md' })]))
+    answer(listOf([item('a', { reason: 'the [Mo note](../People/Mo.md) says otherwise', proposal: 'Mo works at Acme.', destination: 'People/Mo.md', destination_ok: true })]))
     const wrapper = await mountPanel()
     const viewer = useFileViewerStore()
     const open = vi.spyOn(viewer, 'open').mockResolvedValue(undefined as never)
@@ -205,7 +205,7 @@ describe('MemoryUnsurePanel', () => {
     apiPost.mockResolvedValueOnce(listOf([a, b, c]))
     await button(wrapper, 'Undo').trigger('click')
     await flushPromises()
-    expect(apiPost).toHaveBeenLastCalledWith('/api/memory/unsure', { workspace: 'work', op: 'restore', line: b.raw, before: c.id })
+    expect(apiPost).toHaveBeenLastCalledWith('/api/memory/unsure', { workspace: 'work', op: 'restore', line: b.raw, before: c.id, after: a.id, section: 'Unsure' })
     expect(detailTitle(wrapper)).toBe('Item b?')
     expect(live()).toContain('“Item b?” is back on the list.')
   })
@@ -214,11 +214,15 @@ describe('MemoryUnsurePanel', () => {
     const [a, b, c] = [item('a'), item('b'), item('c')]
     answer(listOf([a, b, c]))
     const wrapper = await mountPanel()
-    press('ArrowDown')
+    // Arrows aimed at the page are left to it (it scrolls); they move only inside the list.
+    expect(press('ArrowDown').defaultPrevented).toBe(false)
+    expect(detailTitle(wrapper)).toBe('Item a?')
+    const row = () => document.querySelector<HTMLElement>('[data-unsure-row][aria-selected="true"]')!
+    row().focus()
+    press('ArrowDown', {}, row())
     await flushPromises()
     expect(detailTitle(wrapper)).toBe('Item b?')
-    expect(live()).toBe('Now 2 of 3: “Item b?”.')
-    press('ArrowUp')
+    press('ArrowUp', {}, row())
     await flushPromises()
     expect(detailTitle(wrapper)).toBe('Item a?')
     press('s')
@@ -231,6 +235,24 @@ describe('MemoryUnsurePanel', () => {
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith('/api/memory/unsure', { workspace: 'work', op: 'tick', id: b.id })
     expect(detailTitle(wrapper)).toBe('Item c?')
+  })
+
+  it('an item whose destination the engine refuses says so and cannot be approved by click, key or swipe', async () => {
+    const hostile = item('h', { proposal: 'x', destination: '../../.ssh/authorized_keys', destination_ok: false })
+    answer(listOf([hostile, item('b')]))
+    const wrapper = await mountPanel()
+    // What the page shows for the hostile value: a warning, never a "Saved to" link.
+    expect(wrapper.get('.mud-effect-blocked').text()).toBe('Not allowed as a destination: ../../.ssh/authorized_keys')
+    expect(wrapper.text()).not.toContain('Saved to')
+    expect(wrapper.find('.mud-effect-where button').exists()).toBe(false)
+    expect(wrapper.get('.mud-effect-how').text()).toContain('cannot be approved here')
+    expect(button(wrapper, 'Approve: Item h?').attributes('disabled')).toBeDefined()
+    expect(button(wrapper, 'Dismiss: Item h?').attributes('disabled')).toBeUndefined()
+    press('a')
+    await flushPromises()
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(live()).toContain('cannot be approved here')
+    expect(detailTitle(wrapper)).toBe('Item h?')
   })
 
   it('the keys do nothing in a text field, with a modifier, mid-composition or under a dialog', async () => {
@@ -475,6 +497,18 @@ describe('MemoryUnsurePanel', () => {
       await pointer(el.element, 'pointerup', 40, 100, 3)
       await flushPromises()
       expect(apiPost).toHaveBeenCalledWith('/api/memory/unsure', { workspace: 'work', op: 'remove', id: a.id })
+    })
+
+    it('a swipe right on an item with a refused destination springs back and writes nothing', async () => {
+      vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), addEventListener() {}, removeEventListener() {} }))
+      answer(listOf([item('h', { destination: 'Workspace/Unsure.md', destination_ok: false }), item('b')]))
+      const wrapper = await mountPanel()
+      expect(button(wrapper, 'Approve: Item h?').attributes('disabled')).toBeDefined()
+      await drag(wrapper, 160)
+      await flushPromises()
+      expect(apiPost).not.toHaveBeenCalled()
+      expect(card(wrapper).text()).toContain('Item h?')
+      expect(card(wrapper).attributes('style') ?? '').not.toContain('translateX')
     })
 
     it('a short drag springs back and a vertical one is a scroll: nothing is written', async () => {
