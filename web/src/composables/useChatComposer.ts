@@ -1,10 +1,12 @@
 import { ref, toValue, watch, nextTick, type MaybeRefOrGetter, type Ref } from 'vue'
 import {
   importDesktopDrop,
+  isImageUpload,
   postFormWithProgress,
   uploadChatAttachments,
   type AttachedFile,
   type FormPoster,
+  type UploadNotice,
   type UploadProgressHandler,
 } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, writeChatDraft } from '../lib/chatDrafts'
@@ -29,6 +31,7 @@ export interface ComposerAttachmentStore {
   addPendingFiles(chatId: string, files: AttachedFile[]): void
   removePendingFile(chatId: string, index: number): void
   pushErrorToast(title: string, errorText: string): unknown
+  pushUploadNotice(notice: UploadNotice): unknown
 }
 
 /** One upload in flight; `ComposerUploadProgress.vue` renders the list. */
@@ -282,8 +285,8 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
 
   async function attachFiles(files: File[]): Promise<void> {
     const id = chatId()
-    const images = files.filter(f => f.type.startsWith('image/'))
-    const documents = files.filter(f => !f.type.startsWith('image/'))
+    const images = files.filter(isImageUpload)
+    const documents = files.filter(f => !isImageUpload(f))
     await Promise.all([
       documents.length ? attachDocuments(id, documents) : Promise.resolve(),
       images.length ? attachImages(id, images) : Promise.resolve(),
@@ -333,6 +336,7 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
       for (const failure of result.failures) {
         store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
       }
+      for (const notice of result.notices) store.pushUploadNotice(notice)
       store.addPendingFiles(id, result.files)
       store.addPendingImageRefs(id, result.imageRefs)
     } catch (error) {

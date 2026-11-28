@@ -67,6 +67,7 @@ from ciao.web.auth import (
     is_loopback_client,
 )
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
+from ciao.web.heif_images import HEIF_EXTENSIONS, HeifNotConverted
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import CLAUDE_MODELS, MAX_IMAGE_SIZE_BYTES, CiaoConfig, RESTART_EXIT_CODE, WorkspaceConfig
 from ciao.model_tiers import MAX_MODEL_ID_CHARS
@@ -1772,10 +1773,11 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         image_paths = [
             path
             for path in paths
-            if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
+            if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS | HEIF_EXTENSIONS
         ]
         regular_paths = [path for path in paths if path not in image_paths]
         errors: list[dict[str, str]] = []
+        notices: list[dict[str, str]] = []
         file_refs: list[dict[str, str]] = []
 
         pcm = getattr(request.app.state, "project_chat_manager", None)
@@ -1793,7 +1795,18 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                 image_data = await asyncio.to_thread(
                     _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
                 )
-                image_refs.append(pcm.save_image_upload(image_data, path.name).path.name)
+                attachment = await asyncio.to_thread(pcm.save_image_upload, image_data, path.name)
+                image_refs.append(attachment.path.name)
+            except HeifNotConverted as exc:
+                # The dropped file is on this host already: hand the agent that
+                # path, as for any other non-image drop, not the media copy.
+                exc.original.unlink(missing_ok=True)
+                file_refs.append(_desktop_drop_ref(pcm, chat_id, path))
+                keep_paths.add(path)
+                notices.append({
+                    "filename": _drop_display_name(path),
+                    "message": _heif_file_notice(exc.reason),
+                })
             except (OSError, ValueError) as exc:
                 errors.append(
                     {
@@ -1836,6 +1849,7 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                 "file_refs": file_refs,
                 "image_refs": image_refs,
                 "errors": errors,
+                "notices": notices,
             }
         )
     except (OSError, ValueError) as exc:
@@ -2799,8 +2813,19 @@ async def chat_worktree_changes(request: Request) -> Response:
 
 # ── Images ───────────────────────────────────────────────────────────────
 
+def _heif_file_notice(reason: str) -> str:
+    # The PWA titles the toast "<name> attached as a file" and clamps the body,
+    # so the consequence comes first.
+    return f"The agent can read it by path but cannot see it as an image: {reason}."
+
+
 async def chat_images(request: Request) -> JSONResponse:
-    """Upload images and return references."""
+    """Upload images and return references.
+
+    A HEIC/HEIF photo that cannot be converted to JPEG is still kept: its entry
+    carries a ``file_ref`` (an opaque chat file reference, like
+    ``/attachments``) and a ``notice`` for the user instead of a ``ref``.
+    """
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     chat = pcm.get_chat(chat_id)
@@ -2818,11 +2843,18 @@ async def chat_images(request: Request) -> JSONResponse:
             data = await _read_upload_limited(
                 upload, MAX_IMAGE_SIZE_BYTES
             )
-            attachment = pcm.save_image_upload(data, filename)
+            attachment = await asyncio.to_thread(pcm.save_image_upload, data, filename)
             results.append({
                 "ref": attachment.path.name,
                 "mime_type": attachment.mime_type,
                 "filename": attachment.original_filename,
+            })
+        except HeifNotConverted as exc:
+            name = _drop_display_name(Path(filename))
+            results.append({
+                "filename": name,
+                "file_ref": _desktop_drop_ref(pcm, chat_id, exc.original) | {"name": name},
+                "notice": _heif_file_notice(exc.reason),
             })
         except ValueError as exc:
             results.append({"error": str(exc), "filename": filename})

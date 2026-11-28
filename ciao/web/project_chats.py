@@ -375,6 +375,14 @@ from ciao.web.memory_pass import (
     is_memory_pass_chat,
 )
 from ciao.web.schedule_dispatch import ScheduleDispatcher
+from ciao.web.heif_images import (
+    HEIF_EXTENSIONS,
+    HeifConversionError,
+    HeifNotConverted,
+    convert_heif_to_jpeg,
+    heif_extension,
+    is_heif,
+)
 from ciao.web.document_conversion import (
     convert_document,
     is_anydoc_document,
@@ -11619,7 +11627,15 @@ class ProjectChatManager:
     # ── Images ───────────────────────────────────────────────────────────
 
     def save_image_upload(self, data: bytes, filename: str) -> ImageAttachment:
-        """Save an uploaded image and return an ImageAttachment."""
+        """Save an uploaded image and return an ImageAttachment.
+
+        A HEIC/HEIF photo is kept as uploaded and converted to a JPEG beside it
+        under the same ref stem; the JPEG is the image, the original rides as
+        ``original_path``. When it cannot be converted, ``HeifNotConverted``
+        carries the saved original so the caller can attach it as a file.
+        """
+        if is_heif(data, filename):
+            return self._save_heif_upload(data, filename)
         ext = Path(filename).suffix.lower() or ".jpg"
         if ext not in _ALLOWED_IMAGE_EXTENSIONS:
             raise ValueError(f"Unsupported image format: {ext}")
@@ -11637,6 +11653,29 @@ class ProjectChatManager:
             original_filename=filename,
         )
 
+    def _save_heif_upload(self, data: bytes, filename: str) -> ImageAttachment:
+        if len(data) > MAX_IMAGE_SIZE_BYTES:
+            raise ValueError("Image too large")
+        stem = f"web_{chat_service._uuid8()}"
+        self._config.media_root.mkdir(parents=True, exist_ok=True)
+        original = (self._config.media_root / f"{stem}{heif_extension(filename)}").resolve()
+        original.write_bytes(data)
+        target = original.with_name(f"{stem}.jpg")
+        try:
+            convert_heif_to_jpeg(original, target)
+        except HeifConversionError as exc:
+            logger.warning("Attaching HEIF upload %s as a file: %s", stem, exc)
+            raise HeifNotConverted(original, str(exc)) from exc
+        if target.stat().st_size > MAX_IMAGE_SIZE_BYTES:
+            target.unlink(missing_ok=True)
+            raise HeifNotConverted(original, "the converted photo is too large to send as an image")
+        return ImageAttachment(
+            path=target,
+            mime_type="image/jpeg",
+            original_filename=filename,
+            original_path=original,
+        )
+
     def _unlink_chat_images(self, chat: ChatInfo) -> None:
         """Delete on-disk image files recorded for this chat and clear the map.
 
@@ -11649,6 +11688,8 @@ class ProjectChatManager:
                 if attachment:
                     try:
                         attachment.path.unlink(missing_ok=True)
+                        if attachment.original_path is not None:
+                            attachment.original_path.unlink(missing_ok=True)
                     except OSError:
                         logger.exception("Failed to unlink image %s", ref)
         stream = self._broker.get(chat.chat_id)
@@ -11669,10 +11710,22 @@ class ProjectChatManager:
             return None
         ext = target.suffix.lower()
         mime = guess_media_type(ref) or f"image/{ext.lstrip('.')}"
+        original = None
+        if ext == ".jpg":
+            # A converted HEIC photo keeps its original under the same stem.
+            original = next(
+                (
+                    candidate
+                    for candidate in (resolved.with_suffix(suffix) for suffix in sorted(HEIF_EXTENSIONS))
+                    if candidate.is_file()
+                ),
+                None,
+            )
         return ImageAttachment(
             path=resolved,
             mime_type=mime,
             original_filename=ref,
+            original_path=original,
         )
 
     # ── Internal helpers ─────────────────────────────────────────────────
