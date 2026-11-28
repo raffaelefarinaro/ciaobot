@@ -1477,6 +1477,9 @@ class ProjectChatManager:
         self._shell_finished_pending: dict[str, list[ShellFinishedEvent]] = {}
         # Stop presses per chat (``_stop_count``).
         self._stop_counts: dict[str, int] = {}
+        # Chats whose scheduled Workspace care run the dispatcher still owns
+        # (``begin_care_run`` / ``end_care_run``): their run turns stay quiet.
+        self._care_runs_in_flight: set[str] = set()
         # The running background-shell count last published per chat (`chat_shells`), only non-zero
         # entries. The count itself is always read from the live provider, never from here.
         self._running_shells_published: dict[str, int] = {}
@@ -9436,9 +9439,16 @@ class ProjectChatManager:
         })
         self._schedule_push(chat_id, title, snippet)
 
-    @staticmethod
-    def _care_run_turn(chat: ChatInfo) -> bool:
-        """True when the chat's latest turn belongs to a scheduled Workspace care run.
+    def begin_care_run(self, chat_id: str) -> None:
+        """The dispatcher started a Workspace care run in this chat."""
+        self._care_runs_in_flight.add(chat_id)
+
+    def end_care_run(self, chat_id: str) -> None:
+        """The dispatcher announced the run's outcome, or gave up on it."""
+        self._care_runs_in_flight.discard(chat_id)
+
+    def _care_run_turn(self, chat: ChatInfo) -> bool:
+        """True when the chat's latest turn belongs to a Workspace care run still in flight.
 
         The care run is an orchestrator: its first reply only plans, and every
         subagent that finishes wakes it for another turn (origin
@@ -9448,7 +9458,14 @@ class ProjectChatManager:
         work: a scheduled one is the run's, while a typed one (the person
         talking to the care chat) is announced as usual. Questions and approval
         requests are not results and keep their own notifications.
+
+        Only while the dispatcher still owns the run: a turn that ends after
+        it announced the outcome (a question answered later, a step still
+        running past the cut-off, a wake after a restart) has nothing else to
+        announce it, so it is an ordinary result.
         """
+        if chat.chat_id not in self._care_runs_in_flight:
+            return False
         if not is_care_schedule_id(chat.schedule_id):
             return False
         for index in range(chat.user_turn_count - 1, -1, -1):

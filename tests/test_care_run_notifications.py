@@ -61,6 +61,8 @@ def _setup(tmp_path: Path, *, schedule_id: str = CARE_ID):
     pushes: list[tuple[str, str, str]] = []
     pcm.notify_result_cb = lambda cid, title, snippet: pushes.append((cid, title, snippet))
     pcm._push_delay_seconds = 0
+    # The dispatcher owns the run until it announces the outcome.
+    pcm.begin_care_run(chat.chat_id)
     return pcm, chat, events, pushes
 
 
@@ -154,6 +156,26 @@ async def test_the_run_end_notice_is_one_event_and_one_push(tmp_path: Path) -> N
     assert event["snippet"] == "Workspace care finished: 7 of 7 steps done."
     assert event["memory_pass"] is False and event["quiet_loop_run"] is False
     assert pushes == [(chat.chat_id, "Workspace care", "Workspace care finished: 7 of 7 steps done.")]
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        ("schedule",),  # a question answered after the dispatcher stopped waiting
+        ("schedule", "background_run"),  # a step still running past the cut-off wakes the chat
+    ],
+)
+async def test_a_care_turn_after_the_run_is_over_is_announced(
+    tmp_path: Path, origins: tuple[str, ...]
+) -> None:
+    pcm, chat, events, pushes = _setup(tmp_path)
+    pcm.announce_schedule_run_end(chat.chat_id, "Workspace care was cut off.")
+    pcm.end_care_run(chat.chat_id)
+    _turns(chat, *origins)
+    await _turn_end(pcm, chat)
+    # The run notice, then this turn as an ordinary result.
+    assert [e["snippet"] for e in _results(events)] == ["Workspace care was cut off.", "a step finished"]
+    assert len(pushes) == 2
 
 
 async def test_a_care_run_approval_or_question_still_notifies_once(tmp_path: Path) -> None:
@@ -277,6 +299,9 @@ async def test_a_cut_off_care_run_notifies_once(tmp_path: Path, monkeypatch: pyt
     ((chat_id, text),) = host.run_end_notices
     assert chat_id == "chat-1"
     assert text.startswith("Workspace care was cut off: a step was still running after ")
+    # The run is no longer in flight, so a step still running wakes the chat audibly.
+    assert host.care_calls == [("begin", "chat-1"), ("end", "chat-1")]
+    assert host.care_in_flight == set()
 
 
 @pytest.mark.usefixtures("fast_poll")
@@ -359,3 +384,34 @@ async def test_a_user_routine_raises_no_run_notice(tmp_path: Path, monkeypatch: 
 
     assert result["status"] == "ok"
     assert host.run_end_notices == []
+    assert host.care_calls == []
+
+
+async def test_a_care_run_is_released_when_its_dispatch_is_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _archiving_host(tmp_path, _LAUNCH_TURN)
+    host.follow_up_pending = True
+    _capture_run_records(monkeypatch)
+    entry = dataclasses.replace(_entry(archive_policy="auto"), schedule_id=CARE_ID, scope="system")
+    task = asyncio.create_task(
+        ScheduleDispatcher(cast(ScheduleDispatchHost, host)).dispatch_schedule(
+            entry, "Run the routine.", "opus", "auto", "opencode"
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert host.care_in_flight == {"chat-1"}
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert host.care_in_flight == set() and host.run_end_notices == []
+
+
+def test_a_denied_care_run_names_the_denial() -> None:
+    from ciao.web import chat_service
+    from ciao.web.schedule_dispatch import care_run_end_text
+
+    outcome = chat_service.ScheduleRunOutcome(completed=True, permission_denied="Bash")
+    status, error = chat_service._schedule_dispatch_status(outcome)
+    assert status == "error" and error
+    assert care_run_end_text(outcome, status, error=error) == f"Workspace care failed. {error}"

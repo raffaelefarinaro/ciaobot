@@ -113,6 +113,9 @@ class _ScheduleHost:
         self.stops = 0
         # What the dispatcher handed the run-end notifier.
         self.run_end_notices: list[tuple[str, str]] = []
+        # Care runs the dispatcher marked in flight, and every begin/end call.
+        self.care_in_flight: set[str] = set()
+        self.care_calls: list[tuple[str, str]] = []
 
     @property
     def events(self) -> EventsHub:
@@ -221,7 +224,17 @@ class _ScheduleHost:
         return self.stops
 
     def announce_schedule_run_end(self, chat_id: str, text: str) -> None:
+        # The run is still in flight when its outcome is announced.
+        assert chat_id in self.care_in_flight
         self.run_end_notices.append((chat_id, text))
+
+    def begin_care_run(self, chat_id: str) -> None:
+        self.care_in_flight.add(chat_id)
+        self.care_calls.append(("begin", chat_id))
+
+    def end_care_run(self, chat_id: str) -> None:
+        self.care_in_flight.discard(chat_id)
+        self.care_calls.append(("end", chat_id))
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         self.archives.append(chat_id)

@@ -242,6 +242,10 @@ class ScheduleDispatchHost(Protocol):
 
     def announce_schedule_run_end(self, chat_id: str, text: str) -> None: ...
 
+    def begin_care_run(self, chat_id: str) -> None: ...
+
+    def end_care_run(self, chat_id: str) -> None: ...
+
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None: ...
 
     async def run_archive_postprocess(
@@ -876,132 +880,144 @@ class ScheduleDispatcher:
         if loop_owned:
             prompt = loop_wake.loop_wake_prompt(entry, now=datetime.now(UTC))
             stream_origin = "loop"
+        # The care run is in flight from its first turn until its outcome is
+        # announced: only while it is do its own turns stay quiet
+        # (``ProjectChatManager._care_run_turn``). Any turn that ends later, an
+        # answered question, a step still running after a cut-off, is announced
+        # as an ordinary result.
+        care_run = schedule_support.is_care_schedule_id(_sched_schedule_id)
+        if care_run:
+            self._host.begin_care_run(target_id)
         try:
-            # Taken before the turn starts, so a Stop during it is seen too.
-            stops = self._host._stop_count(target_id)
-            stream = self._host.start_stream(
-                target_id, prompt, unattended=True, origin=stream_origin
-            )
-            launched_subagent = await _consume_run_stream(stream, outcome)
-            if launched_subagent and not loop_owned:
-                # The first result may only say the subagent was launched: wait
-                # for the turns it gives the chat before grading the run. A
-                # loop's own chat is never archived by its run, so it does not wait.
-                await self._await_follow_up_turns(
-                    target_id, outcome, first=stream, stops=stops
+            try:
+                # Taken before the turn starts, so a Stop during it is seen too.
+                stops = self._host._stop_count(target_id)
+                stream = self._host.start_stream(
+                    target_id, prompt, unattended=True, origin=stream_origin
                 )
-            # Only a trusted system routine consumed engine-wide evidence.
-            # Clear it after a clean run; a failed triage must not wipe the
-            # backlog it never processed, and a user schedule never owns this
-            # shared log, so its success never truncates it.
+                launched_subagent = await _consume_run_stream(stream, outcome)
+                if launched_subagent and not loop_owned:
+                    # The first result may only say the subagent was launched: wait
+                    # for the turns it gives the chat before grading the run. A
+                    # loop's own chat is never archived by its run, so it does not wait.
+                    await self._await_follow_up_turns(
+                        target_id, outcome, first=stream, stops=stops
+                    )
+                # Only a trusted system routine consumed engine-wide evidence.
+                # Clear it after a clean run; a failed triage must not wipe the
+                # backlog it never processed, and a user schedule never owns this
+                # shared log, so its success never truncates it.
+                if (
+                    prompt_uses_engine_wide_diagnostics
+                    and chat_service._schedule_run_clean(outcome)
+                ):
+                    await asyncio.to_thread(
+                        clear_error_log, self._host._config.workspace_root
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                outcome.stream_error = True
+                logger.exception("Schedule dispatch to %s failed", target_id)
+            finally:
+                if (
+                    orig_model is not None
+                    and not interval
+                    and not web_project_id
+                    and web_chat_id
+                ):
+                    chat = self._host._chats.get(target_id)
+                    if chat:
+                        chat.model = orig_model
+
+            chat_state = self._host._chats.get(target_id)
+            network_retry = False
+            if chat_state and chat_state.retry_status == "pending":
+                outcome.retry_pending = True
+                network_retry = chat_state.retry_kind == "network"
+
+            needs_user = False
+            # A loop's own chat is never archived by its run: its archive policy is
+            # manual, and the owner decides when the chat goes.
             if (
-                prompt_uses_engine_wide_diagnostics
+                not loop_owned
+                and getattr(entry, "archive_policy", "manual") == "auto"
                 and chat_service._schedule_run_clean(outcome)
             ):
-                await asyncio.to_thread(
-                    clear_error_log, self._host._config.workspace_root
+                needs_user = await self._host._schedule_run_needs_user(
+                    entry, outcome, chat_id=target_id
                 )
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001
-            outcome.stream_error = True
-            logger.exception("Schedule dispatch to %s failed", target_id)
-        finally:
-            if (
-                orig_model is not None
-                and not interval
-                and not web_project_id
-                and web_chat_id
-            ):
-                chat = self._host._chats.get(target_id)
-                if chat:
-                    chat.model = orig_model
 
-        chat_state = self._host._chats.get(target_id)
-        network_retry = False
-        if chat_state and chat_state.retry_status == "pending":
-            outcome.retry_pending = True
-            network_retry = chat_state.retry_kind == "network"
-
-        needs_user = False
-        # A loop's own chat is never archived by its run: its archive policy is
-        # manual, and the owner decides when the chat goes.
-        if (
-            not loop_owned
-            and getattr(entry, "archive_policy", "manual") == "auto"
-            and chat_service._schedule_run_clean(outcome)
-        ):
-            needs_user = await self._host._schedule_run_needs_user(
-                entry, outcome, chat_id=target_id
-            )
-
-        if chat_service._should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
-            chat_meta = self._host._chats.get(target_id)
-            project_meta = (
-                self._host._projects.get(chat_meta.project_id) if chat_meta else None
-            )
-            try:
-                archive_outcome = await self._host.archive_chat(target_id)
-            except Exception:  # noqa: BLE001
-                logger.exception("Auto-archive failed for schedule chat %s", target_id)
-                archive_outcome = None
-            if archive_outcome is not None:
+            if chat_service._should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
+                chat_meta = self._host._chats.get(target_id)
+                project_meta = (
+                    self._host._projects.get(chat_meta.project_id) if chat_meta else None
+                )
                 try:
-                    await self._host.run_archive_postprocess(
-                        target_id, archive_outcome, chat_meta, project_meta
-                    )
+                    archive_outcome = await self._host.archive_chat(target_id)
                 except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "Auto-archive postprocess failed for schedule chat %s",
+                    logger.exception("Auto-archive failed for schedule chat %s", target_id)
+                    archive_outcome = None
+                if archive_outcome is not None:
+                    try:
+                        await self._host.run_archive_postprocess(
+                            target_id, archive_outcome, chat_meta, project_meta
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Auto-archive postprocess failed for schedule chat %s",
+                            target_id,
+                        )
+                    outcome.archived_to = str(archive_outcome.path)
+                    result["archived_to"] = str(archive_outcome.path)
+                else:
+                    logger.warning(
+                        "Auto-archive requested but archive_chat returned None for %s",
                         target_id,
                     )
-                outcome.archived_to = str(archive_outcome.path)
-                result["archived_to"] = str(archive_outcome.path)
-            else:
-                logger.warning(
-                    "Auto-archive requested but archive_chat returned None for %s",
-                    target_id,
-                )
 
-        _sched_status, _sched_error = chat_service._schedule_dispatch_status(
-            outcome, provider=provider or "claude", model=model or ""
-        )
-        # Interval entries surface their own last_status in the UI, so hand the
-        # classification back. "skipped" (a permission prompt or a deferred
-        # retry) is not an error, but it is not a completed run either -- report
-        # it as such rather than flattening it to "ok".
-        _row_status = _sched_status
-        if network_retry:
-            # The agent could not reach an external service and armed a network
-            # retry; the retried turn settles the row (ProjectChatManager.
-            # _settle_schedule_retry). The job-run log keeps "skipped".
-            _row_status = schedule_support.RUN_STATUS_RETRYING
-        result["status"] = _row_status
-        if loop_owned and _row_status == "error":
-            # The loop stop notice names a denied tool, so the scheduler needs it.
-            result["denied_tool"] = outcome.permission_denied
-        # A failed run is stamped on the stored row, not just in the job log:
-        # without this a wall-clock entry failing every run (an archived target
-        # resuming a dead provider session, say) produced an endless string of
-        # invisible `stream error` records and nothing the operator could see
-        # anywhere (issue #407). The stamp makes the PWA sidebar flag the
-        # automation for attention on the next schedules refetch. A completed
-        # run clears it again, so a one-off failure does not brand the entry
-        # unhealthy forever — interval entries get this for free from
-        # _run_interval's write-back; wall-clock entries get it here. Re-read
-        # the row first: the run streamed for minutes and the user may have
-        # edited or retargeted it meanwhile — only the health field is ours to
-        # write.
-        #
-        # `stamp_run_outcome` decides what "ours" means when two dispatches
-        # overlap: the health field belongs to the dispatch the row still names,
-        # while a completed run credits the occurrence it was dispatched for
-        # either way (issue #490).
-        self._stamp_row_outcome(_sched_schedule_id, _sched_dispatch_id, _row_status)
-        if schedule_support.is_care_schedule_id(_sched_schedule_id):
-            await self._announce_care_run_end(
-                target_id, outcome, _sched_status, _sched_exec_workspace, _sched_started
+            _sched_status, _sched_error = chat_service._schedule_dispatch_status(
+                outcome, provider=provider or "claude", model=model or ""
             )
+            # Interval entries surface their own last_status in the UI, so hand the
+            # classification back. "skipped" (a permission prompt or a deferred
+            # retry) is not an error, but it is not a completed run either -- report
+            # it as such rather than flattening it to "ok".
+            _row_status = _sched_status
+            if network_retry:
+                # The agent could not reach an external service and armed a network
+                # retry; the retried turn settles the row (ProjectChatManager.
+                # _settle_schedule_retry). The job-run log keeps "skipped".
+                _row_status = schedule_support.RUN_STATUS_RETRYING
+            result["status"] = _row_status
+            if loop_owned and _row_status == "error":
+                # The loop stop notice names a denied tool, so the scheduler needs it.
+                result["denied_tool"] = outcome.permission_denied
+            # A failed run is stamped on the stored row, not just in the job log:
+            # without this a wall-clock entry failing every run (an archived target
+            # resuming a dead provider session, say) produced an endless string of
+            # invisible `stream error` records and nothing the operator could see
+            # anywhere (issue #407). The stamp makes the PWA sidebar flag the
+            # automation for attention on the next schedules refetch. A completed
+            # run clears it again, so a one-off failure does not brand the entry
+            # unhealthy forever — interval entries get this for free from
+            # _run_interval's write-back; wall-clock entries get it here. Re-read
+            # the row first: the run streamed for minutes and the user may have
+            # edited or retargeted it meanwhile — only the health field is ours to
+            # write.
+            #
+            # `stamp_run_outcome` decides what "ours" means when two dispatches
+            # overlap: the health field belongs to the dispatch the row still names,
+            # while a completed run credits the occurrence it was dispatched for
+            # either way (issue #490).
+            self._stamp_row_outcome(_sched_schedule_id, _sched_dispatch_id, _row_status)
+            if care_run:
+                await self._announce_care_run_end(
+                    target_id, outcome, _sched_status, _sched_exec_workspace, _sched_started, _sched_error
+                )
+        finally:
+            if care_run:
+                self._host.end_care_run(target_id)
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",
@@ -1064,6 +1080,7 @@ class ScheduleDispatcher:
         status: str,
         workspace: str,
         started: datetime,
+        error: str | None,
     ) -> None:
         """Raise the Workspace care run's one notification, with its outcome.
 
@@ -1083,7 +1100,7 @@ class ScheduleDispatcher:
             if report.get("status") == "ok" and _written_since(str(report.get("modified_at") or ""), started):
                 counts = report.get("counts") or None
                 needs = len(report.get("needs_you") or [])
-        text = care_run_end_text(outcome, status, counts=counts, needs=needs)
+        text = care_run_end_text(outcome, status, counts=counts, needs=needs, error=error)
         if text:
             self._host.announce_schedule_run_end(chat_id, text)
 
@@ -1149,6 +1166,7 @@ def care_run_end_text(
     *,
     counts: dict[str, int] | None = None,
     needs: int = 0,
+    error: str | None = None,
 ) -> str:
     """The Workspace care run's end notice, or "" when it raises none.
 
@@ -1167,6 +1185,9 @@ def care_run_end_text(
             minutes = f"{chat_service.SCHEDULE_FOLLOW_UP_MAX_S / 60:g}"
             head = f"Workspace care was cut off: a step was still running after {minutes} min"
             return f"{head} ({progress})." if progress else f"{head}."
+        if outcome.permission_denied and error:
+            # The denial names the tool and the setting that lets the run use it.
+            return f"Workspace care failed. {error}"
         return "Workspace care failed. Open the chat to see why."
     if outcome.follow_up_unfinished == chat_service.FOLLOW_UP_STOPPED:
         return f"Workspace care was stopped: {progress}." if progress else "Workspace care was stopped."
