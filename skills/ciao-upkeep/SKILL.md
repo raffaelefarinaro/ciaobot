@@ -1,6 +1,6 @@
 ---
 name: ciao-upkeep
-description: Keep Ciaobot current between releases — check every dependency and pin we install and whether its upstream is still alive (Python, npm, GitHub Actions, the Node floor, Playwright), keep the stock skill catalog, ciao-capabilities and the marketing site in sync with the code, sweep doc rot, and maintain the watchlist in docs/UPKEEP.md. Trigger on "keep ciao up to date", "check dependencies", "any updates", "check the site", "watchlist", "upkeep", or after a feature ships that adds a user-facing capability.
+description: Keep Ciaobot current between releases — check every dependency and pin we install and whether its upstream is still alive (Python, npm, GitHub Actions, the Node floor, Playwright), keep the stock skill catalog, ciao-capabilities and the marketing site in sync with the code, sweep doc rot (README, docs/CREDITS.md, docs/), and maintain the watchlist in docs/UPKEEP.md. Trigger on "keep ciao up to date", "check dependencies", "any updates", "check the site", "watchlist", "upkeep", or after a feature ships that adds a user-facing capability.
 ---
 
 # Ciaobot upkeep
@@ -18,7 +18,7 @@ Two things to keep straight:
 - **Adopt** — change a pin, fix a doc, edit the site. A normal PR against
   `develop`, with the gates. Never bundled into a release.
 
-Everything here runs in the main checkout on a branch. No worktree.
+Work on a branch off `develop`, preferably in a worktree (`AGENTS.md`).
 
 ## 0. The watchlist first
 
@@ -194,8 +194,8 @@ shipped without one.
 wrong claim goes live the moment it merges, and `workflow_dispatch` means a fix
 does not need a release.
 
-It has no tests. Nothing compares it to the code it describes. That is the whole
-argument for checking it.
+Only its links are tested (`tests/test_documentation_navigation.py`). Nothing compares its claims to the code it
+describes. That is the whole argument for checking it.
 
 For each release's removals and renames, sweep it:
 
@@ -235,6 +235,14 @@ env -u PYTHONPATH .venv/bin/python -m pytest \
 Then, for identifiers the range removed, sweep by hand across `README.md`,
 `INTEGRATIONS.md`, `PWA_API.md`, `docs/`, `DESIGN.md` **and** `site/`.
 
+**Docs and credits.** Run the per-document checklist in
+[references/docs-and-credits.md](references/docs-and-credits.md):
+`docs/CREDITS.md` against what ships (manifests, adapters, invoked CLIs, Mac
+runtime, fonts and assets), README requirements and install commands against
+the code, site claims spot-checked against their source, docs via the doc
+tests. **Check, do not bloat:** fix a wrong sentence in place or delete it;
+never append a section. Report what you verified and what you could not.
+
 ## 5. Advisories and triage
 
 `pip-audit`, `npm audit` and `npm run lint` are `|| true` in `ci.yml` — advisory
@@ -259,7 +267,7 @@ coverage it does not have.
 ## Traps
 
 - **A green `npm test` proves nothing about the Node floor.** Below
-  `^20.19 || ^22.13 || >=24`, vitest prints `Test Files N passed` for the files
+  `SUPPORTED_RANGE` in `web/scripts/check-node.mjs`, vitest prints `Test Files N passed` for the files
   that ran. Check `node --version` and read the count.
 - **`check_available_updates` fails open.** Every network call is wrapped in
   `except Exception: pass`, and `release.py` prints "Dependency update check
