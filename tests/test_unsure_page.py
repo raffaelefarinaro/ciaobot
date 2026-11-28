@@ -483,6 +483,9 @@ def test_restore_goes_back_under_its_own_heading(tmp_path: Path) -> None:
         "- [ ] q\tTab",
         "\t- [ ] indented with a tab",
         "  - [ ] indented with spaces",
+        "-\u00a0[ ] no-break space before the box",
+        "- [ ]\u00a0no-break space after the box",
+        "- [\u00a0] no-break space in the box",
     ],
 )
 def test_restore_refuses_anything_but_one_unticked_item_line(tmp_path: Path, line: str) -> None:
@@ -535,6 +538,20 @@ def test_route_restores_a_removed_line(setup: SimpleNamespace) -> None:
         ("agents.md", False),
         ("People/Mo\u202e.md", False),
         ("regions", False),
+        # Case and compatibility tricks a case-insensitive disk would resolve to a protected file.
+        ("AGENTſ.md", False),
+        ("Workſpace/Unsure.md", False),
+        ("automationſ/x/PROMPT.md", False),
+        ("WORKSPACE/Unsure.md", False),
+        ("wor\u212aspace/Unsure.md", False),  # Kelvin sign
+        ("\uff37orkspace/Unsure.md", False),  # fullwidth W
+        ("\uff21\uff27\uff25\uff2e\uff34\uff33.md", False),  # fullwidth AGENTS
+        ("Agents.MD", False),
+        ("Workspace./Unsure.md", False),
+        ("Workspace /Unsure.md", False),
+        ("People/Mo.md.", False),
+        ("People /Mo.md", False),
+        ("Profile", False),
     ],
 )
 def test_the_parser_flags_a_destination_an_approval_may_not_write(destination: str, allowed: bool) -> None:
@@ -555,3 +572,10 @@ def test_the_route_hands_the_page_the_destination_flag(setup: SimpleNamespace) -
         ("../../.ssh/authorized_keys", False),
         ("People/Mo.md", True),
     ]
+
+
+def test_a_line_id_has_nothing_after_it() -> None:
+    good = ul.line_id(PLAIN)
+    assert ul.is_line_id(good)
+    assert not ul.is_line_id(good + "\n")
+    assert not ul.is_line_id(good + " ")

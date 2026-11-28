@@ -229,7 +229,7 @@ def line_id(line: str, occurrence: int = 0) -> str:
 
 
 def is_line_id(value: str) -> bool:
-    return bool(_ID.match(value))
+    return bool(_ID.fullmatch(value))
 
 
 def _split(text: str) -> list[str]:
@@ -283,10 +283,18 @@ def destination_allowed(destination: str) -> bool:
     """
     if destination in DESTINATION_REGIONS:
         return True
-    if vault_relative_path(destination) != destination or not destination.lower().endswith(".md"):
+    if vault_relative_path(destination) != destination:
         return False
-    first = destination.split("/", 1)[0].lower()
-    return first not in _DESTINATION_DENIED_DIRS and destination.lower() != "agents.md"
+    # Compare as a case-insensitive disk would: NFKC (fullwidth letters, the
+    # Kelvin sign) then casefold (`ſ` is `s`), each segment without trailing dots
+    # or spaces, which some file systems drop.
+    folded = [
+        unicodedata.normalize("NFKC", segment).casefold().rstrip(". ")
+        for segment in destination.split("/")
+    ]
+    if not folded[-1].endswith(".md") or not destination.casefold().endswith(".md"):
+        return False
+    return folded[0] not in _DESTINATION_DENIED_DIRS and folded != ["agents.md"]
 
 
 def parse_item(line: str, item_id: str | None = None) -> dict[str, Any]:
@@ -465,6 +473,9 @@ def _allowed_line(line: str) -> bool:
     """One line with no control, format or separator character, starting at its bullet."""
     if not line or line[0] not in "-*":
         return False
+    # Plain spaces around the box: `\s` in the item pattern also matches NBSP and friends.
+    if len(line) > 1 and not line.startswith(("- ", "* ")):
+        return False
     return not any(unicodedata.category(ch) in _FORBIDDEN_CATEGORIES for ch in line)
 
 
@@ -491,12 +502,12 @@ def restore_line(
     :func:`change_line`. Raises :class:`UnsureError` (`bad_request`) or
     :class:`ciao.file_kernel.QueueLockError`. Returns the list after the write.
     """
-    match = _ITEM.match(line) if _allowed_line(line) else None
+    match = _ITEM.match(line) if _allowed_line(line) and line[1:6] == " [ ] " else None
     if match is None or match.group(2) != " " or not match.group(4).strip():
         raise UnsureError("only one unticked item line can be added back", 400, "bad_request")
     if len(line) > MAX_RESTORE_CHARS or redact_text(line) != line:
         raise UnsureError("this line cannot be added back from the page", 400, "bad_request")
-    if (before and not is_line_id(before)) or (after and not is_line_id(after)) or not _allowed_line("-" + section):
+    if (before and not is_line_id(before)) or (after and not is_line_id(after)) or not _allowed_line("- " + section):
         raise UnsureError("op and id are required", 400, "bad_request")
     path = unsure_path(Path(vault_root).resolve())
     with queue_lock(path, timeout_s=lock_timeout_s):
