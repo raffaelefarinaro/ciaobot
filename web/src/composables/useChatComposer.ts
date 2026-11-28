@@ -10,6 +10,7 @@ import {
   type UploadProgressHandler,
 } from '../lib/chatAttachments'
 import { readChatDraft, readSentPromptHistory, writeChatDraft } from '../lib/chatDrafts'
+import { dropHost, requestNativeDropGrant, type DropHost, type DropZone } from '../lib/nativeDrop'
 
 /**
  * Composer, draft and attachment behaviour for one chat.
@@ -32,6 +33,7 @@ export interface ComposerAttachmentStore {
   removePendingFile(chatId: string, index: number): void
   pushErrorToast(title: string, errorText: string): unknown
   pushUploadNotice(notice: UploadNotice): unknown
+  pushToast(toast: { chat_id: string; title: string; body: string }): unknown
 }
 
 /** One upload in flight; `ComposerUploadProgress.vue` renders the list. */
@@ -56,6 +58,8 @@ export interface ChatComposerOptions {
   fetchImpl?: typeof fetch
   /** Injected for tests; defaults to XHR `postFormWithProgress` (fetch cannot report upload progress). */
   postForm?: FormPoster
+  /** Injected for tests; defaults to the page's own window. */
+  hostWindow?: Parameters<typeof dropHost>[0]
 }
 
 export type NativeFileDropDetail = {
@@ -71,6 +75,13 @@ export interface ChatComposer {
   input: Ref<HTMLTextAreaElement | undefined>
   /** True while a drag hovers the panel, for the drop overlay. */
   dragOver: Ref<boolean>
+  /** What a drop can do here: the Mac app on its own engine can use a file
+   *  in place; a browser on that machine or elsewhere can only attach a copy. */
+  dropHost: DropHost
+  /** The drop zone under the drag, while the overlay shows zones. */
+  hoverZone: Ref<DropZone | null>
+  /** The keyboard path to "Use in place": the app's panel for files and folders. */
+  pickInPlace(): Promise<void>
   autoResize(): void
   /** ArrowUp/ArrowDown recall of this session's sent prompts. Returns true
    *  when the key was consumed. */
@@ -79,7 +90,8 @@ export interface ChatComposer {
   /** Attach picked files: images stage as thumbnails, others as file chips. */
   handleFileSelect(e: Event): Promise<void>
   handlePaste(e: ClipboardEvent): Promise<void>
-  handleDrop(e: DragEvent): Promise<void>
+  /** A drop on the panel; `zone` is where it landed (null: outside both, a copy). */
+  handleDrop(e: DragEvent, zone?: DropZone | null): Promise<void>
   removePendingImage(index: number): void
   removePendingFile(index: number): void
   /** Uploads in flight. Send is disabled while this is non-empty. */
@@ -104,6 +116,9 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
   const draft = ref(readChatDraft(draftChatId))
   const input = ref<HTMLTextAreaElement>()
   const dragOver = ref(false)
+  const hoverZone = ref<DropZone | null>(null)
+  const hostWindow = options.hostWindow ?? (globalThis as unknown as Parameters<typeof dropHost>[0])
+  const host = dropHost(hostWindow)
 
   const promptHistoryIndex = ref(-1)
   const promptHistoryDraft = ref('')
@@ -344,6 +359,38 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     }
   }
 
+  /** Reference files and folders where they are: the app grants the paths,
+   *  the engine checks them and returns opaque refs; nothing is copied. */
+  async function useInPlace(op: 'grant' | 'pick'): Promise<void> {
+    const id = chatId()
+    try {
+      const grant = await requestNativeDropGrant(op, hostWindow)
+      if (!grant) {
+        if (op === 'grant') throw new Error('The app did not see the dropped files. Drop them again.')
+        return
+      }
+      const result = await trackUpload(uploadLabel(grant.names.length ? grant.names : ['files']), 0,
+        () => importDesktopDrop(grant.grantId, { chatId: id, projectId: toValue(options.projectId) || '' }, doFetch, 'in_place'))
+      for (const failure of result.failures) store.pushErrorToast(`Could not use ${failure.filename}`, failure.error)
+      store.addPendingFiles(id, result.files)
+      const outside = result.files.filter(f => f.outside).map(f => f.name)
+      if (outside.length) {
+        store.pushToast({
+          chat_id: '',
+          title: outside.length === 1 ? `${outside[0]} is outside this chat's folders` : `${outside.length} items are outside this chat's folders`,
+          body: "The agent gets the path, not a copy. Whether it may read there follows this chat's permission mode, so it may ask you first.",
+        })
+      }
+    } catch (error) {
+      store.pushErrorToast('Could not use the file in place', errorText(error))
+    }
+  }
+
+  async function pickInPlace(): Promise<void> {
+    if (host !== 'native') return
+    await useInPlace('pick')
+  }
+
   function handleNativeFileDragEnter(): void {
     dragOver.value = true
   }
@@ -357,8 +404,13 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     void importNativeFileDrop(detail)
   }
 
-  async function handleDrop(e: DragEvent): Promise<void> {
+  async function handleDrop(e: DragEvent, zone: DropZone | null = null): Promise<void> {
     dragOver.value = false
+    hoverZone.value = null
+    if (zone === 'in-place' && host === 'native') {
+      await useInPlace('grant')
+      return
+    }
     const dt = e.dataTransfer
     if (!dt) return
 
@@ -386,7 +438,9 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     if (folders.length) {
       store.pushErrorToast(
         'Could not attach folder',
-        'Drop individual files instead; remote clients and sandboxed browsers cannot expose an absolute folder path.',
+        host === 'native'
+          ? 'Only files are copied. Drop a folder on "Use in place" to hand the agent its path.'
+          : 'Only files are copied. Drop individual files instead.',
       )
     }
 
@@ -397,6 +451,9 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
     draft,
     input,
     dragOver,
+    dropHost: host,
+    hoverZone,
+    pickInPlace,
     autoResize,
     handlePromptHistoryKey,
     insertTextAtCursor,

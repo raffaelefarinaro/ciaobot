@@ -602,7 +602,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `composables/useChatComposer.ts` owns the composer — the draft and its
   synchronous persistence, prompt-history recall, textarea auto-sizing, caret
   insertion, and every attachment path (paste, drop, the native desktop drop
-  grant, the file picker). It deliberately imports no store and registers no
+  grant, the file picker, and *Use in place*: `lib/nativeDrop.ts` reads the
+  host from the Mac app's `ciaobotNativeDrop` handler, asks it for a grant
+  and picks the drop zone from the drop's coordinates). It deliberately imports no store and registers no
   lifecycle hook: ids arrive as getters, the store arrives as the
   `ComposerAttachmentStore` interface, and `fetch` is injectable, so
   `composables/useChatComposer.test.ts` exercises all of it without mounting

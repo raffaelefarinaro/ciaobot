@@ -1118,3 +1118,176 @@ def test_native_desktop_drop_rejects_future_grant(tmp_path: Path) -> None:
         response.json()["error"]
         == "desktop drop grant expired: grant timestamp is in the future"
     )
+
+
+# ── desktop drop used in place ────────────────────────────────────────────
+
+
+def _in_place_setup(tmp_path: Path):
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    project = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+    chat = pcm.create_chat(project.project_id, title="In place")
+    return folder, pcm, chat
+
+
+def _post_in_place(pcm: ProjectChatManager, chat, grant_id: str, **extra):
+    return _make_client(pcm, pcm._config).post(
+        "/api/desktop-drop",
+        json={"grant_id": grant_id, "chat_id": chat.chat_id, "mode": "in_place", **extra},
+    )
+
+
+def test_in_place_drop_references_file_and_folder_without_copying(tmp_path: Path) -> None:
+    folder, pcm, chat = _in_place_setup(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-elsewhere"
+    outside.mkdir()
+    report = outside / "report.pdf"
+    report.write_bytes(b"%PDF-1.4\n")
+    data_dir = outside / "data set"
+    data_dir.mkdir()
+    grant_id = _write_desktop_drop_grant(pcm._config, [report, data_dir])
+
+    response = _post_in_place(pcm, chat, grant_id)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["errors"] == []
+    assert body["image_refs"] == []
+    file_ref, dir_ref = body["file_refs"]
+    assert (file_ref["name"], file_ref["kind"], file_ref["outside"]) == ("report.pdf", "file", True)
+    assert (dir_ref["name"], dir_ref["kind"], dir_ref["outside"]) == ("data set/", "folder", True)
+    # Nothing crosses the API as a path, and nothing was copied or converted.
+    assert str(outside) not in response.text
+    assert not (folder / "report.pdf").exists()
+    assert not (folder / "report.md").exists()
+    expanded = pcm.expand_file_refs(
+        f"ciao-drop:{file_ref['ref']} ciao-drop:{dir_ref['ref']}", chat.chat_id
+    )
+    assert expanded == f"{report.resolve()} {data_dir.resolve()}"
+
+
+def test_in_place_drop_marks_paths_inside_the_chat_folders(tmp_path: Path) -> None:
+    folder, pcm, chat = _in_place_setup(tmp_path)
+    notes = folder / "notes.md"
+    notes.write_text("# notes", encoding="utf-8")
+    grant_id = _write_desktop_drop_grant(pcm._config, [notes])
+
+    body = _post_in_place(pcm, chat, grant_id).json()
+
+    assert body["file_refs"][0]["outside"] is False
+
+
+def test_in_place_drop_hands_the_symlink_target(tmp_path: Path) -> None:
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    target = tmp_path / "real.txt"
+    target.write_text("x", encoding="utf-8")
+    link = tmp_path / "alias.txt"
+    link.symlink_to(target)
+    grant_id = _write_desktop_drop_grant(pcm._config, [link])
+
+    body = _post_in_place(pcm, chat, grant_id).json()
+
+    assert body["file_refs"][0]["name"] == "alias.txt"
+    assert pcm.expand_file_refs(f"ciao-drop:{body['file_refs'][0]['ref']}", chat.chat_id) == str(
+        target.resolve()
+    )
+
+
+@pytest.mark.parametrize("name", ["tick`name.txt", "line\nbreak.txt", "sep\u2028x.txt"])
+def test_in_place_drop_refuses_paths_that_cannot_be_quoted(tmp_path: Path, name: str) -> None:
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    hostile = tmp_path / name
+    hostile.write_text("x", encoding="utf-8")
+    grant_id = _write_desktop_drop_grant(pcm._config, [hostile])
+
+    body = _post_in_place(pcm, chat, grant_id).json()
+
+    assert body["file_refs"] == []
+    assert len(body["errors"]) == 1
+    assert "cannot be quoted safely" in body["errors"][0]["error"]
+    assert str(tmp_path) not in json.dumps(body)
+
+
+def test_in_place_drop_refuses_traversal_and_special_files(tmp_path: Path) -> None:
+    import os
+
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    traversal = tmp_path / "sub" / ".." / "real.txt"
+    (tmp_path / "sub").mkdir()
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    grant_id = _write_desktop_drop_grant(pcm._config, [traversal, fifo])
+
+    body = _post_in_place(pcm, chat, grant_id).json()
+
+    assert body["file_refs"] == []
+    errors = [entry["error"] for entry in body["errors"]]
+    assert "cannot be quoted safely" in errors[0]
+    assert errors[1] == "only files and folders can be used where they are"
+
+
+def test_in_place_drop_skips_the_import_byte_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"0" * 64)
+    monkeypatch.setattr("ciao.web.routes_api._DESKTOP_DROP_MAX_TOTAL_BYTES", 8)
+
+    in_place = _post_in_place(pcm, chat, _write_desktop_drop_grant(pcm._config, [big]))
+    imported = _make_client(pcm, pcm._config).post(
+        "/api/desktop-drop",
+        json={"grant_id": _write_desktop_drop_grant(pcm._config, [big]), "chat_id": chat.chat_id},
+    )
+
+    assert in_place.status_code == 200
+    assert in_place.json()["file_refs"][0]["name"] == "big.bin"
+    assert imported.status_code == 400
+    assert imported.json()["error"] == "desktop drop is too large"
+
+
+def test_desktop_drop_refuses_an_unknown_mode_without_spending_the_grant(tmp_path: Path) -> None:
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    source = tmp_path / "a.txt"
+    source.write_text("x", encoding="utf-8")
+    grant_id = _write_desktop_drop_grant(pcm._config, [source])
+
+    refused = _post_in_place(pcm, chat, grant_id, mode="everything")
+    accepted = _post_in_place(pcm, chat, grant_id)
+
+    assert refused.status_code == 400
+    assert refused.json()["error"] == "invalid desktop drop mode"
+    assert accepted.status_code == 200
+    assert accepted.json()["file_refs"][0]["name"] == "a.txt"
+
+
+def test_in_place_drop_refuses_an_unreadable_file(tmp_path: Path) -> None:
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads everything")
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    locked = tmp_path / "locked.txt"
+    locked.write_text("x", encoding="utf-8")
+    locked.chmod(0)
+    try:
+        body = _post_in_place(pcm, chat, _write_desktop_drop_grant(pcm._config, [locked])).json()
+    finally:
+        locked.chmod(0o600)
+
+    assert body["file_refs"] == []
+    assert body["errors"][0]["error"].startswith("Ciaobot cannot read it")
+
+
+def test_file_refs_expand_folders_only_when_registered_for_them(tmp_path: Path) -> None:
+    _folder, pcm, chat = _in_place_setup(tmp_path)
+    folder = tmp_path / "dir"
+    folder.mkdir()
+    plain = pcm.register_file_ref(chat.chat_id, folder)
+    allowed = pcm.register_file_ref(chat.chat_id, folder, allow_dir=True)
+
+    assert pcm.expand_file_refs(f"ciao-drop:{plain}", chat.chat_id) == f"ciao-drop:{plain}"
+    assert pcm.expand_file_refs(f"ciao-drop:{allowed}", chat.chat_id) == str(folder.resolve())

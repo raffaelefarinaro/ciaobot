@@ -462,7 +462,20 @@ the grant: the route returns bounded opaque file references, and the server
 expands those references only in the provider prompt; clients transfer the
 file bytes into the active project on the host. This does not add a native command
 or general filesystem capability to the remote page. That shell is retired
-(`#656`) and the grant route stays only for an old one still in the field.
+(`#656`); its `ciao:native-file-*` page events stay only for an old one still in
+the field. Ciaobot for Mac writes the same grant for **Use in place**
+(`mac/Sources/CiaobotMac/NativeDrop.swift`): only in the main window on its own
+local engine, from a drop on that zone or an open panel, and the page sends it
+with `mode: "in_place"`. That mode reads and copies nothing. Each path must be
+absolute with no `..` part, a regular file or a folder this process can read, and,
+as dropped and with symlinks followed, free of control characters, Unicode line
+separators and backticks, so it stays inside the backticks of the prompt's
+`Attached files:` line; the reference names the real path, and a folder's path is
+handed over (`register_file_ref(..., allow_dir=True)`), never its contents. The
+byte cap applies only to imports. Each reference says whether the path is
+outside the chat's own folders (`_chat_dir_root_candidates`), for the PWA to say
+so; it widens nothing, since the agent CLI's permission mode decides what the
+agent may read.
 `ciao/instance_lock.py`
 holds `.runtime/server.lock` for the engine process lifetime, so a normal
 server and `ciao dev` cannot run against the same registry concurrently.

@@ -23,6 +23,7 @@ function makeStore() {
     removePendingFile: vi.fn(),
     pushErrorToast: vi.fn(),
     pushUploadNotice: vi.fn(),
+    pushToast: vi.fn(),
   } satisfies ComposerAttachmentStore & Record<string, unknown>
 }
 
@@ -410,6 +411,109 @@ describe('useChatComposer attachments', () => {
     expect(store.pushUploadNotice).toHaveBeenCalledWith(notice)
     expect(store.pushErrorToast).not.toHaveBeenCalled()
     expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'IMG_1.HEIC' }])
+  })
+
+  describe('use in place', () => {
+    const GRANT = '0f8fad5b-d9cb-469f-a165-70867728950e'
+    function nativeHost(reply: unknown) {
+      const postMessage = vi.fn(async (_body: unknown) => reply)
+      return { postMessage, hostWindow: { location: { hostname: '127.0.0.1' }, webkit: { messageHandlers: { ciaobotNativeDrop: { postMessage } } } } }
+    }
+
+    it('turns a drop on the in-place zone into path references, never an upload', async () => {
+      const ref = `drop_${'e'.repeat(32)}`
+      const { postMessage, hostWindow } = nativeHost({ grantId: GRANT, names: ['data/'] })
+      const fetchImpl = vi.fn(async () => jsonResponse({
+        file_refs: [{ ref, name: 'data/', kind: 'folder', outside: true }], image_refs: [], errors: [],
+      })) as unknown as typeof fetch
+      const postForm = fakePostForm({ file_refs: [] })
+      const { composer, store } = makeComposer({ fetchImpl, postForm, hostWindow })
+      expect(composer.dropHost).toBe('native')
+
+      await composer.handleDrop(dropEvent([textFile('data')]), 'in-place')
+
+      expect(postMessage).toHaveBeenCalledWith({ op: 'grant' })
+      expect(postForm).not.toHaveBeenCalled()
+      const [, init] = (fetchImpl as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]
+      expect(JSON.parse(init.body as string)).toMatchObject({ grant_id: GRANT, chat_id: CHAT_ID, mode: 'in_place' })
+      expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'data/', inPlace: true, outside: true }])
+      expect(store.pushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "data/ is outside this chat's folders" }))
+    })
+
+    it('says nothing extra for a path inside the chat folders', async () => {
+      const ref = `drop_${'f'.repeat(32)}`
+      const { hostWindow } = nativeHost({ grantId: GRANT, names: ['notes.md'] })
+      const fetchImpl = vi.fn(async () => jsonResponse({ file_refs: [{ ref, name: 'notes.md', outside: false }] })) as unknown as typeof fetch
+      const { composer, store } = makeComposer({ fetchImpl, hostWindow })
+
+      await composer.handleDrop(dropEvent([textFile('notes.md')]), 'in-place')
+
+      expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'notes.md', inPlace: true, outside: false }])
+      expect(store.pushToast).not.toHaveBeenCalled()
+    })
+
+    it('attaches a copy for a drop outside both zones', async () => {
+      const { postMessage, hostWindow } = nativeHost(null)
+      const postForm = fakePostForm({ file_refs: [] })
+      const { composer } = makeComposer({ postForm, hostWindow })
+
+      await composer.handleDrop(dropEvent([textFile('notes.md')]), null)
+
+      expect(postMessage).not.toHaveBeenCalled()
+      expect(postForm).toHaveBeenCalled()
+    })
+
+    it('never asks for a grant where the app is not the host', async () => {
+      const postForm = fakePostForm({ file_refs: [] })
+      const fetchImpl = vi.fn() as unknown as typeof fetch
+      const { composer } = makeComposer({ postForm, fetchImpl, hostWindow: { location: { hostname: '127.0.0.1' } } })
+      expect(composer.dropHost).toBe('loopback')
+
+      await composer.handleDrop(dropEvent([textFile('notes.md')]), 'in-place')
+      await composer.pickInPlace()
+
+      expect(fetchImpl).not.toHaveBeenCalled()
+      expect(postForm).toHaveBeenCalled()
+    })
+
+    it('reports a drop the app did not see', async () => {
+      const { hostWindow } = nativeHost(null)
+      const fetchImpl = vi.fn() as unknown as typeof fetch
+      const { composer, store } = makeComposer({ fetchImpl, hostWindow })
+
+      await composer.handleDrop(dropEvent([textFile('notes.md')]), 'in-place')
+
+      expect(fetchImpl).not.toHaveBeenCalled()
+      expect(store.pushErrorToast).toHaveBeenCalledWith('Could not use the file in place', 'The app did not see the dropped files. Drop them again.')
+    })
+
+    it('picks files in the app panel, and a cancelled panel is silent', async () => {
+      const ref = `drop_${'a'.repeat(32)}`
+      const picked = nativeHost({ grantId: GRANT, names: ['a.txt'] })
+      const fetchImpl = vi.fn(async () => jsonResponse({ file_refs: [{ ref, name: 'a.txt', outside: false }] })) as unknown as typeof fetch
+      const first = makeComposer({ fetchImpl, hostWindow: picked.hostWindow })
+      await first.composer.pickInPlace()
+      expect(picked.postMessage).toHaveBeenCalledWith({ op: 'pick' })
+      expect(first.store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'a.txt', inPlace: true, outside: false }])
+
+      const cancelled = nativeHost(null)
+      const second = makeComposer({ fetchImpl: vi.fn() as unknown as typeof fetch, hostWindow: cancelled.hostWindow })
+      await second.composer.pickInPlace()
+      expect(second.store.pushErrorToast).not.toHaveBeenCalled()
+      expect(second.store.addPendingFiles).not.toHaveBeenCalled()
+    })
+
+    it('shows per-file refusals from the engine', async () => {
+      const { hostWindow } = nativeHost({ grantId: GRANT, names: ['bad'] })
+      const fetchImpl = vi.fn(async () => jsonResponse({
+        file_refs: [], errors: [{ filename: 'bad', error: 'only files and folders can be used where they are' }],
+      })) as unknown as typeof fetch
+      const { composer, store } = makeComposer({ fetchImpl, hostWindow })
+
+      await composer.handleDrop(dropEvent([textFile('bad')]), 'in-place')
+
+      expect(store.pushErrorToast).toHaveBeenCalledWith('Could not use bad', 'only files and folders can be used where they are')
+    })
   })
 
   it('uploads a picked HEIC photo with an empty type as an image, not a document', async () => {

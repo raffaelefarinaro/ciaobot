@@ -22,7 +22,7 @@ const ATTACHED_HEADER = 'Attached files:'
 const BLOCK_RE = /(?:^|\n\n)Attached files:\n((?:- .+(?:\n|$))+)$/
 const LINE_RE = /^- (.+?): `(.+)`$/
 
-type FileRef = { ref: string; name?: string }
+type FileRef = { ref: string; name?: string; outside?: boolean }
 type UploadFailure = { filename: string; error: string }
 /** A file the engine kept, but not the way it was sent (a HEIC photo it could not convert). */
 export type UploadNotice = { filename: string; message: string }
@@ -39,8 +39,10 @@ export function isImageUpload(file: File): boolean {
 export type UploadProgressHandler = (loaded: number, total: number) => void
 export interface FormPostResult { status: number; body: unknown }
 export type FormPoster = (url: string, form: FormData, onProgress?: UploadProgressHandler) => Promise<FormPostResult>
-/** A file the server stored for a chat, staged in the composer before send. */
-export interface AttachedFile { ref: string; name: string }
+/** A file the server stored for a chat, staged in the composer before send.
+ *  `inPlace`: a desktop drop used where it is (nothing copied); `outside`:
+ *  its path is outside the chat's own folders. */
+export interface AttachedFile { ref: string; name: string; inPlace?: boolean; outside?: boolean }
 /** An attachment parsed back out of a sent message (token before expansion, path after). */
 export interface MessageAttachment { name: string; ref: string | null; path: string | null }
 
@@ -149,25 +151,39 @@ export async function uploadChatAttachments(
   return { files: attachedFiles(result.file_refs), imageRefs: [], failures: result.errors || [], notices: [] }
 }
 
-/** Import a desktop (Finder) drop grant into a chat. */
+/** Import a desktop (Finder) drop grant into a chat. `in_place` copies
+ *  nothing: the engine references each file or folder where it is. */
 export async function importDesktopDrop(
   grantId: string,
   target: { chatId: string; projectId: string },
   fetchImpl: typeof fetch = (...args) => fetch(...args),
+  mode: 'import' | 'in_place' = 'import',
 ): Promise<AttachmentUploadResult> {
   const response = await fetchImpl('/api/desktop-drop', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     redirect: 'manual',
-    body: JSON.stringify({ grant_id: grantId, project_id: target.projectId, chat_id: target.chatId }),
+    body: JSON.stringify({
+      grant_id: grantId,
+      project_id: target.projectId,
+      chat_id: target.chatId,
+      ...(mode === 'in_place' ? { mode } : {}),
+    }),
   })
   const result = await response.json().catch(() => ({})) as {
     file_refs?: FileRef[]; image_refs?: string[]; errors?: UploadFailure[]; notices?: UploadNotice[]; error?: string
   }
   if (!response.ok) throw new Error(result.error || `Native file import failed (HTTP ${response.status})`)
+  const files = attachedFiles(result.file_refs)
   return {
-    files: attachedFiles(result.file_refs),
+    files: mode === 'in_place'
+      ? files.map(file => ({
+        ...file,
+        inPlace: true,
+        outside: result.file_refs?.find(entry => entry.ref === file.ref)?.outside !== false,
+      }))
+      : files,
     imageRefs: result.image_refs || [],
     failures: result.errors || [],
     notices: result.notices || [],
