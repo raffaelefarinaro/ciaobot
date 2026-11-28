@@ -227,8 +227,9 @@ What disappears: the Seatbelt (macOS) and bwrap (Linux) sandbox, Claude `sandbox
 What each CLI still enforces:
 
 - Claude Code: the permission mode passed per chat (`permission_mode`); `can_use_tool` routes asks to Ciaobot's permission cards with unattended auto-deny. The user's own `~/.claude/settings.json` and project `.claude/settings*.json` `permissions.deny` rules and its own `sandbox` settings still load because `setting_sources=["user","project","local"]` and Ciaobot no longer passes a `sandbox` value. In default mode, reads outside the working directory and all Bash commands ask; `auto` uses the CLI's classifier; `bypass` enforces nothing.
-- OpenCode: the session ruleset from `_MODE_PERMISSIONS` (plan asks except read/glob/grep; normal asks everything; auto allows all but shell; bypass allows all) and the user's own `opencode.json` `permission` config.
 - Ciaobot's own surfaces keep their guards: the `ciao` control plane (mode gates, `unattended_forbidden`, workspace confinement of its verbs), `is_credential_adjacent` on `ciao` CLI file flags, `/api/*` session auth, and loopback-only routes.
+
+The PWA's file, binary and image viewers, the in-PWA editor and snapshot restore have no workspace sandbox either: they read (and the editor and restore write) any path on disk, with relative paths anchored to the workspace root. The extension allowlist (no `.env`, no key files) and the size caps are the only guards, so a secret in an allowlisted file elsewhere on the machine is reachable from an authenticated PWA session.
 
 `POST /api/chats/search` is a signed-session, same-origin, no-store read. Its body scopes a literal query to one registered workspace. The engine filters internal helper chats and system projects before scanning, then reads only registered active-chat transcripts and located archives through no-follow regular-file descriptors. Each request examines at most 100 chats, reads at most 8 MiB total and 512 KiB per transcript, and returns bounded plain-text excerpts; it stores no index or excerpts.
 

@@ -17,7 +17,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 - [Models and agents](https://www.raffaelefarinaro.com/ciaobot/models.html): why Ciaobot uses existing harnesses and what stays portable when you switch.
 - [Built-in skills and extensions](https://www.raffaelefarinaro.com/ciaobot/builtin.html#extend): skills, subagents, commands, and MCP.
 - [Google Workspace](https://www.raffaelefarinaro.com/ciaobot/companions.html#google): connecting Gmail, Calendar, Drive and other Google services through your agent.
-- [Integration reference](../INTEGRATIONS.md): provider setup, OAuth, MCP configuration, and runtime settings.
+- [Integrations and environment variables](../INTEGRATIONS.md): the agent CLIs Ciaobot drives and the environment variables it reads or sets.
 
 ## Operating Ciaobot
 
@@ -25,7 +25,6 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 - [Memory backup](https://www.raffaelefarinaro.com/ciaobot/memory.html#backup): connect a private repository and inspect backup status.
 - [Remote access](https://www.raffaelefarinaro.com/ciaobot/remote.html): browsers, the installed PWA, and HTTPS access from other devices.
 - [Linux hosting](LINUX.md): systemd deployment and server operation.
-- [Troubleshooting and configuration](../INTEGRATIONS.md): setup checks and integration diagnostics.
 - [Security policy](../SECURITY.md) and [remote boundary audit](REMOTE_BOUNDARY.md): access controls and their limits.
 - [Report a problem](https://github.com/raffaelefarinaro/ciaobot/issues): include what you tried and what happened, without credentials or private workspace data.
 
