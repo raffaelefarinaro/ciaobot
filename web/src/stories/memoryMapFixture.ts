@@ -372,7 +372,7 @@ export function memoryRouterRoutes(): RouteRecordRaw[] {
 // ── Connected mounts ─────────────────────────────────────────────────────────
 
 export type MapFixtureOptions = {
-  section?: 'unsure'
+  section?: 'unsure' | 'skills'
   view?: 'graph' | 'list'
   selectedId?: string
 }
