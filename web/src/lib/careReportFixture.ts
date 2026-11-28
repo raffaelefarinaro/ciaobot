@@ -68,7 +68,7 @@ export const careReports = {
     weekly_done: '2026-11-27',
     needs_you: [
       need('A proposal would trim your guide: it removes an outdated status section and a repeated folder path.', 'Choose Review proposal, then Approve or Reject.', CARE_PROPOSAL_PATH, 'draft'),
-      need('Your always-loaded memory is nearly full (98% and 95%) and everything in it still matters.', 'Choose Optimize to trim it together.', 'AGENTS.md'),
+      need('Your always-loaded memory is nearly full (112% and 104%) and everything in it still matters.', 'Decide what to trim.', 'AGENTS.md'),
       need('13 suggestions are waiting in Unsure, such as which brief template to keep, a project\'s status and a new People page.', 'Open Memory > Unsure and approve or reject them.', 'Workspace/Unsure.md'),
       need('4 notes need a decision the run cannot make alone, such as two notes for one person.', 'Choose Fix with a chat to go through them.', 'Workspace/Care-Report.md'),
     ],
