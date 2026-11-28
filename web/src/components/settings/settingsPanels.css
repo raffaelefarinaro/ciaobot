@@ -623,6 +623,15 @@
 .set-link--quiet { color: var(--fg2); }
 .set-link--quiet:hover { color: var(--fg); }
 
+.provider-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  min-width: var(--touch);
+}
+
 .set-menu-btn {
   width: 34px;
   height: 34px;

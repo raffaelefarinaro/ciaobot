@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
-import { expect } from 'storybook/test'
+import { expect, userEvent, within } from 'storybook/test'
 import { createApp, defineComponent, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import { createPinia } from 'pinia'
 import ProviderInventory from '../components/settings/ProviderInventory.vue'
@@ -28,7 +28,7 @@ function renderInventory(seed: InventorySeed) {
         app.mount(host.value!)
       })
       onBeforeUnmount(() => app?.unmount())
-      return () => h('div', { ref: host })
+      return () => h('div', { ref: host, style: { containerType: 'inline-size' } })
     },
   })
 }
@@ -61,10 +61,19 @@ export const Configured: Story = {
   }),
   play: async ({ canvasElement }) => {
     const text = canvasElement.textContent ?? ''
-    expect(text).toContain('OpenCode reports which providers are configured. It does not check that their credentials work.')
+    expect(text).toContain('OpenCode lists configured providers without checking their credentials.')
     expect(text).toContain('OAuth, API key · Configured')
     expect(text).toContain('Environment · Configured')
     expect(text).not.toContain('verification unknown')
+    const canvas = within(canvasElement)
+    const reconnect = canvas.getByRole('button', { name: 'Reconnect Storybook One (storybook-one)' })
+    await expect(reconnect).toHaveTextContent('Reconnect')
+    await expect(reconnect).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(reconnect)
+    await expect(reconnect).toHaveAttribute('aria-expanded', 'true')
+    await expect(canvas.getByRole('button', { name: 'Copy sign-in command for Storybook One (storybook-one)' })).toBeVisible()
+    await userEvent.click(reconnect)
+    await expect(reconnect).toHaveAttribute('aria-expanded', 'false')
   },
 }
 

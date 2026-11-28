@@ -468,20 +468,13 @@
                       <span v-if="connKey === 'claude' && conn.auth === 'oauth' && conn.account">{{ conn.account }}</span>
                       <span v-if="connKey !== 'opencode' && !conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
-                    <ProviderInstallBlock :conn-key="String(connKey)" :conn="conn" />
-                    <p
-                      v-if="!isMissingInstall(conn.state) && conn.path_command"
-                      class="set-row-sub"
-                    >
-                      Your terminal cannot find this CLI yet — put it on your PATH with
-                      <code>{{ conn.path_command }}</code>
-                    </p>
                   </div>
                   <div class="set-row-actions provider-connection-actions">
                     <ProviderStateBadge :conn-key="String(connKey)" :state="conn.state" />
                     <button
                       type="button"
-                      class="set-link"
+                      class="set-link set-link--quiet provider-action"
+                      title="Check that the CLI works"
                       :disabled="providerConnectionPending === connKey"
                       @click="providerConnectionAction(String(connKey), 'verify')"
                     >Verify</button>
@@ -494,10 +487,16 @@
                       <DropdownMenuTrigger as-child>
                         <button
                           type="button"
-                          class="set-menu-btn"
+                          class="set-menu-btn provider-overflow"
                           :aria-label="`More actions for ${conn.label || connKey}`"
                           :disabled="providerConnectionPending === connKey"
-                        >&middot;&middot;&middot;</button>
+                        >
+                          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                            <circle cx="3" cy="8" r="1.25" />
+                            <circle cx="8" cy="8" r="1.25" />
+                            <circle cx="13" cy="8" r="1.25" />
+                          </svg>
+                        </button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
                         <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
@@ -509,6 +508,11 @@
                     </DropdownMenuRoot>
                   </div>
                 </div>
+                <ProviderInstallBlock :conn-key="String(connKey)" :conn="conn" />
+                <p v-if="!isMissingInstall(conn.state) && conn.path_command" class="set-row-sub">
+                  Your terminal cannot find this CLI yet — put it on your PATH with
+                  <code>{{ conn.path_command }}</code>
+                </p>
                 <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :command="conn.command" :workspace="projectStore.activeWorkspace" />
                 <!-- Not for a missing CLI: its payload command is the install line, not a sign-in. -->
                 <details v-if="connKey !== 'opencode' && !isMissingInstall(conn.state)" class="provider-sign-in">
@@ -3445,9 +3449,19 @@ a.btn-secondary {
   display: flex;
   flex-direction: column;
 }
+.provider-connections > .credential-row {
+  padding-block: var(--space-4);
+  border-top: 0;
+  overflow-wrap: anywhere;
+}
+.provider-row-head { justify-content: space-between; padding-block: 0; }
 .provider-connection-actions {
-  justify-content: flex-start;
+  flex-wrap: wrap;
   gap: var(--space-2);
+}
+.provider-overflow { width: var(--touch); height: var(--touch); }
+@container (max-width: 480px) {
+  .provider-row-head { flex-direction: column; align-items: stretch; gap: var(--space-2); }
 }
 .provider-release-check { display: flex; flex-direction: column; gap: var(--space-2); }
 .provider-release-note { margin: 0; }
@@ -3467,11 +3481,13 @@ a.btn-secondary {
 .provider-connection-detail {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 10px;
+  gap: var(--space-1) var(--space-2);
+  font-size: var(--text-sm);
 }
+.provider-connection-detail:empty { display: none; }
 .provider-connection-detail > span + span::before {
   content: '·';
-  margin-right: 10px;
+  margin-right: var(--space-2);
   color: var(--fg3);
 }
 .tier-provider-section {
@@ -3630,10 +3646,8 @@ a.btn-secondary {
   font-weight: 600;
   color: var(--fg);
 }
-/* The provider's defaults are indented hairline rows (.set-subrow) under its
-   head, not a boxed grid of selects. */
-.provider-inline-defaults {
-  display: block;
+.provider-inline-defaults > :is(.set-subrow, .set-subrow-hint) {
+  padding-inline-start: 0;
 }
 @media (max-width: 720px) {
   .provider-defaults {
@@ -3867,29 +3881,21 @@ a.btn-secondary {
   text-align: center;
 }
 
-/* "What this CLI brings": the per-provider MCP and skill chip lists, folded
-   away by default so the providers tab stays scannable. The summary is the whole
-   touch target, so it keeps the 44px minimum. */
-@media (pointer: coarse) {
-  .provider-sign-in > summary {
-    min-height: var(--touch);
-    min-width: var(--touch);
-    align-content: center;
-  }
-}
-.provider-brings > summary {
+/* Keep inline provider disclosures in the same quiet action style. */
+:is(.provider-sign-in, .provider-brings) > summary {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
   min-height: var(--touch);
+  min-width: var(--touch);
   color: var(--fg2);
   font-size: var(--text-sm);
   cursor: pointer;
   list-style: none;
 }
-.provider-brings > summary::-webkit-details-marker { display: none; }
+:is(.provider-sign-in, .provider-brings) > summary::-webkit-details-marker { display: none; }
 /* inline-flex drops the native marker, so draw the disclosure caret. */
-.provider-brings > summary::before {
+:is(.provider-sign-in, .provider-brings) > summary::before {
   content: '';
   flex: 0 0 auto;
   width: 6px;
@@ -3900,14 +3906,14 @@ a.btn-secondary {
   transform: rotate(-45deg);
   transition: transform 120ms var(--ease);
 }
-.provider-brings[open] > summary::before { transform: rotate(45deg); }
+:is(.provider-sign-in, .provider-brings)[open] > summary::before { transform: rotate(45deg); }
 @media (prefers-reduced-motion: reduce) {
-  .provider-brings > summary::before { transition: none; }
+  :is(.provider-sign-in, .provider-brings) > summary::before { transition: none; }
 }
 /* /settings/providers scrolls here; keep the card clear of the pane header. */
 #chat-providers, #install-app, #other-devices { scroll-margin-top: var(--space-4); }
-.provider-brings > summary:hover { color: var(--fg); }
-.provider-brings > summary:focus-visible {
+:is(.provider-sign-in, .provider-brings) > summary:hover { color: var(--fg); }
+:is(.provider-sign-in, .provider-brings) > summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
