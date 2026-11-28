@@ -195,6 +195,12 @@ describe('the report page words', () => {
     expect(['proposal', 'unsure', 'optimize', 'report', 'file', 'none'].map(a => needActionLabel(a as never))).toEqual([
       'Review proposal', 'Open Unsure', 'Optimize', '', 'Open note', '',
     ])
+    // The Unsure button carries the live count of waiting lines; no other button does, and 0 adds nothing.
+    expect(needActionLabel('unsure', 57)).toBe('Open Unsure · 57')
+    expect(needActionLabel('unsure', 1234)).toBe('Open Unsure · 1,234')
+    expect(needActionLabel('unsure', 0)).toBe('Open Unsure')
+    expect(needActionLabel('proposal', 57)).toBe('Review proposal')
+    expect(needActionLabel('report', 57)).toBe('')
   })
 
   it('gives a proposal, Unsure and the guide their page, a real note a decision chat, anything else a fix chat', () => {

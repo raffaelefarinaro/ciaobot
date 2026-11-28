@@ -13,6 +13,9 @@ import { useModalFocus } from '../composables/useModalFocus'
 import { useEntityTypesStore, isValidEntityTypeId, type EntityTypeKind, type EntityTypeRow } from '../stores/entityTypes'
 import { useProjectStore } from '../stores/projects'
 
+/** The site's section on categories; opens outside the app, like the sidebar's link. */
+const MEMORY_CATEGORIES_GUIDE_URL = 'https://www.raffaelefarinaro.com/ciaobot/memory.html#categories'
+
 const store = useEntityTypesStore()
 const projectStore = useProjectStore()
 const workspace = computed(() => projectStore.activeWorkspace)
@@ -306,32 +309,48 @@ async function saveDraft() {
     <header class="cat-head">
       <h2 id="cat-heading" class="cat-h">{{ onCount }} of {{ visibleRows.length }} categories on</h2>
       <p class="cat-lede">
-        The kinds of notes this vault keeps, and the <code>type:</code> each one is
-        written with. Turn one off to keep its notes but stop claiming that type.
+        A category is a kind of note, usually with its own folder (People, Projects,
+        and so on), and the <code>type:</code> each note is written with.
       </p>
     </header>
 
-    <!-- What the two memory layers are, and what a category is for — above the
-         controls, and outside the load branches on purpose: it is true while the
-         list is loading and after a failure too, so it must never be read as a
-         claim about an empty registry (#979). Static text, no request, no state. -->
+    <!-- When and where notes are saved — above the controls, and outside the
+         load branches on purpose: it is true while the list is loading and after
+         a failure too, so it must never be read as a claim about an empty
+         registry (#979). Static text, no request, no state. -->
     <section class="cat-why" aria-labelledby="cat-why-heading">
-      <h3 id="cat-why-heading" class="cat-why-h">How memory is organized</h3>
-      <p class="cat-why-line">
-        <strong>Profile &amp; preferences</strong> — a small, bounded block kept in
-        your workspace guide and loaded into every conversation, so you stop
-        repeating yourself. <em>Keeps answers short and jargon-free.</em>
-      </p>
-      <p class="cat-why-line">
-        <strong>Notes, by category</strong> — everything else is a note you own,
-        filed under one of the categories in this list.
-        <em>The decision behind a launch, who someone is, the reference you keep
-        coming back to.</em>
-      </p>
-      <p class="cat-why-line cat-why-foot">
-        A category is a filing rule, not a request: changing one shapes how
-        <strong>future</strong> notes are organized, and no empty folder is created
-        for a category you never write in.
+      <h3 id="cat-why-heading" class="cat-why-h">When and where notes are saved</h3>
+      <ul class="cat-why-list">
+        <li>
+          <strong>When.</strong> After you archive a chat, the memory pass files what
+          it is sure about, and Workspace care tidies once a day. What it is unsure
+          about waits in Memory &rsaquo; Unsure, and nothing is saved for it until
+          you approve. Nothing from an automated run is saved. A pattern seen in fewer than
+          three chats waits on the Unsure list until it has shown up in three.
+        </li>
+        <li>
+          <strong>Where.</strong> A fact about a person goes to
+          <code>People/&lt;name&gt;.md</code>, a project fact goes to that project's
+          note, and other notes go to the folder of the matching category. Reusable
+          how-to lessons go to <code>Workspace/Learnings.md</code>. Your general
+          rules and preferences go to the short block in <code>AGENTS.md</code>
+          that every chat loads.
+        </li>
+        <li>
+          <strong>Changing the list.</strong> Turning a category off keeps its notes
+          but stops new ones being filed there. Adding one gives future notes of that
+          kind their own folder. No empty folders are created. A note that fits no
+          category is raised on the Unsure list as a question to add one.
+        </li>
+      </ul>
+      <p class="cat-why-foot">
+        <a
+          class="cat-why-link"
+          :href="MEMORY_CATEGORIES_GUIDE_URL"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Read how memory works, opens the website in a new tab"
+        >Read how memory works</a>
       </p>
     </section>
 
@@ -521,12 +540,11 @@ async function saveDraft() {
             </select>
           </div>
 
-          <!-- The scope note, in one line: this edits the list the vault is
-               configured with, and the consumers that read it are still to come
-               (A2a). Saying so is honest; faking the behaviour is not. -->
+          <!-- What the two fields do, in one line: the registry is read when
+               notes are filed and when the vault is linted. -->
           <p class="cat-scope">
-            Folder and aliases are stored now; they start changing how notes are
-            sorted and linted once that wiring lands.
+            The folder is where new notes of this kind are filed. Aliases are
+            other spellings of the type that count as this category.
           </p>
 
           <p v-if="store.error" class="cat-error" role="alert">{{ store.error }}</p>
@@ -592,8 +610,9 @@ async function saveDraft() {
   font-size: var(--text-sm);
   font-weight: 700;
 }
-.cat-why-line {
+.cat-why-list {
   margin: 0;
+  padding: 0 0 0 18px;
   /* The surface spans the pane like the table below it, but the reading keeps
      a measure: prose across a 1400px pane is 130 characters a line. */
   max-width: 78ch;
@@ -601,9 +620,17 @@ async function saveDraft() {
   font-size: var(--text-sm);
   line-height: 1.55;
 }
-.cat-why-line strong { color: var(--fg); font-weight: 600; }
-.cat-why-line em { font-style: normal; color: var(--fg3); }
-.cat-why-foot { margin-top: 4px; }
+.cat-why-list li + li { margin-top: 4px; }
+.cat-why-list strong { color: var(--fg); font-weight: 600; }
+.cat-why-list code { font-family: var(--font-mono); }
+.cat-why-foot { margin: 6px 0 0; font-size: var(--text-sm); }
+.cat-why-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  color: var(--accent);
+}
+.cat-why-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 
 
 .cat-failed {
@@ -803,7 +830,8 @@ async function saveDraft() {
      is widened to the same minimum the switch just claimed. */
   .cat-name-btn { min-width: var(--touch); }
   .cat-btn { min-height: var(--touch); }
-  .cat-link { min-height: var(--touch); }
+  .cat-link,
+  .cat-why-link { min-height: var(--touch); }
 }
 
 /* ── The drawer ─────────────────────────────────────────────────────────── */

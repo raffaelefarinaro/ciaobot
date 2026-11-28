@@ -20,9 +20,11 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_PROVIDER": "subprocess IPC marker for the provider selected for the spawned chat",
     "CIAO_CONTEXT_BEGIN": "subprocess IPC delimiter wrapping injected context",
     "CIAO_CONTEXT_END": "subprocess IPC delimiter wrapping injected context",
-    "CIAO_RUNTIME_ROOT": "test-only override for the runtime/ directory",
     "CIAO_BOOTSTRAP_LAUNCHD_HANDOFF": "internal marker for desktop-owned bootstrap handoff to launchd",
     "CIAO_LAUNCH_AGENTS_DIR": "test-only override keeping the suite out of the real ~/Library/LaunchAgents",
+    "CIAO_PATH": "LaunchAgent template placeholder for PATH, not an environment variable",
+    "CIAO_EXECUTABLE": "LaunchAgent template placeholder for the engine executable, not an environment variable",
+    "CIAO_VAULT_MODE": "named only in comments about its removal; never read",
     "CIAO_QUEUE_LOCK_DIR": "test-only override for where proposal-queue lock files live (kept out of the vault so it stays byte-identical)",
 }
 

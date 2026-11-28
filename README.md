@@ -20,40 +20,29 @@ Ciaobot is your **second brain and personal assistant**: a persistent personal w
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-To use another folder, such as a notes folder you already have, pass `--workspace`:
+On the Mac, to use a notes folder you already have, choose it in the app's first-run setup: tick **Use a separate existing notes folder** and enter it in **Notes folder on the Ciaobot computer**. Ciaobot's own data stays in the workspace folder.
+
+On Linux, to use another folder, such as a notes folder you already have, pass `--workspace`:
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --workspace ~/MyNotes
 ```
 
-The folder stays yours, in plain Markdown, usable with any other tool. Keep it out of iCloud Drive, Dropbox, Google Drive and OneDrive: sync conflicts damage files and Git history. Use Ciaobot's [private Git backup](https://www.raffaelefarinaro.com/ciaobot/memory.html#backup) instead.
+Your notes stay yours, in plain Markdown, usable with any other tool. Keep the notes and workspace folders out of iCloud Drive, Dropbox, Google Drive and OneDrive: sync conflicts damage files and Git history. Use Ciaobot's [private Git backup](https://www.raffaelefarinaro.com/ciaobot/memory.html#backup) instead.
 
 The first time you open Ciaobot, Home shows your workspace folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Overview** and the password in **Settings → General**.
 
-### Connect your agent
-
-Ciaobot has no model account of its own. It drives a CLI you have already signed in to:
-
-- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`) and run `claude auth login`. Ciaobot installs its ACP adapter on first run, which needs Node 22 or newer, unless the pinned adapter is already on your PATH. If its installer says `~/.local/bin` is not in your `PATH`, Ciaobot still finds Claude Code; for the login, run the command it prints or use `~/.local/bin/claude auth login`.
-- **Codex:** install the Codex CLI (`npm install -g @openai/codex`) and run `codex login`. Ciaobot's Settings terminal can run both steps for you.
-- **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.3.2+](https://opencode.ai/v2/docs/) (`npm install -g @opencode/cli`; see [INTEGRATIONS.md](INTEGRATIONS.md#opencode) for other routes) and authenticate the provider there. Its models appear in Ciaobot's model picker.
-
-See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors running from a git checkout: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Ciaobot does not run a model of its own. It drives the Claude Code, OpenCode or Codex CLI already installed on the computer running Ciaobot, signed in with your own account, so your login and the models you can pick come from that CLI. MCP servers, plugins and skills you set up in Claude Code or OpenCode are picked up by their Ciaobot chats, with project-level ones read from the workspace folder; Ciaobot can still hide some of Claude Code's built-in tools per workspace. Codex chats use your installed, signed-in `codex` CLI.
 
 ### Existing installs
 
 - **Moving from 1.x to 2.0:** see [Moving from 1.x to 2.0](https://www.raffaelefarinaro.com/ciaobot/migrate.html) for the Mac, Linux and Windows paths and what changed.
-- **Upgrading from the retired macOS app:** follow the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app) to keep your workspace, password, chats, and schedules.
 - **Updates:** on macOS, Ciaobot for Mac updates itself (Sparkle). On Linux, see [Linux hosting](docs/LINUX.md).
 - **Stop or start the engine:** run `ciao service stop` or `ciao service start`. Your workspace is kept.
 
 ## How it works
 
 Work is organised as **workspace → project → chat**. A workspace is a big area of your life (personal, work, a client) with its own memory; a project holds the background for a topic; a chat is one task. When you finish a chat, archive it and Ciaobot files what is worth keeping into your notes, as plain Markdown in the folder you chose.
-
-<p align="center">
-  <img src="site/assets/img/home.webp" alt="The Ciaobot Home page with a box to start a task and the chats that need attention" width="100%">
-</p>
 
 A project can also be linked to a git repository on your machine. Chats in a project with a linked repository work in **code mode** automatically: the chat follows the repository's `AGENTS.md`, loads its skills and can write in it, while notes and decisions stay in Ciaobot. Put a chat in a project without a repository to keep it out.
 

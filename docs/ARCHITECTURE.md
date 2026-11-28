@@ -35,7 +35,7 @@ Settings → MCP is one button per installed agent. Each button starts that agen
 ```
 README.md                      Product intro, quickstart, doc index.
 AGENTS.md                      Contributor guide for coding agents. Native providers load it at session start (Claude Code reads it directly since 2.1.277).
-INTEGRATIONS.md                Operator config (env vars, OAuth, MCP connectors, server runtime knobs).
+INTEGRATIONS.md                Agent CLI setup (Claude, Codex, OpenCode adapters) and the environment variables the engine reads or sets.
 PWA_API.md                     PWA API reference (endpoints, auth flow, state path).
 CONTRIBUTING.md                Contribution guide.
 docs/                          Long-form docs (this file, DEVELOPMENT.md).
@@ -462,7 +462,32 @@ the grant: the route returns bounded opaque file references, and the server
 expands those references only in the provider prompt; clients transfer the
 file bytes into the active project on the host. This does not add a native command
 or general filesystem capability to the remote page. That shell is retired
-(`#656`) and the grant route stays only for an old one still in the field.
+(`#656`); its `ciao:native-file-*` page events stay only for an old one still in
+the field. Ciaobot for Mac writes the same grant for **Use in place**
+(`mac/Sources/CiaobotMac/NativeDrop.swift`): only in the main window on its own
+local engine. The web view records the file URLs of every drop that began
+outside the app (a drag started inside a web view has a dragging source and is
+never recorded, so page content cannot choose a path) and keeps them for 30 s;
+the page asks for a grant from them only after a drop on the **Use in place**
+zone, and tells the app to forget them after any other drop. The open panel is
+the other source. The page sends the grant with `mode: "in_place"`, which needs
+a loopback TCP peer (`is_loopback_client`; 403 otherwise, before the grant is
+consumed). That mode reads and copies nothing. Each path must be
+absolute with no `..` part, a regular file or a folder this process can read, and,
+as dropped and with symlinks followed, free of control characters, Unicode line
+separators and backticks, so it stays inside the backticks of the prompt's
+`Attached files:` line; the reference names the real path, and a folder's path is
+handed over (`register_file_ref(..., allow_dir=True)`), never its contents. A path in
+the engine's own runtime folder (its session secret and the grant folder) is
+refused. The byte cap applies only to imports. Each reference says whether the
+path is outside the chat's own folders (`_chat_dir_root_candidates`) and whether
+it is in a credentials folder (`~/.ssh`, `~/.aws`, `~/.gnupg`,
+`~/Library/Keychains`, also reported as outside), for the PWA to warn; it widens
+nothing, since the agent CLI's permission mode decides what the agent may read.
+It also returns the validated real path, which the chip sends as it is, because
+the opaque reference expires after 10 minutes or an engine restart while a chip
+waits. Every consume holds the grant folder at 0700 and deletes grant files past
+the five-minute TTL.
 `ciao/instance_lock.py`
 holds `.runtime/server.lock` for the engine process lifetime, so a normal
 server and `ciao dev` cannot run against the same registry concurrently.
@@ -975,7 +1000,7 @@ Workspaces are archived the same way rather than deleted (`ciao/workspace_archiv
 ## Related docs
 
 - `docs/DEVELOPMENT.md`: setup, dev workflow, testing, change guidelines.
-- `INTEGRATIONS.md`: env vars, OAuth setup, MCP connectors, server runtime knobs.
+- `INTEGRATIONS.md`: agent CLI setup and the environment variables the engine reads or sets.
 - `PWA_API.md`: API endpoints, auth flow, state paths.
 - `docs/MEMORY_EVAL.md`: deterministic retrieval eval and the sandboxed live-vault probe runbook.
 - `docs/AGENT_CLI.md`: agent control-plane trust model, transport, telemetry, and the D-05/D-13 permission model.

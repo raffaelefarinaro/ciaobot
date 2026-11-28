@@ -701,6 +701,10 @@ struct WebWindow: NSViewRepresentable {
     /// The native Settings bridge. Only the connected main window is given one;
     /// setup and child windows get no `ciaobotAppSettings` handler.
     var appSettings: AppSettingsBridge? = nil
+    /// "Use in place" for dropped and picked files. Only the main window on the
+    /// app's own local engine is given one; every other window gets no
+    /// `ciaobotNativeDrop` handler, so its page offers only "Attach a copy".
+    var nativeDrop: NativeDropBridge? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -713,7 +717,8 @@ struct WebWindow: NSViewRepresentable {
             viewTracker: viewTracker,
             navigationProfile: navigationProfile,
             appSettings: appSettings,
-            tlsIdentity: tlsIdentity
+            tlsIdentity: tlsIdentity,
+            nativeDrop: nativeDrop
         )
     }
 
@@ -760,6 +765,7 @@ struct WebWindow: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply {
         static let trustedClickMessageName = "ciaobotTrustedClick"
         static let appSettingsMessageName = "ciaobotAppSettings"
+        static let nativeDropMessageName = "ciaobotNativeDrop"
         /// The one rejection string the page ever sees.
         static let appSettingsRefusal = "refused"
         static let appSettingsChangedScript = "window.dispatchEvent(new Event('ciaobot-app-settings-changed'))"
@@ -884,6 +890,9 @@ struct WebWindow: NSViewRepresentable {
         private(set) var isReleased = false
         /// The Settings bridge, nil for every window but the connected main one.
         private(set) var appSettings: AppSettingsBridge?
+        /// The "Use in place" bridge, nil for every window but the local
+        /// engine's main one.
+        private(set) var nativeDrop: NativeDropBridge?
         private var appSettingsSubscription: AnyCancellable?
         /// Test/observability hook: called before the file-panel origin check.
         var filePanelFrameOriginObserver: ((String, String, Int) -> Void)?
@@ -900,8 +909,9 @@ struct WebWindow: NSViewRepresentable {
         var testCrossOriginFrameObserver: ((WKFrameInfo) -> Void)?
         #endif
 
-        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, navigationProfile: WebWindowNavigationProfile = .main, appSettings: AppSettingsBridge? = nil, tlsIdentity: LocalEngineTLSIdentity? = nil) {
+        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, navigationProfile: WebWindowNavigationProfile = .main, appSettings: AppSettingsBridge? = nil, tlsIdentity: LocalEngineTLSIdentity? = nil, nativeDrop: NativeDropBridge? = nil) {
             self.origin = origin
+            self.nativeDrop = nativeDrop
             self.tlsIdentity = tlsIdentity
             self.onFailure = onFailure
             self.downloadFailure = downloadFailure
@@ -975,6 +985,9 @@ struct WebWindow: NSViewRepresentable {
             if coordinator.appSettings != nil {
                 controller.addScriptMessageHandler(coordinator, contentWorld: .page, name: appSettingsMessageName)
             }
+            if coordinator.nativeDrop != nil {
+                controller.addScriptMessageHandler(coordinator, contentWorld: .page, name: nativeDropMessageName)
+            }
             #if DEBUG
             controller.add(coordinator, name: "ciaobotCrossOriginProbe")
             #endif
@@ -993,7 +1006,8 @@ struct WebWindow: NSViewRepresentable {
                 javaScriptCanOpenWindowsAutomatically: javaScriptCanOpenWindowsAutomatically
             )
 
-            let webView = WKWebView(frame: .zero, configuration: configuration)
+            let webView = FileDropWebView(frame: .zero, configuration: configuration)
+            webView.onFileDrop = { [weak coordinator] urls in coordinator?.nativeDrop?.capture.record(urls) }
             webView.navigationDelegate = coordinator
             webView.uiDelegate = coordinator
             if #available(macOS 13.3, *) { webView.isInspectable = false }
@@ -1013,6 +1027,7 @@ struct WebWindow: NSViewRepresentable {
             clickGesture.clear()
             clearProvisionalNavigation()
             appSettings = nil
+            nativeDrop = nil
             appSettingsSubscription = nil
             webView?.configuration.userContentController.removeAllScriptMessageHandlers()
         }
@@ -1150,6 +1165,25 @@ struct WebWindow: NSViewRepresentable {
             didReceive message: WKScriptMessage,
             replyHandler: @escaping (Any?, String?) -> Void
         ) {
+            if message.name == Self.nativeDropMessageName {
+                let frameOrigin = message.frameInfo.securityOrigin
+                MainActor.assumeIsolated {
+                    handleNativeDropMessage(
+                        isMainFrame: message.frameInfo.isMainFrame,
+                        scheme: frameOrigin.protocol,
+                        host: frameOrigin.host,
+                        port: frameOrigin.port,
+                        view: message.webView,
+                        body: message.body
+                    ) { result in
+                        switch result {
+                        case .success(let value): replyHandler(value, nil)
+                        case .failure: replyHandler(nil, Self.appSettingsRefusal)
+                        }
+                    }
+                }
+                return
+            }
             guard message.name == Self.appSettingsMessageName else {
                 replyHandler(nil, Self.appSettingsRefusal)
                 return
@@ -1227,6 +1261,62 @@ struct WebWindow: NSViewRepresentable {
                 return spendingClick { appSettings.setAutomaticUpdates(on) }
             default:
                 return .failure(RefusedError())
+            }
+        }
+
+        /// Validates one `ciaobotNativeDrop` request, with the Settings bridge's
+        /// checks: the coordinator's current view, the main frame of the exact
+        /// origin, the committed document, and a body of exactly `{op}`.
+        /// `grant` turns the drop the page just received into a grant (null
+        /// when there was none in the last 30 s); `clear` forgets it (the page
+        /// sends it after a drop it attached as a copy); `pick` spends a
+        /// trusted click and opens a panel for files and folders (null when
+        /// cancelled). The reply carries only `{grantId, names}`, never a path.
+        @MainActor
+        func handleNativeDropMessage(
+            isMainFrame: Bool,
+            scheme: String,
+            host: String,
+            port: Int,
+            view: WKWebView?,
+            body: Any,
+            now: Date = Date(),
+            reply: @escaping (Result<Any, RefusedError>) -> Void
+        ) {
+            guard !isReleased,
+                  let nativeDrop,
+                  let view,
+                  self.webView === view,
+                  isMainFrame,
+                  committedDocumentGeneration == documentGeneration,
+                  origin.matches(scheme: scheme, host: host, port: port),
+                  let payload = body as? [String: Any],
+                  payload.count == 1,
+                  let op = payload["op"] as? String else { return reply(.failure(RefusedError())) }
+            switch op {
+            case "grant":
+                do {
+                    let grant = try nativeDrop.grantForLastDrop(now: now)
+                    reply(.success(grant?.payload ?? NSNull()))
+                } catch {
+                    reply(.failure(RefusedError()))
+                }
+            case "clear":
+                nativeDrop.capture.clear()
+                reply(.success(NSNull()))
+            case "pick":
+                guard clickGesture.isPending(generation: committedDocumentGeneration, now: now) else {
+                    return reply(.failure(RefusedError()))
+                }
+                clickGesture.clear()
+                nativeDrop.pick { result in
+                    switch result {
+                    case .success(let grant): reply(.success(grant?.payload ?? NSNull()))
+                    case .failure: reply(.failure(RefusedError()))
+                    }
+                }
+            default:
+                reply(.failure(RefusedError()))
             }
         }
 

@@ -10,9 +10,9 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-// The product mark as the sidebar renders it: a 30px reload button around the
-// production CiaoMark. Hover or focus closes the C into a ring; leaving reopens
-// it. BrandMark has no props, so this is its only state.
+// The product mark as the sidebar renders it: the 27px C in the 30px reload
+// button. Hover or focus closes the C into a ring; leaving reopens it.
+// BrandMark has no props, so this is its only state.
 export const Default: Story = {
   play: async ({ canvas }) => {
     const mark = canvas.getByRole('button', { name: 'Reload Ciaobot' })
