@@ -54,7 +54,7 @@ from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import loads_untrusted, write_private_text
 from ciao.file_kernel import QueueLockError
-from ciao.unsure_list import UnsureError, change_line, read_list, is_line_id as is_unsure_line_id
+from ciao.unsure_list import UnsureError, change_line, read_list, restore_line, is_line_id as is_unsure_line_id
 from ciao.os_support.child_env import child_env
 from ciao.port_in_use import BIND_PHASE
 from ciao.web.auth import (
@@ -67,6 +67,7 @@ from ciao.web.auth import (
     is_loopback_client,
 )
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
+from ciao.web.heif_images import HEIF_EXTENSIONS, HEIF_TOO_LARGE, HeifNotConverted
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import CLAUDE_MODELS, MAX_IMAGE_SIZE_BYTES, CiaoConfig, RESTART_EXIT_CODE, WorkspaceConfig
 from ciao.model_tiers import MAX_MODEL_ID_CHARS
@@ -1772,10 +1773,11 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         image_paths = [
             path
             for path in paths
-            if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
+            if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS | HEIF_EXTENSIONS
         ]
         regular_paths = [path for path in paths if path not in image_paths]
         errors: list[dict[str, str]] = []
+        notices: list[dict[str, str]] = []
         file_refs: list[dict[str, str]] = []
 
         pcm = getattr(request.app.state, "project_chat_manager", None)
@@ -1787,13 +1789,34 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         project_id = chat.project_id
         image_refs: list[str] = []
         for path in image_paths:
+            heif = path.suffix.lower() in HEIF_EXTENSIONS
             try:
                 if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
+                    if heif:
+                        raise HeifNotConverted(None, HEIF_TOO_LARGE)
                     raise ValueError("image too large")
-                image_data = await asyncio.to_thread(
-                    _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
-                )
-                image_refs.append(pcm.save_image_upload(image_data, path.name).path.name)
+                try:
+                    image_data = await asyncio.to_thread(
+                        _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
+                    )
+                except OSError as exc:
+                    if heif:
+                        # Handed over unread, like any other non-image drop.
+                        raise HeifNotConverted(None, "Ciaobot could not read it to convert it") from exc
+                    raise
+                attachment = await asyncio.to_thread(pcm.save_image_upload, image_data, path.name)
+                image_refs.append(attachment.path.name)
+            except HeifNotConverted as exc:
+                # The dropped file is on this host already: hand the agent that
+                # path, as for any other non-image drop, not the media copy.
+                if exc.original is not None:
+                    exc.original.unlink(missing_ok=True)
+                file_refs.append(_desktop_drop_ref(pcm, chat_id, path))
+                keep_paths.add(path)
+                notices.append({
+                    "filename": _drop_display_name(path),
+                    "message": _heif_file_notice(exc.reason),
+                })
             except (OSError, ValueError) as exc:
                 errors.append(
                     {
@@ -1836,6 +1859,7 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                 "file_refs": file_refs,
                 "image_refs": image_refs,
                 "errors": errors,
+                "notices": notices,
             }
         )
     except (OSError, ValueError) as exc:
@@ -2799,8 +2823,19 @@ async def chat_worktree_changes(request: Request) -> Response:
 
 # ── Images ───────────────────────────────────────────────────────────────
 
+def _heif_file_notice(reason: str) -> str:
+    # The PWA titles the toast "<name> attached as a file" and clamps the body,
+    # so the consequence comes first.
+    return f"The agent can read it by path but cannot see it as an image: {reason}."
+
+
 async def chat_images(request: Request) -> JSONResponse:
-    """Upload images and return references."""
+    """Upload images and return references.
+
+    A HEIC/HEIF photo that cannot be converted to JPEG is still kept: its entry
+    carries a ``file_ref`` (an opaque chat file reference, like
+    ``/attachments``) and a ``notice`` for the user instead of a ``ref``.
+    """
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     chat = pcm.get_chat(chat_id)
@@ -2814,15 +2849,31 @@ async def chat_images(request: Request) -> JSONResponse:
         if not hasattr(upload, "read"):
             continue
         filename = getattr(upload, "filename", "image.jpg") or "image.jpg"
+        # A HEIC over the image limit is still kept, as a file, up to the
+        # chat attachment limit it had when it went up as a plain file.
+        limit = (
+            chat_service._PROJECT_UPLOAD_MAX_BYTES
+            if Path(filename).suffix.lower() in HEIF_EXTENSIONS
+            else MAX_IMAGE_SIZE_BYTES
+        )
         try:
-            data = await _read_upload_limited(
-                upload, MAX_IMAGE_SIZE_BYTES
-            )
-            attachment = pcm.save_image_upload(data, filename)
+            data = await _read_upload_limited(upload, limit)
+            attachment = await asyncio.to_thread(pcm.save_image_upload, data, filename)
             results.append({
                 "ref": attachment.path.name,
                 "mime_type": attachment.mime_type,
                 "filename": attachment.original_filename,
+            })
+        except HeifNotConverted as exc:
+            name = _drop_display_name(Path(filename))
+            if exc.original is None:  # save_image_upload always keeps the upload
+                results.append({"error": exc.reason, "filename": filename})
+                continue
+            kept = await asyncio.to_thread(pcm.keep_unconverted_upload, chat_id, exc.original)
+            results.append({
+                "filename": name,
+                "file_ref": _desktop_drop_ref(pcm, chat_id, kept) | {"name": name},
+                "notice": _heif_file_notice(exc.reason),
             })
         except ValueError as exc:
             results.append({"error": str(exc), "filename": filename})
@@ -4345,8 +4396,9 @@ async def care_report(request: Request) -> JSONResponse:
     return JSONResponse(body)
 
 
-# The largest body the Unsure page sends: an action and a line id.
-_UNSURE_BODY_MAX_BYTES = 1024
+# The largest body the Unsure page sends: an action and a line id, or for a
+# `restore` the removed line itself (at most 4,000 characters, JSON-escaped).
+_UNSURE_BODY_MAX_BYTES = 32 * 1024
 
 
 def _unsure_error(message: str, status: int, code: str) -> JSONResponse:
@@ -4386,7 +4438,9 @@ async def unsure_list(request: Request) -> JSONResponse:
     :func:`ciao.unsure_list.read_list`) plus the file's display path. POST
     `{"workspace", "op": "tick" | "untick" | "remove", "id"}` changes the one
     item line with that id under the list's file lock and answers the list as
-    written. Every refusal carries a `code`: `line_changed` (409, the page
+    written; `{"workspace", "op": "restore", "line", "before"?, "after"?, "section"?}`
+    adds one unticked line back where the page removed it from (its Undo,
+    :func:`ciao.unsure_list.restore_line`). Every refusal carries a `code`: `line_changed` (409, the page
     reads again), `care_running` (423: the care run edits the file with its own
     tools, which do not take the lock), `not_plain_file` (422), `too_large`
     (413), `busy` (503, lock held past 2 s), `vault_unavailable` (503),
@@ -4407,7 +4461,14 @@ async def unsure_list(request: Request) -> JSONResponse:
         workspace = str(body.get("workspace", "")).strip()
         op = str(body.get("op", ""))
         target = str(body.get("id", ""))
-        if op not in ("tick", "untick", "remove") or not is_unsure_line_id(target):
+        line = body.get("line")
+        before = body.get("before", "")
+        after = body.get("after", "")
+        section = body.get("section", "")
+        if op == "restore":
+            if not all(isinstance(value, str) for value in (line, before, after, section)):
+                return _unsure_error("line is required", 400, "bad_request")
+        elif op not in ("tick", "untick", "remove") or not is_unsure_line_id(target):
             return _unsure_error("op and id are required", 400, "bad_request")
     else:
         workspace = request.query_params.get("workspace", "").strip()
@@ -4421,7 +4482,9 @@ async def unsure_list(request: Request) -> JSONResponse:
     if request.method == "POST" and _care_running(request, workspace):
         return _unsure_error("Workspace care is running and may be editing the list; try again when it finishes", 423, "care_running")
     try:
-        if request.method == "POST":
+        if request.method == "POST" and op == "restore":
+            payload = await asyncio.to_thread(restore_line, vault, str(line), str(before), str(after), str(section))
+        elif request.method == "POST":
             payload = await asyncio.to_thread(change_line, vault, op, target)
         else:
             payload = await asyncio.to_thread(read_list, vault)

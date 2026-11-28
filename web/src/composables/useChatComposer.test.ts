@@ -22,6 +22,7 @@ function makeStore() {
     addPendingFiles: vi.fn(),
     removePendingFile: vi.fn(),
     pushErrorToast: vi.fn(),
+    pushUploadNotice: vi.fn(),
   } satisfies ComposerAttachmentStore & Record<string, unknown>
 }
 
@@ -393,6 +394,34 @@ describe('useChatComposer attachments', () => {
     expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'a.pdf' }])
     expect(store.addPendingImageRefs).toHaveBeenCalledWith(CHAT_ID, ['img-1'])
     expect(composer.dragOver.value).toBe(false)
+  })
+
+  it('tells the user when a native drop kept a HEIC photo as a file', async () => {
+    const ref = `drop_${'d'.repeat(32)}`
+    const notice = { filename: 'IMG_1.HEIC', message: 'The agent can read it by path but cannot see it as an image: no converter.' }
+    const fetchImpl = vi.fn(async () => jsonResponse({
+      file_refs: [{ ref, name: 'IMG_1.HEIC' }], image_refs: [], errors: [], notices: [notice],
+    })) as unknown as typeof fetch
+    const { composer, store } = makeComposer({ fetchImpl })
+
+    composer.handleNativeFileDrop(new CustomEvent('ciao:native-file-drop', { detail: { grantId: 'grant-1' } }))
+    await vi.waitFor(() => expect(store.pushUploadNotice).toHaveBeenCalled())
+
+    expect(store.pushUploadNotice).toHaveBeenCalledWith(notice)
+    expect(store.pushErrorToast).not.toHaveBeenCalled()
+    expect(store.addPendingFiles).toHaveBeenCalledWith(CHAT_ID, [{ ref, name: 'IMG_1.HEIC' }])
+  })
+
+  it('uploads a picked HEIC photo with an empty type as an image, not a document', async () => {
+    const postForm = fakePostForm({ file_refs: [] })
+    const { composer, store } = makeComposer({ postForm })
+    attachTextarea(composer, '')
+    const photo = new File([new Uint8Array([1])], 'IMG_0001.HEIC', { type: '' })
+
+    await composer.handleFileSelect({ target: pickerInput([photo]) } as unknown as Event)
+
+    expect(store.uploadImages).toHaveBeenCalledWith(CHAT_ID, [photo], expect.any(Function))
+    expect(postForm).not.toHaveBeenCalled()
   })
 
   it('surfaces a native drop that arrived without a grant', async () => {

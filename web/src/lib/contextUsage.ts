@@ -34,6 +34,21 @@ export function isCompactedStatus(message: string): boolean {
   return COMPACTED_PREFIX.test(message)
 }
 
+/**
+ * A stamp for a live report that is newer than every message already held,
+ * whatever the browser clock says: replies carry the server's clock, so a
+ * browser running behind would otherwise date a compaction before the reply
+ * it supersedes and bring back the stale figure.
+ */
+export function stampAfter(messages: readonly { timestamp?: string }[], now: number = Date.now()): string {
+  let newest = Number.NEGATIVE_INFINITY
+  for (const m of messages) {
+    const t = Date.parse(m.timestamp ?? '')
+    if (t > newest) newest = t
+  }
+  return new Date(Math.max(now, newest + 1)).toISOString()
+}
+
 const NONE: ContextUsage = { pct: null, compacted: false, used: null, size: null }
 
 function tokenCount(value: unknown): number | null {

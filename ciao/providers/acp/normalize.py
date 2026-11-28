@@ -494,6 +494,8 @@ class UpdateNormalizer:
             self.usage["context_pct"] = pct
         else:
             self.usage.pop("context_pct", None)
+        # ACP's ``cost.amount`` is the session's cumulative cost, not this turn's: ``cost_usd`` rides
+        # each turn's usage as the running total so far (nothing sums it per turn).
         cost = u.get("cost")
         if isinstance(cost, Mapping) and cost.get("amount") is not None:
             self.usage["cost_usd"] = str(cost["amount"])

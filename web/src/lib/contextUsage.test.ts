@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isCompactedStatus, latestContextUsage, type ContextUsageItem } from './contextUsage'
+import { isCompactedStatus, latestContextUsage, stampAfter, type ContextUsageItem } from './contextUsage'
 
 const assistant = (usage: Record<string, string>, timestamp = ''): ContextUsageItem => ({
   kind: 'assistant',
@@ -59,5 +59,21 @@ describe('latestContextUsage', () => {
   it('prefers a reply newer than the live report', () => {
     const items = [assistant({ context_pct: '12%' }, '2026-11-28T11:00:00Z')]
     expect(latestContextUsage(items, { usage: null, at: '2026-11-28T10:05:00Z' }).pct).toBe(12)
+  })
+})
+
+describe('stampAfter', () => {
+  it('dates a compaction after the newest reply even when the browser clock runs behind the server', () => {
+    const reply = { timestamp: '2026-11-28T10:00:00.000Z' }
+    const behind = Date.parse('2026-11-28T09:55:00Z')
+    const at = stampAfter([{ timestamp: '' }, reply], behind)
+    expect(at).toBe('2026-11-28T10:00:00.001Z')
+    // So the placeholder, not the pre-compaction reply, decides the meter.
+    const items = [assistant({ context_pct: '40%' }, reply.timestamp)]
+    expect(latestContextUsage(items, { usage: null, at })).toMatchObject({ pct: null, compacted: true })
+  })
+
+  it('uses the browser clock when it is ahead of every message', () => {
+    expect(stampAfter([{ timestamp: '2026-11-28T10:00:00Z' }], Date.parse('2026-11-28T11:00:00Z'))).toBe('2026-11-28T11:00:00.000Z')
   })
 })

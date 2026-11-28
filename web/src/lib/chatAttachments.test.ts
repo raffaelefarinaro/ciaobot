@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   composeAttachmentBlock,
   formatAttachedFilePath,
+  isImageUpload,
   nativeAbsoluteFilePath,
+  parseImageUploadResults,
   postFormWithProgress,
   splitAttachmentBlock,
   uploadChatAttachments,
@@ -116,6 +118,38 @@ describe('uploadChatAttachments', () => {
     const post = vi.fn(async () => ({ status: 409, body: { error: 'no folder' } }))
     await expect(uploadChatAttachments('chat-1', [new File(['x'], 'a.md')], undefined, post))
       .rejects.toThrow('no folder')
+  })
+})
+
+describe('isImageUpload', () => {
+  it('sends an iPhone photo with an empty or generic type as an image', () => {
+    expect(isImageUpload(new File(['x'], 'IMG_0001.HEIC', { type: '' }))).toBe(true)
+    expect(isImageUpload(new File(['x'], 'photo.heif', { type: 'application/octet-stream' }))).toBe(true)
+    expect(isImageUpload(new File(['x'], 'burst.heics', { type: '' }))).toBe(true)
+    expect(isImageUpload(new File(['x'], 'photo.heic', { type: 'image/heic' }))).toBe(true)
+    expect(isImageUpload(new File(['x'], 'shot.png', { type: 'image/png' }))).toBe(true)
+  })
+
+  it('leaves documents and look-alike names to the file path', () => {
+    expect(isImageUpload(new File(['x'], 'brief.pdf', { type: 'application/pdf' }))).toBe(false)
+    expect(isImageUpload(new File(['x'], 'heic-notes.md', { type: '' }))).toBe(false)
+  })
+})
+
+describe('parseImageUploadResults', () => {
+  it('splits image refs from a HEIC photo kept as a file, and keeps its notice', () => {
+    const result = parseImageUploadResults([
+      { ref: 'web_1.jpg', mime_type: 'image/jpeg', filename: 'IMG_1.HEIC' },
+      { filename: 'IMG_2.HEIC', file_ref: { ref: REF, name: 'IMG_2.HEIC' }, notice: 'kept as a file' },
+      { filename: 'bad.tiff', error: 'Unsupported image format: .tiff' },
+    ])
+    expect(result.refs).toEqual(['web_1.jpg'])
+    expect(result.files).toEqual([{ ref: REF, name: 'IMG_2.HEIC' }])
+    expect(result.notices).toEqual([{ filename: 'IMG_2.HEIC', message: 'kept as a file' }])
+  })
+
+  it('reads a non-array body as empty', () => {
+    expect(parseImageUploadResults({ error: 'x' })).toEqual({ refs: [], files: [], notices: [] })
   })
 })
 

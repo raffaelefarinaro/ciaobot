@@ -32,12 +32,13 @@ function noteFilesFor(state: MapState): string[] {
 }
 
 type MapState =
-  | 'default' | 'unsure' | 'unsure-empty' | 'unsure-error' | 'unsure-many' | 'loading' | 'error'
+  | 'default' | 'unsure' | 'unsure-phone' | 'unsure-empty' | 'unsure-error' | 'unsure-many' | 'loading' | 'error'
   | 'detail-plain' | 'detail-stale' | 'detail-facts'
 
 const stateDescription: Record<MapState, string> = {
   default: 'the store default section (the map): toolbar over the drawing',
-  unsure: 'the Unsure section: thirteen lines, one approved, with the rail windows',
+  unsure: 'the Unsure queue: thirteen lines, one approved, the first open in full, with the rail windows',
+  'unsure-phone': 'the Unsure queue in a 390px pane: one card at a time with the buttons under it',
   'unsure-empty': 'the Unsure section with nothing waiting',
   'unsure-error': 'the Unsure section when the list cannot be read',
   'unsure-many': 'the Unsure section with sixty lines',
@@ -69,7 +70,9 @@ function renderState(state: MapState) {
       onBeforeUnmount(() => fixture.value?.dispose())
       return () => h('div', {}, [
         h('p', `Synthetic ${state} fixture: production MemoryMapView with ${stateDescription[state]}.`),
-        h('div', { ref: host }),
+        // The phone story's host is the pane the app gives the page: 390px and the
+        // `chat-pane` container its grid answers to, so the rail drops below.
+        h('div', state === 'unsure-phone' ? { ref: host, style: 'max-width: 390px; container: chat-pane / inline-size' } : { ref: host }),
         h('p', { role: 'status' }, `Fixture requests: ${fixture.value?.boundary.requests.length ?? 0}. Violations: ${fixture.value?.boundary.violations.length ?? 0}.`),
         error.value ? h('p', { role: 'alert' }, error.value) : null,
         ...(fixture.value?.boundary.violations ?? []).map((message) => h('p', { role: 'alert' }, message)),
@@ -113,23 +116,50 @@ export const Default: Story = {
   },
 }
 
-// The Unsure section: one row per line, the rail's two docked windows, and
-// Approve writing the tick through the one route.
+const NORTHWIND = 'Is the live Northwind deployment unaffected by the December 11 model retirement?'
+
+// The Unsure queue: the list beside the first item in full (with the line it
+// saves and where), the rail's two docked windows, S skipping without a write,
+// and Approve writing the tick through the one route and moving to the next.
 export const Unsure: Story = {
   parameters: { fixture: { routes: mapRoutes({ graph: 'loaded' }) } },
   render: () => renderState('unsure'),
-  play: async ({ canvas, userEvent }) => {
-    await waitFor(() => expect(canvas.getByRole('heading', { name: /Waiting for you/ })).toBeTruthy())
+  play: async ({ canvas, canvasElement, userEvent }) => {
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Waiting for you' })).toBeTruthy())
     expect(canvas.getByText('Memory · Unsure')).toBeTruthy()
-    expect(canvas.getByText('Is the live Northwind deployment unaffected by the December 11 model retirement?')).toBeTruthy()
+    expect(canvas.getByRole('heading', { name: NORTHWIND, level: 3 })).toBeTruthy()
+    expect(canvas.getByText('The live Northwind deployment uses no model that retires on December 11.')).toBeTruthy()
+    // The destination note opens from the box.
+    expect(canvas.getByText('projects/active/Northwind/Northwind.md').tagName).toBe('BUTTON')
     expect(canvas.getByRole('heading', { name: 'How this works' })).toBeTruthy()
     expect(canvas.getByRole('heading', { name: 'Always loaded' })).toBeTruthy()
-    // The repository item cannot be applied unattended: its Approve opens a chat.
-    expect(canvas.getByRole('button', { name: /^Approve in a chat: Run the API tests/ })).toBeTruthy()
-    const approve = canvas.getByRole('button', { name: 'Approve: Is the live Northwind deployment unaffected by the December 11 model retirement?' })
+    expect(canvasElement.querySelector('[data-unsure-count]')?.textContent).toBe('1 of 12')
+    await userEvent.keyboard('s')
+    await waitFor(() => expect(canvasElement.querySelector('[data-unsure-count]')?.textContent).toBe('2 of 12'))
+    await userEvent.click(canvasElement.querySelector<HTMLElement>('[data-unsure-row]')!)
+    await waitFor(() => expect(canvas.getByRole('heading', { name: NORTHWIND, level: 3 })).toBeTruthy())
+    await userEvent.click(canvas.getByRole('button', { name: `Approve: ${NORTHWIND}` }))
+    await waitFor(() => expect(canvas.getByText(`Approved “${NORTHWIND}”. The next Workspace care run saves it.`)).toBeTruthy())
+    expect(canvas.getByRole('button', { name: 'Undo' })).toBeTruthy()
+    expect(canvas.getByRole('heading', { name: /^Does the November 27 summary/, level: 3 })).toBeTruthy()
+    await assertSettled(canvas)
+  },
+}
+
+// The same queue in a phone-wide pane: one card, its place, the swipe hints and
+// the two 44px buttons under it; Approve sends the card off and shows the next.
+export const UnsurePhone: Story = {
+  parameters: { fixture: { routes: mapRoutes({ graph: 'loaded' }) } },
+  render: () => renderState('unsure-phone'),
+  play: async ({ canvas, canvasElement, userEvent }) => {
+    await waitFor(() => expect(canvasElement.querySelector('[data-unsure-card]')).toBeTruthy())
+    expect(canvasElement.querySelector('[data-unsure-count]')?.textContent).toBe('1 of 12')
+    expect(canvas.getByText('← swipe left to dismiss')).toBeTruthy()
+    const approve = canvas.getByRole('button', { name: `Approve: ${NORTHWIND}` })
+    expect(approve.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
+    expect(canvas.getByRole('button', { name: `Dismiss: ${NORTHWIND}` }).getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
     await userEvent.click(approve)
-    await waitFor(() => expect(canvas.getAllByText('Approved: applied by the next care run.')).toHaveLength(2))
-    expect(canvas.getByRole('button', { name: /^Undo approval: Is the live Northwind/ })).toBeTruthy()
+    await waitFor(() => expect(canvasElement.querySelector('[data-unsure-card]')?.textContent).toContain('Does the November 27 summary'))
     await assertSettled(canvas)
   },
 }
@@ -159,8 +189,9 @@ export const UnsureMany: Story = {
   parameters: { fixture: { routes: mapRoutes({ graph: 'loaded', unsure: 'many' }) } },
   render: () => renderState('unsure-many'),
   play: async ({ canvas, canvasElement }) => {
-    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Waiting for you 60' })).toBeTruthy())
-    expect(canvasElement.querySelectorAll('.mu-row')).toHaveLength(60)
+    await waitFor(() => expect(canvas.getByRole('heading', { name: 'Waiting for you' })).toBeTruthy())
+    expect(canvasElement.querySelectorAll('[data-unsure-row]')).toHaveLength(60)
+    expect(canvasElement.querySelector('[data-unsure-count]')?.textContent).toBe('1 of 60')
     await assertSettled(canvas)
   },
 }

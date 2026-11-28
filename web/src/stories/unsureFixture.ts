@@ -4,22 +4,28 @@ import type { UnsureItem, UnsureList } from '../lib/unsureList'
  * Thirteen Unsure lines shaped like a real list (names, projects and ids are
  * invented), as `GET /api/memory/unsure` answers them: parsed by the engine's
  * own `ciao.unsure_list.parse_list`, so titles, reasons and sources are what
- * the page really gets. One line is the old machine-written kind with no plain
- * first sentence, one is ticked, and every kind is present. Shared by the
- * stories and the Playwright spec.
+ * the page really gets. The first and third carry the quoted line and the
+ * `to:` destination new lines have; the rest were written before that. One
+ * line is the old machine-written kind with no plain first sentence, one is
+ * ticked, and every kind is present. Shared by the stories and the Playwright
+ * spec.
  */
 export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
   {
-    "id": "1595d4b902c9b287-0",
-    "raw": "- [ ] Is the live Northwind deployment unaffected by the December 11 model retirement? — unsure because the review checked local code and configuration, not the production environment, where a model override could still select a retiring ID; source: chat-7e11530b; 2026-11-27",
+    "id": "993ce19a6c52219a-0",
+    "raw": "- [ ] Is the live Northwind deployment unaffected by the December 11 model retirement? \"The live Northwind deployment uses no model that retires on December 11.\" — unsure because the review checked local code and configuration, not the production environment, where a model override could still select a retiring ID; to: projects/active/Northwind/Northwind.md; source: chat-7e11530b; 2026-11-27",
     "checked": false,
     "kind": "",
     "qualifier": "",
     "title": "Is the live Northwind deployment unaffected by the December 11 model retirement?",
-    "text": "Is the live Northwind deployment unaffected by the December 11 model retirement?",
+    "text": "Is the live Northwind deployment unaffected by the December 11 model retirement? \"The live Northwind deployment uses no model that retires on December 11.\"",
     "reason": "the review checked local code and configuration, not the production environment, where a model override could still select a retiring ID",
     "source": "chat-7e11530b",
     "date": "2026-11-27",
+    "destination": "projects/active/Northwind/Northwind.md",
+    "destination_ok": true,
+    "proposal": "The live Northwind deployment uses no model that retires on December 11.",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -33,19 +39,27 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "the [Northwind note](../projects/active/Northwind/Northwind.md#audio) records the decision to keep the current default while credit lasts; the later review reports no new decision and does not verify the deployed default",
     "source": "chat-30605c3a and chat-7e11530b",
     "date": "2026-11-27",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "",
+    "section": "Unsure",
     "malformed": false
   },
   {
-    "id": "ae52338c77ab7db1-0",
-    "raw": "- [ ] Should Sam Rivera's note say he moved from the platform team to the payments team? — unsure because two notes disagree and neither names a date; source: People/Sam Rivera.md; 2026-11-26",
+    "id": "9abb8f13163910a4-0",
+    "raw": "- [ ] Should Sam Rivera's note say he moved from the platform team to the payments team? \"Sam Rivera moved from the platform team to the payments team.\" — unsure because two notes disagree and neither names a date; to: People/Sam Rivera.md; source: chat-3a4b5c6d and People/Sam Rivera.md; 2026-11-26",
     "checked": false,
     "kind": "",
     "qualifier": "",
     "title": "Should Sam Rivera's note say he moved from the platform team to the payments team?",
-    "text": "Should Sam Rivera's note say he moved from the platform team to the payments team?",
+    "text": "Should Sam Rivera's note say he moved from the platform team to the payments team? \"Sam Rivera moved from the platform team to the payments team.\"",
     "reason": "two notes disagree and neither names a date",
-    "source": "People/Sam Rivera.md",
+    "source": "chat-3a4b5c6d and People/Sam Rivera.md",
     "date": "2026-11-26",
+    "destination": "People/Sam Rivera.md",
+    "destination_ok": true,
+    "proposal": "Sam Rivera moved from the platform team to the payments team.",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -59,6 +73,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "it has shown up in two chats so far",
     "source": "chat-5e6f7a8b",
     "date": "2026-11-25",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -72,6 +90,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "the rotation may still be in place",
     "source": "care run",
     "date": "2026-11-25",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "Staging credentials rotate every Friday; ask before rotating",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -85,6 +107,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "no typed turn of yours said it",
     "source": "chat-9c8d7e6f",
     "date": "2026-11-24",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "Works from the Lisbon office on Mondays",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -98,6 +124,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "no category in VOCABULARY.md covers them",
     "source": "chat-0f1e2d3c",
     "date": "2026-11-24",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -111,6 +141,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "only one chat used that command",
     "source": "chat-4b5c6d7e",
     "date": "2026-11-23",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -124,6 +158,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "the operator has not approved the change",
     "source": "care run",
     "date": "2026-11-23",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -137,6 +175,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "two sources conflict",
     "source": "Projects/Atlas.md",
     "date": "2026-11-22",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -150,6 +192,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "only an agent message says so",
     "source": "Tasks/2026-11-20-invoices.md",
     "date": "2026-11-21",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -163,6 +209,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "the calendar note is from last spring",
     "source": "Projects/Weekly sync.md",
     "date": "2026-11-20",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "",
+    "section": "Unsure",
     "malformed": false
   },
   {
@@ -176,6 +226,10 @@ export const UNSURE_FIXTURE_ITEMS: UnsureItem[] = [
     "reason": "the airline account was closed in the October chat",
     "source": "chat-2c3d4e5f",
     "date": "2026-11-19",
+    "destination": "",
+    "destination_ok": false,
+    "proposal": "",
+    "section": "Unsure",
     "malformed": false
   }
 ]

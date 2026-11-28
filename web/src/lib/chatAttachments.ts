@@ -24,6 +24,17 @@ const LINE_RE = /^- (.+?): `(.+)`$/
 
 type FileRef = { ref: string; name?: string }
 type UploadFailure = { filename: string; error: string }
+/** A file the engine kept, but not the way it was sent (a HEIC photo it could not convert). */
+export type UploadNotice = { filename: string; message: string }
+
+const HEIF_NAME_RE = /\.(heic|heif|heics|heifs|hif)$/i
+
+/** Whether a picked, dropped or pasted file uploads as an image. Some browsers
+ *  send an iPhone photo (HEIC) with an empty type; the engine converts it to
+ *  JPEG, so it goes with the images rather than the document files. */
+export function isImageUpload(file: File): boolean {
+  return file.type.startsWith('image/') || HEIF_NAME_RE.test(file.name)
+}
 
 export type UploadProgressHandler = (loaded: number, total: number) => void
 export interface FormPostResult { status: number; body: unknown }
@@ -40,6 +51,31 @@ export interface AttachmentUploadResult {
   imageRefs: string[]
   /** Per-file failures the server reported alongside a successful request. */
   failures: UploadFailure[]
+  /** Files attached differently from how they were sent, to tell the user about. */
+  notices: UploadNotice[]
+}
+
+export interface ImageUploadResult {
+  /** Image refs the engine stored. */
+  refs: string[]
+  /** Photos the engine kept as plain files because it could not convert them. */
+  files: AttachedFile[]
+  notices: UploadNotice[]
+}
+
+/** Read `POST /api/chats/{id}/images`: one entry per file, with a `ref`, or a
+ *  `file_ref` and a `notice` for a HEIC photo kept as a file, or an `error`. */
+export function parseImageUploadResults(body: unknown): ImageUploadResult {
+  const entries = Array.isArray(body)
+    ? (body as { ref?: string; file_ref?: FileRef; notice?: string; filename?: string }[])
+    : []
+  return {
+    refs: entries.filter(e => typeof e.ref === 'string' && e.ref).map(e => e.ref as string),
+    files: attachedFiles(entries.flatMap(e => (e.file_ref ? [e.file_ref] : []))),
+    notices: entries
+      .filter(e => e.file_ref && typeof e.notice === 'string')
+      .map(e => ({ filename: cleanName(e.filename), message: e.notice as string })),
+  }
 }
 
 /** POST a multipart form with upload progress (fetch cannot report it). */
@@ -110,7 +146,7 @@ export async function uploadChatAttachments(
   const { status, body } = await post(`/api/chats/${encodeURIComponent(chatId)}/attachments?opaque=1`, form, onProgress)
   const result = (body || {}) as { file_refs?: FileRef[]; errors?: UploadFailure[]; error?: string }
   if (status < 200 || status >= 300) throw new Error(result.error || `Upload failed (HTTP ${status})`)
-  return { files: attachedFiles(result.file_refs), imageRefs: [], failures: result.errors || [] }
+  return { files: attachedFiles(result.file_refs), imageRefs: [], failures: result.errors || [], notices: [] }
 }
 
 /** Import a desktop (Finder) drop grant into a chat. */
@@ -127,8 +163,13 @@ export async function importDesktopDrop(
     body: JSON.stringify({ grant_id: grantId, project_id: target.projectId, chat_id: target.chatId }),
   })
   const result = await response.json().catch(() => ({})) as {
-    file_refs?: FileRef[]; image_refs?: string[]; errors?: UploadFailure[]; error?: string
+    file_refs?: FileRef[]; image_refs?: string[]; errors?: UploadFailure[]; notices?: UploadNotice[]; error?: string
   }
   if (!response.ok) throw new Error(result.error || `Native file import failed (HTTP ${response.status})`)
-  return { files: attachedFiles(result.file_refs), imageRefs: result.image_refs || [], failures: result.errors || [] }
+  return {
+    files: attachedFiles(result.file_refs),
+    imageRefs: result.image_refs || [],
+    failures: result.errors || [],
+    notices: result.notices || [],
+  }
 }

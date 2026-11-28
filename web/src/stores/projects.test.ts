@@ -3819,6 +3819,20 @@ describe('ephemeral status events', () => {
     expect(store.compactState[chatId]).toEqual({ running: false })
     // The figure before the compaction no longer holds until the turn reports a new one.
     expect(store.contextReports[chatId]?.usage).toBeNull()
+    // Dated after every held message, so a browser clock behind the server cannot order it first.
+    expect(Date.parse(store.contextReports[chatId]!.at)).toBeGreaterThanOrEqual(Date.now() - 1000)
+  })
+
+  test('dates the compaction placeholder after a reply stamped ahead of the browser clock', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-compact-skew'
+    store.activeChatId = chatId
+    const future = new Date(Date.now() + 3_600_000).toISOString()
+    store.messages[chatId] = [{ role: 'assistant', content: 'a', timestamp: future, usage: { context_pct: '40%' } }]
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({ data: JSON.stringify({ type: 'status', message: 'Compacted context' }) })
+    expect(Date.parse(store.contextReports[chatId]!.at)).toBeGreaterThan(Date.parse(future))
   })
 
   test('keeps the usage of a compaction turn that leaves no reply as the live context report', () => {
