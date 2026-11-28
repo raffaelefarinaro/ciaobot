@@ -8,7 +8,7 @@ text in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
 Ciaobot drives the agent CLIs installed on your machine; it bundles none of them.
 
-- [Claude Code](https://github.com/anthropics/claude-code) through [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) (Apache-2.0)
+- [Claude Code](https://github.com/anthropics/claude-code) through [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) (Apache-2.0), which installs the [Claude Agent SDK for TypeScript](https://github.com/anthropics/claude-agent-sdk-typescript) with the adapter (npm licence: `SEE LICENSE IN README.md`)
 - [Codex CLI](https://github.com/openai/codex) through [codex-acp](https://github.com/agentclientprotocol/codex-acp) (Apache-2.0)
 - [OpenCode](https://opencode.ai) through `opencode acp`
 - [Agent Client Protocol Python SDK](https://github.com/agentclientprotocol/python-sdk) (Apache-2.0)
@@ -24,7 +24,7 @@ Ciaobot drives the agent CLIs installed on your machine; it bundles none of them
 
 ## Engine (Python)
 
-- [Starlette](https://www.starlette.io) and [Uvicorn](https://www.uvicorn.org) (BSD-3-Clause), [HTTPX](https://www.python-httpx.org) (BSD-3-Clause)
+- [Starlette](https://starlette.dev) and [Uvicorn](https://uvicorn.dev) (BSD-3-Clause), [HTTPX](https://www.python-httpx.org) (BSD-3-Clause)
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) (MIT)
 - [pywebpush](https://github.com/web-push-libs/pywebpush) (MPL-2.0), [cryptography](https://cryptography.io) (Apache-2.0 or BSD-3-Clause), [itsdangerous](https://itsdangerous.palletsprojects.com) (BSD-3-Clause)
 - [PyYAML](https://pyyaml.org) (MIT), [python-dotenv](https://github.com/theskumar/python-dotenv) (BSD-3-Clause), [markdown-it-py](https://github.com/executablebooks/markdown-it-py) (MIT), [tzdata](https://github.com/python/tzdata) (Apache-2.0)

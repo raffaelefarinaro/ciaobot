@@ -28,7 +28,8 @@ Build the list of what ships or is invoked, then diff it against the file:
 
 Licences come from the installed metadata (`importlib.metadata`, the
 `license` field in `node_modules/<pkg>/package.json`, `npm view <pkg> license`).
-Every credited URL must answer 200. Remove what no longer ships; label nothing
+Every credited URL must answer 200 (`curl -sIL -A 'Mozilla/5.0'`); npmjs.com
+answers 403 to automated clients, so check npm packages with `npm view`. Remove what no longer ships; label nothing
 "historical".
 
 ## README.md
@@ -48,7 +49,8 @@ Every credited URL must answer 200. Remove what no longer ships; label nothing
 ## site/
 
 - `pytest tests/test_documentation_navigation.py` (internal links, anchors,
-  docs hub links).
+  docs hub links, and a few fixed strings: the shared slogan, the Mac and Linux
+  install offer, the migrate page, no product video).
 - External links to `/blob/main/` 404 until the release that adds the file
   merges to `main`: confirm the path exists on `develop` instead.
 - Install copy on `index.html`, `migrate.html` and `remote.html` matches the

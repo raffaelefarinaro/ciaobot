@@ -194,7 +194,8 @@ shipped without one.
 wrong claim goes live the moment it merges, and `workflow_dispatch` means a fix
 does not need a release.
 
-Only its links are tested (`tests/test_documentation_navigation.py`). Nothing compares its claims to the code it
+Only its links and a few fixed strings are tested
+(`tests/test_documentation_navigation.py`). Nothing compares its claims to the code it
 describes. That is the whole argument for checking it.
 
 For each release's removals and renames, sweep it:
