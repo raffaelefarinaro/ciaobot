@@ -54,7 +54,7 @@ from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import loads_untrusted, write_private_text
 from ciao.file_kernel import QueueLockError
-from ciao.unsure_list import UnsureError, change_line, read_list, is_line_id as is_unsure_line_id
+from ciao.unsure_list import UnsureError, change_line, read_list, restore_line, is_line_id as is_unsure_line_id
 from ciao.os_support.child_env import child_env
 from ciao.port_in_use import BIND_PHASE
 from ciao.web.auth import (
@@ -4345,8 +4345,9 @@ async def care_report(request: Request) -> JSONResponse:
     return JSONResponse(body)
 
 
-# The largest body the Unsure page sends: an action and a line id.
-_UNSURE_BODY_MAX_BYTES = 1024
+# The largest body the Unsure page sends: an action and a line id, or for a
+# `restore` the removed line itself (at most 4,000 characters, JSON-escaped).
+_UNSURE_BODY_MAX_BYTES = 32 * 1024
 
 
 def _unsure_error(message: str, status: int, code: str) -> JSONResponse:
@@ -4386,7 +4387,9 @@ async def unsure_list(request: Request) -> JSONResponse:
     :func:`ciao.unsure_list.read_list`) plus the file's display path. POST
     `{"workspace", "op": "tick" | "untick" | "remove", "id"}` changes the one
     item line with that id under the list's file lock and answers the list as
-    written. Every refusal carries a `code`: `line_changed` (409, the page
+    written; `{"workspace", "op": "restore", "line", "before"?, "after"?, "section"?}`
+    adds one unticked line back where the page removed it from (its Undo,
+    :func:`ciao.unsure_list.restore_line`). Every refusal carries a `code`: `line_changed` (409, the page
     reads again), `care_running` (423: the care run edits the file with its own
     tools, which do not take the lock), `not_plain_file` (422), `too_large`
     (413), `busy` (503, lock held past 2 s), `vault_unavailable` (503),
@@ -4407,7 +4410,14 @@ async def unsure_list(request: Request) -> JSONResponse:
         workspace = str(body.get("workspace", "")).strip()
         op = str(body.get("op", ""))
         target = str(body.get("id", ""))
-        if op not in ("tick", "untick", "remove") or not is_unsure_line_id(target):
+        line = body.get("line")
+        before = body.get("before", "")
+        after = body.get("after", "")
+        section = body.get("section", "")
+        if op == "restore":
+            if not all(isinstance(value, str) for value in (line, before, after, section)):
+                return _unsure_error("line is required", 400, "bad_request")
+        elif op not in ("tick", "untick", "remove") or not is_unsure_line_id(target):
             return _unsure_error("op and id are required", 400, "bad_request")
     else:
         workspace = request.query_params.get("workspace", "").strip()
@@ -4421,7 +4431,9 @@ async def unsure_list(request: Request) -> JSONResponse:
     if request.method == "POST" and _care_running(request, workspace):
         return _unsure_error("Workspace care is running and may be editing the list; try again when it finishes", 423, "care_running")
     try:
-        if request.method == "POST":
+        if request.method == "POST" and op == "restore":
+            payload = await asyncio.to_thread(restore_line, vault, str(line), str(before), str(after), str(section))
+        elif request.method == "POST":
             payload = await asyncio.to_thread(change_line, vault, op, target)
         else:
             payload = await asyncio.to_thread(read_list, vault)
