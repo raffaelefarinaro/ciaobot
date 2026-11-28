@@ -900,7 +900,16 @@ def test_the_needs_you_standard_lives_in_the_preamble_and_the_prompt_points_at_i
         text = _reference(name)
         assert "`note: " in text, name
         assert "`needs you: P" not in text, name
-    assert "Choose Optimize to trim it together. (path: AGENTS.md)" in _reference("curation-pass-2-regions.md")
+    regions = _reference("curation-pass-2-regions.md")
+    assert "Decide what to trim. (path: AGENTS.md)" in regions
+    assert "Choose Optimize" not in regions
+    # The item is written only for a region above 100% of its cap, and names only those.
+    assert "`pct` in `ciao memory status` (`data.regions.*.pct`) of 100.5 or more" in regions
+    assert "Name only the regions with `pct` of 100.5 or more" in regions
+    assert "Never write a percentage of 100% or less" in regions
+    assert "write no item when no region is above 100" in regions
+    assert "(a `note:` is enough for a region from 85 up to 100.5)" in regions
+    assert "at most a `note:`, never a needs-you item" in regions
 
 
 def _self_check_line() -> str:
@@ -948,7 +957,7 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
     assert _run_self_check(tmp_path, head + "\n".join(_REAL_RUN_ITEMS) + notes) == list(_REAL_RUN_ITEMS)
     sample = _reference("curation-report-example.md")
     rewritten = (
-        "1. Your always-loaded memory is nearly full (95% and 92%) and everything in it still matters. Choose Optimize to trim it together. (path: AGENTS.md)",
+        "1. Your always-loaded memory is nearly full (112% and 104%) and everything in it still matters. Decide what to trim. (path: AGENTS.md)",
         "2. 17 suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
         "3. A proposal would remove repeated lines from your guide. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/agents-md-trim-duplicates.md)",
     )
@@ -1022,7 +1031,7 @@ def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:
     # Each step that emits an item gives it with its path.
     for name, form in (
         ("curation-pass-1-unsure.md", "need one more step from you, such as adding a category in Settings. Choose Open Unsure to see them. (path: Workspace/Unsure.md)"),
-        ("curation-pass-2-regions.md", "(path: AGENTS.md)`, A and B as whole numbers"),
+        ("curation-pass-2-regions.md", "(path: AGENTS.md)`, as whole numbers"),
         ("curation-pass-3-stale-notes.md", "(path: Workspace/Proposals/<slug>.md)"),
         ("curation-pass-4-learnings.md", "(path: Workspace/Proposals/<slug>.md)"),
         ("curation-pass-6-hygiene.md", "(path: Workspace/Proposals/<slug>.md)"),
