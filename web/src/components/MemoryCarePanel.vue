@@ -56,10 +56,10 @@
                   type="button"
                   class="btn-small mc-action"
                   :class="{ 'btn-primary': needAction(item) === 'proposal' }"
-                  :aria-label="`${needActionLabel(needAction(item))}: ${item.title}`"
+                  :aria-label="`${actionLabel(item)}: ${item.title}`"
                   :data-path="item.path"
                   @click="act(item)"
-                >{{ needActionLabel(needAction(item)) }}</button>
+                >{{ actionLabel(item) }}</button>
                 <!-- Any other item is talked through: with its note pinned when it names one. -->
                 <button
                   v-else-if="needChat(item) !== 'none'"
@@ -167,6 +167,7 @@ import { useChangesStore } from '../stores/changes'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { memorySectionPath } from '../stores/memoryMap'
 import { useProjectStore } from '../stores/projects'
+import { useUnsureStore } from '../stores/unsure'
 
 /**
  * Memory → Workspace care: the last care run as the report file states it.
@@ -177,17 +178,19 @@ import { useProjectStore } from '../stores/projects'
  */
 const store = useProjectStore()
 const care = useCareReportStore()
+const unsure = useUnsureStore()
 const fileViewer = useFileViewerStore()
 const route = useRoute()
 const router = useRouter()
 
 const changes = useChangesStore()
-watch(() => store.activeWorkspace, ws => { care.show(ws); changes.show(ws) }, { immediate: true })
+watch(() => store.activeWorkspace, ws => { care.show(ws); unsure.show(ws); changes.show(ws) }, { immediate: true })
 let release: () => void = () => {}
 onMounted(() => {
   release = care.attach()
   // Opening the page re-reads it: the run may have moved since Home read it.
   void care.refresh()
+  void unsure.refresh()
   void changes.refresh()
 })
 onBeforeUnmount(() => release())
@@ -199,6 +202,12 @@ const summaryMeta = computed(() => (report.value ? careSummaryMeta(report.value)
 const stale = computed(() => (report.value ? careReportIsStale(report.value) : false))
 const lastRun = computed(() => (report.value ? careLastRunWords(report.value) : ''))
 const needs = computed(() => (report.value && !stale.value ? openNeeds(report.value) : []))
+/** Unsure lines waiting for the person now: the live count the sidebar badge shows, 0 until read. */
+const unsureWaiting = computed(() => (unsure.list && unsure.list.workspace === store.activeWorkspace ? unsure.list.counts.waiting : 0))
+/** An item's destination button: the report's sentence is a snapshot, so the Unsure button carries the live count. */
+function actionLabel(item: CareNeed): string {
+  return needActionLabel(needAction(item), unsureWaiting.value)
+}
 /**
  * A finished or stopped run with nothing left for the person says so in one
  * line. A run that stopped does not claim all is well: its blocked steps, with

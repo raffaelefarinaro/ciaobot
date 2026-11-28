@@ -5,7 +5,7 @@ import MemoryCarePanel from '../components/MemoryCarePanel.vue'
 import MemoryCareRail from '../components/MemoryCareRail.vue'
 import type { CareReport } from '../lib/careReport'
 import type { FixtureRoute } from './fixtureBoundary'
-import { careReports, careRoute, careRunPath, changesRoute, CARE_WORKSPACE } from './careFixture'
+import { careReports, careRoute, careRunPath, careUnsureRoute, changesRoute, CARE_WORKSPACE } from './careFixture'
 import { assertFenceQuiet, json, renderHome } from './homeWindowsFixture'
 
 type Canvas = Parameters<NonNullable<StoryObj['play']>>[0]['canvas']
@@ -45,7 +45,7 @@ function story(report: CareReport | CareReport[], options: { narrow?: boolean, p
     },
   })
   return {
-    parameters: { fixture: { routes: [careRoute(report), changesRoute(), schedulesRoute(!options.paused), ...(options.extra ?? [])] } },
+    parameters: { fixture: { routes: [careRoute(report), careUnsureRoute(), changesRoute(), schedulesRoute(!options.paused), ...(options.extra ?? [])] } },
     render: () => ({ components: { owner }, template: '<owner />' }),
   }
 }

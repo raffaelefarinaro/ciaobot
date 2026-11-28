@@ -24,11 +24,24 @@ enableAutoUnmount(afterEach)
 
 const SCHEDULE = `system-memory-curation@${CARE_WORKSPACE}`
 
+/** The Unsure list the page reads for the button's live count: `waiting` unticked lines, one ticked. */
+function unsureList(waiting: number) {
+  return {
+    workspace: CARE_WORKSPACE, path: `memory-vault/${CARE_WORKSPACE}/Workspace/Unsure.md`, found: true, items: [],
+    counts: { waiting, ticked: 1 },
+  }
+}
+
 function serve(...reports: CareReport[]) {
+  return serveWith(0, ...reports)
+}
+
+function serveWith(waiting: number, ...reports: CareReport[]) {
   const queue = [...reports]
   vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
     if (path.startsWith('/api/care-report')) return (queue.length > 1 ? queue.shift() : queue[0]) as never
     if (path.startsWith('/api/memory/changes')) return feedServed as never
+    if (path.startsWith('/api/memory/unsure')) return unsureList(waiting) as never
     if (path === '/api/schedules') return [] as never
     throw new Error(`unexpected GET ${path}`)
   })
@@ -173,6 +186,24 @@ describe('MemoryCarePanel', () => {
     // The footer is gone: its actions and the weekly line live in the Daily care window.
     expect(wrapper.find('.mc-foot').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('Weekly checks')
+  })
+
+  it('shows the live Unsure count on the button, not in the report\'s snapshot sentence', async () => {
+    serveWith(57, careReports.needsYou)
+    const wrapper = await mountPanel()
+    const row = wrapper.findAll('.mc-need')[2]
+    expect(row.get('.mc-need-title').text()).toBe('Suggestions are waiting for your decision.')
+    const open = row.get('button')
+    expect(open.text()).toBe('Open Unsure · 57')
+    expect(open.attributes('aria-label')).toBe('Open Unsure · 57: Suggestions are waiting for your decision.')
+    // Other items keep their plain labels.
+    expect(wrapper.findAll('.mc-need')[0].get('button').text()).toBe('Review proposal')
+  })
+
+  it('adds no number to the Unsure button while the list is empty', async () => {
+    serveWith(0, careReports.needsYou)
+    const wrapper = await mountPanel()
+    expect(wrapper.findAll('.mc-need')[2].get('button').text()).toBe('Open Unsure')
   })
 
   it('opens what each item names: the Unsure page, the trim chat for the guide, the report', async () => {

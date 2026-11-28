@@ -3,7 +3,8 @@ import { expect, waitFor } from 'storybook/test'
 import MemoryCarePanel from '../components/MemoryCarePanel.vue'
 import type { CareReport } from '../lib/careReport'
 import type { FixtureRoute } from './fixtureBoundary'
-import { careProposalRoutes, careReports, careRoute, changesRoute, CARE_PROPOSAL_PATH, CARE_WORKSPACE } from './careFixture'
+import { careProposalRoutes, careReports, careRoute, careUnsureRoute, changesRoute, CARE_PROPOSAL_PATH, CARE_WORKSPACE } from './careFixture'
+import { unsureFixtureList } from './unsureFixture'
 import { assertFenceQuiet, renderHome } from './homeWindowsFixture'
 
 type Canvas = Parameters<NonNullable<StoryObj['play']>>[0]['canvas']
@@ -27,7 +28,7 @@ function story(report: CareReport | CareReport[] | 'held' | 'failed', options: {
     },
   })
   return {
-    parameters: { fixture: { routes: [careRoute(report), changesRoute(), ...(options.extra ?? [])] } },
+    parameters: { fixture: { routes: [careRoute(report), careUnsureRoute(), changesRoute(), ...(options.extra ?? [])] } },
     render: () => ({ components: { owner }, template: '<owner />' }),
   }
 }
@@ -54,7 +55,9 @@ export const NeedsYou: Story = {
     expect(canvas.getByRole('heading', { name: 'What needs you' })).toBeTruthy()
     expect(canvas.getByRole('button', { name: /^Review proposal: A proposal would trim your guide/ })).toBeTruthy()
     expect(canvas.getByRole('button', { name: /^Optimize: Your always-loaded memory/ })).toBeTruthy()
-    expect(canvas.getByRole('button', { name: /^Open Unsure: 13 suggestions/ })).toBeTruthy()
+    // The sentence carries no number (the report is a snapshot); the button carries the live count, the sidebar badge's.
+    const waiting = unsureFixtureList(CARE_WORKSPACE).counts.waiting
+    await waitFor(() => expect(canvas.getByRole('button', { name: `Open Unsure · ${waiting}: Suggestions are waiting for your decision.` })).toBeTruthy())
     // A proposal, the guide and Unsure each have one destination; the item about a real note is decided in a chat,
     // with Open note and its report section beside it, each at the 44px floor.
     expect(canvas.queryAllByRole('button', { name: /^Fix with a chat: / })).toHaveLength(0)
