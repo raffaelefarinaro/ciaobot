@@ -537,7 +537,11 @@ For composer drag-and-drop changes, test the desktop-drop grant path end to
 end. Drops preserve the source file and add Markdown companions, and return
 bounded opaque file references rather than absolute paths; the server expands a
 reference only when building the provider prompt. The generic ProjectView
-upload remains unchanged.
+upload remains unchanged. *Use in place* needs the Mac app on its own engine
+(a browser never sees a path): run `ciao-dev-install`, drag a file and a folder
+from Finder onto the chat's **Use in place** zone, check the chips say *in place*,
+nothing lands in the project folder, and the sent message names the real paths;
+then drop on **Attach a copy** and check the old upload still runs.
 
 For security changes, the boundary is one origin and one session: every
 `/api/*` route needs the signed cookie (minus the small public allowlist in
