@@ -284,9 +284,9 @@ describe('MemoryCategoriesPanel', () => {
     expect((drawer.get('#cat-id').element as HTMLInputElement).readOnly).toBe(true)
     expect(drawer.find('.cat-btn--danger').exists()).toBe(false)
     expect(drawer.text()).toContain('can be turned off, but not deleted')
-    // The scope note is here so the stored folder and aliases are not read as
-    // behaviour that already follows from them.
-    expect(drawer.get('.cat-scope').text()).toContain('once that wiring lands')
+    // The drawer says what the folder and aliases do.
+    expect(drawer.get('.cat-scope').text()).toContain('where new notes of this kind are filed')
+    expect(drawer.get('.cat-scope').text()).not.toContain('wiring')
 
     await drawer.get('#cat-label').setValue('Human')
     apiPatch.mockResolvedValue(body([row({ label: 'Human' }), STOCK[1]!, STOCK[2]!]))
@@ -406,23 +406,36 @@ describe('MemoryCategoriesPanel', () => {
     wrapper.unmount()
   })
 
-  it('explains regions and note categories without changing or saving the registry', async () => {
-    // The reading is education, not a control: it teaches what a bounded region
-    // and a note category are, with examples, and it lives above the controls so
-    // the user's own list is the only thing that can change the registry.
+  it('explains when and where notes are saved without changing or saving the registry', async () => {
+    // The reading is education, not a control: it says what a category is, when
+    // a note is filed and where it goes, and it lives above the controls so the
+    // user's own list is the only thing that can change the registry.
     const wrapper = await mountPanel([...STOCK, ...SYSTEM])
 
+    expect(wrapper.get('.cat-lede').text()).toContain('usually with its own folder')
+    expect(wrapper.get('.cat-lede').text()).toContain('type:')
     const why = wrapper.get('.cat-why')
-    expect(why.text()).toContain('How memory is organized')
-    expect(why.text()).toContain('Profile & preferences')
-    expect(why.text()).toContain('bounded')
-    expect(why.text()).toContain('Notes, by category')
-    // One example of each kind, so the distinction is concrete rather than named.
-    expect(why.text()).toContain('jargon-free')
-    expect(why.text()).toContain('who someone is')
-    // A category organizes future notes; it is not an instruction to remember all.
-    expect(why.text()).toContain('future')
-    expect(why.text()).toContain('no empty folder is created')
+    expect(why.text()).toContain('When and where notes are saved')
+    expect(why.text()).toContain('After you archive a chat')
+    expect(why.text()).toContain('Workspace care tidies once a day')
+    expect(why.text()).toContain('nothing is saved for it until you approve')
+    expect(why.text()).toContain('Nothing from an automated run is saved')
+    expect(why.text()).toContain('People/<name>.md')
+    expect(why.text()).toContain('Workspace/Learnings.md')
+    expect(why.text()).toContain('waits on the Unsure list until it has shown up in three')
+    expect(why.text()).toContain('raised on the Unsure list as a question to add one')
+    expect(why.text()).toContain('AGENTS.md')
+    expect(why.text()).toContain('No empty folders are created')
+    // The always-loaded block is a clause, not the lead.
+    expect(why.text()).not.toContain('Profile & preferences')
+
+    // The link leaves the app for the site's categories section, as the sidebar's does.
+    const link = why.get('a.cat-why-link')
+    expect(link.text()).toBe('Read how memory works')
+    expect(link.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/memory.html#categories')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toBe('noopener noreferrer')
+    expect(link.attributes('aria-label')).toBe('Read how memory works, opens the website in a new tab')
 
     // Static text: reading it neither saves nor requests anything.
     expect(apiPatch).not.toHaveBeenCalled()
@@ -446,7 +459,7 @@ describe('MemoryCategoriesPanel', () => {
     await nextTick()
 
     expect(wrapper.get('.skeleton').attributes('aria-label')).toBe('Loading categories')
-    expect(wrapper.get('.cat-why').text()).toContain('Notes, by category')
+    expect(wrapper.get('.cat-why').text()).toContain('When and where notes are saved')
     // …and it never reads as a claim about a vault with nothing in it.
     expect(wrapper.text()).not.toContain('no categories yet')
 
@@ -458,7 +471,7 @@ describe('MemoryCategoriesPanel', () => {
     await flushPromises()
     await nextTick()
 
-    expect(failed.get('.cat-why').text()).toContain('Profile & preferences')
+    expect(failed.get('.cat-why').text()).toContain('When and where notes are saved')
     expect(failed.get('.cat-failed-text').text()).toBe('vault unavailable')
     expect(failed.get('.cat-failed').get('.cat-btn').text()).toBe('Retry')
     expect(failed.text()).not.toContain('no categories yet')
