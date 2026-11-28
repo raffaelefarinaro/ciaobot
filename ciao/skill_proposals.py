@@ -11,8 +11,9 @@ Reading follows the care report's rules (:mod:`ciao.care_report`): `Workspace`
 and `Proposals` are opened without following a link, each file is opened
 relative to its folder with `O_NOFOLLOW`, must be a regular file with one link,
 and is read up to the proposal size cap. Never raises. A file holding
-credential-shaped text is listed with its path only (`withheld`), so the
-value never reaches the page.
+credential-shaped text (by `redact_text`'s rules, on each line, each decoded
+field and each word) is listed with its path only (`withheld`), so the value
+never reaches the page.
 """
 
 from __future__ import annotations
@@ -31,8 +32,12 @@ from ciao.redact import redact_text
 PROPOSALS_PARTS = ("Workspace", proposal_files.PROPOSALS_DIR)
 OPEN_STATUSES = ("draft", "ready")
 SKILL_EDIT = "skill-edit"
-# A real folder holds a handful; past this the rest are not read.
-MAX_FILES = 200
+# A real folder holds a handful. At most MAX_ITEMS open skill edits are listed,
+# and at most MAX_READS proposal files are read to find them (applied,
+# rejected and other kinds count toward the reads only).
+MAX_ITEMS = 200
+MAX_READS = 1000
+_WORD_EDGES = "\"'`()[]{}<>,;."
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\.md")
 _TEXT_FIELDS = ("target", "title", "summary", "rationale", "proposed_change")
 
@@ -85,6 +90,39 @@ def _date(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [entry for item in value for entry in _strings(item)]
+    if isinstance(value, dict):
+        return [entry for item in value.values() for entry in _strings(item)]
+    return []
+
+
+def _shaped(text: str) -> bool:
+    return redact_text(text) != text
+
+
+def _credential_shaped(text: str, fields: dict[str, Any], body: str) -> bool:
+    """Whether the file holds anything `redact_text` would redact.
+
+    Checked on each raw line (what `ciao proposal-check` checks), and again on
+    each decoded front matter string and each word of it and of the body, so a
+    token behind a harmless label (`key is <blob>`) or one spelled with YAML
+    escapes is caught too. A short token with no credential shape still passes:
+    these are `redact_text`'s rules, not a secret scanner.
+    """
+    if any(_shaped(line) for line in text.splitlines()):
+        return True
+    for value in [*_strings(fields), body]:
+        if _shaped(value):
+            return True
+        if any(_shaped(word.strip(_WORD_EDGES)) for word in value.split()):
+            return True
+    return False
+
+
 def _item(name: str, text: str) -> dict[str, Any] | None:
     """One file as the page shows it, or None when it is not an open skill edit."""
     parsed = proposal_files.read_front_matter(text)
@@ -95,7 +133,7 @@ def _item(name: str, text: str) -> dict[str, Any] | None:
         return None
     path = "/".join((*PROPOSALS_PARTS, name))
     problems = proposal_files.check(text, filename=name, parent=proposal_files.PROPOSALS_DIR)
-    if any(redact_text(line) != line for line in text.splitlines()):
+    if _credential_shaped(text, fields, body):
         return {
             "path": path, "withheld": True, "status": fields["status"], "created": _date(fields.get("created")),
             "type": SKILL_EDIT, "target": "", "title": "", "summary": "", "rationale": "",
@@ -125,11 +163,19 @@ def read_skill_proposals(vault_root: Path) -> dict[str, Any]:
     `found` is false when the folder is missing or is not a plain folder;
     `skipped` counts proposal-named files that could not be read safely
     (a link, too large, unreadable). Items are newest `created` first.
+    `truncated` is true when the list stopped at `MAX_ITEMS` open skill edits
+    or after `MAX_READS` files.
     """
     found, names = _list_names(vault_root)
     items: list[dict[str, Any]] = []
     skipped = 0
-    for name in names[:MAX_FILES]:
+    reads = 0
+    truncated = False
+    for name in names:
+        if len(items) >= MAX_ITEMS or reads >= MAX_READS:
+            truncated = True
+            break
+        reads += 1
         try:
             status, raw, _mtime = _read_bounded(vault_root, (*PROPOSALS_PARTS, name))
         except (OSError, ValueError, RuntimeError):
@@ -148,5 +194,5 @@ def read_skill_proposals(vault_root: Path) -> dict[str, Any]:
         "items": items,
         "counts": {"waiting": len(items)},
         "skipped": skipped,
-        "truncated": len(names) > MAX_FILES,
+        "truncated": truncated,
     }

@@ -344,7 +344,8 @@ async function reject(item: SkillProposalItem): Promise<void> {
       return !care.report?.running && items.value.some(i => i.path === item.path)
     })
     if (outcome.kind === 'rejected') {
-      lastReject.value = { path: item.path, openPath: item.open_path, previous: outcome.previous, title: skillTitle(item) }
+      // The engine's own read of the status, not this page's parse of the file.
+      lastReject.value = { path: item.path, openPath: item.open_path, previous: item.status, title: skillTitle(item) }
       text = `Rejected “${skillTitle(item)}”.`
       undoable = true
     } else {

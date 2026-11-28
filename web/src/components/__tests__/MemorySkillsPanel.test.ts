@@ -65,15 +65,17 @@ function serve(list: SkillProposalList) {
 }
 
 /** The proposal files as `/api/workspace-file` serves and saves them. */
-function files(statuses: Record<string, string>) {
-  const saved: { path: string; content: string }[] = []
+function files(statuses: Record<string, string>, options: { changedOnSave?: boolean } = {}) {
+  const saved: { path: string; content: string; expected_content: string }[] = []
   const text = (path: string) => [
     '---', 'type: skill-edit', 'target: weekly-summary', 'title: T', 'summary: S', 'rationale: R',
     'evidence:', '  - chat-a290cb48', 'proposed_change: C', 'created: 2026-11-26', `status: ${statuses[path]}`, '---', '', 'Body', '',
   ].join('\n')
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
-      const body = JSON.parse(String(init.body)) as { path: string; content: string }
+      const body = JSON.parse(String(init.body)) as { path: string; content: string; expected_content: string }
+      // The engine's check: the file must still hold the text the page read.
+      if (options.changedOnSave || body.expected_content !== text(body.path)) return new Response('{"code":"file_changed"}', { status: 409 })
       saved.push(body)
       statuses[body.path] = /status: (\w+)/.exec(body.content)![1]
       return new Response('{"ok":true}', { status: 200 })
@@ -172,8 +174,8 @@ describe('MemorySkillsPanel', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('D rejects: only the status line is saved, the next one opens, and Undo puts it back', async () => {
-    serve(listOf([item('a'), item('b')]))
+  it('D rejects: only the status line is saved, the next one opens, and Undo puts back the status the engine listed', async () => {
+    serve(listOf([item('a', { status: 'ready' }), item('b')]))
     const statuses: Record<string, string> = { [`${VAULT}/Workspace/Proposals/a.md`]: 'ready' }
     const { saved } = files(statuses)
     const wrapper = await mountPanel()
@@ -197,8 +199,38 @@ describe('MemorySkillsPanel', () => {
     await flushPromises()
     expect(saved).toHaveLength(2)
     expect(saved[1].content).toContain('status: ready')
+    expect(saved[0].expected_content).toContain('status: ready')
+    expect(saved[1].expected_content).toContain('status: rejected')
     expect(titles(wrapper)).toEqual(['Suggestion a', 'Suggestion b'])
     expect(detailTitle(wrapper)).toBe('Suggestion a')
+  })
+
+  it('writes nothing when the file changed between the read and the save', async () => {
+    serve(listOf([item('a')]))
+    const { saved } = files({ [`${VAULT}/Workspace/Proposals/a.md`]: 'draft' }, { changedOnSave: true })
+    const wrapper = await mountPanel()
+    await button(wrapper, 'Reject: Suggestion a').trigger('click')
+    await flushPromises()
+    expect(saved).toHaveLength(0)
+    expect(wrapper.text()).toContain('This proposal was already decided or changed, so nothing was written.')
+    expect(wrapper.find('[data-skills-notice] .rq-undo').exists()).toBe(false)
+  })
+
+  it('links evidence notes under a vault at the workspace root and under an absolute vault', async () => {
+    serve(listOf([
+      item('a', { open_path: 'Workspace/Proposals/a.md', evidence: ['People/Mo.md'] }),
+      item('b', { open_path: '/Users/me/vault/Workspace/Proposals/b.md', evidence: ['People/Mo.md'] }),
+    ]))
+    files({})
+    const wrapper = await mountPanel()
+    const { useFileViewerStore } = await import('../../stores/fileViewer')
+    const open = vi.spyOn(useFileViewerStore(), 'open').mockResolvedValue(undefined as never)
+    await wrapper.get('.rvs li button').trigger('click')
+    expect(open).toHaveBeenLastCalledWith('People/Mo.md')
+    press('s')
+    await flushPromises()
+    await wrapper.get('.rvs li button').trigger('click')
+    expect(open).toHaveBeenLastCalledWith('/Users/me/vault/People/Mo.md')
   })
 
   it('never overwrites a proposal decided meanwhile', async () => {

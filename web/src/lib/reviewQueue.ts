@@ -23,17 +23,25 @@ export function sourceKey(source: ReviewSource): string {
 
 /**
  * A path relative to `base` (a folder the viewer can open), resolved; '' when
- * it is absolute, has a scheme, or climbs out of `root`.
+ * it is absolute, has a scheme, or climbs out of `root`. `root` is the vault
+ * as the file viewer names it: workspace-relative (`memory-vault/work`), ''
+ * for a vault at the workspace root, or absolute (`/Users/me/vault`, whose
+ * leading `/` is kept).
  */
 export function resolveUnder(root: string, base: string, relative: string): string {
   if (!relative || /^[a-z][a-z0-9+.-]*:/i.test(relative) || relative.startsWith('/') || relative.startsWith('~')) return ''
+  const lead = base.startsWith('/') ? '/' : ''
   const parts = base.split('/').filter(Boolean)
+  const floor = root.split('/').filter(Boolean).length
   for (const piece of relative.split('#')[0].split('/')) {
     if (!piece || piece === '.') continue
-    if (piece === '..') parts.pop()
-    else parts.push(piece)
+    if (piece === '..') {
+      if (parts.length <= floor) return ''
+      parts.pop()
+    } else parts.push(piece)
   }
-  const path = parts.join('/')
+  const path = lead + parts.join('/')
+  if (!root) return path
   return path === root || path.startsWith(`${root}/`) ? path : ''
 }
 

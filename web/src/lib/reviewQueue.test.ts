@@ -46,6 +46,19 @@ describe('reviewQueue', () => {
     expect(resolveUnder('v', 'v', '../../etc/passwd')).toBe('')
     expect(resolveUnder('v', 'v', '/etc/passwd')).toBe('')
     expect(resolveUnder('v', 'v', 'javascript:alert(1)')).toBe('')
+    expect(resolveUnder('memory-vault/work', 'memory-vault/work', '../other/x.md')).toBe('')
+  })
+
+  it('resolves under a vault at the workspace root and under an absolute vault', () => {
+    // A vault registered as `.`: the file viewer names its files workspace-relative.
+    expect(resolveUnder('', '', 'People/Mo.md')).toBe('People/Mo.md')
+    expect(resolveUnder('', 'Workspace', '../People/Mo.md')).toBe('People/Mo.md')
+    expect(resolveUnder('', '', '../outside.md')).toBe('')
+    expect(resolveUnder('', 'Workspace', '../../outside.md')).toBe('')
+    // A vault outside the workspace: an absolute path keeps its leading slash.
+    expect(resolveUnder('/Users/me/vault', '/Users/me/vault', 'People/Mo.md')).toBe('/Users/me/vault/People/Mo.md')
+    expect(resolveUnder('/Users/me/vault', '/Users/me/vault/Workspace', '../People/Mo.md')).toBe('/Users/me/vault/People/Mo.md')
+    expect(resolveUnder('/Users/me/vault', '/Users/me/vault', '../secret.md')).toBe('')
   })
 
   it('names every kind of source by its own identity', () => {

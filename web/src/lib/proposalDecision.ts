@@ -9,7 +9,8 @@
  * - Reject re-reads the engine's view and the file, writes nothing when either
  *   now says the proposal is decided, and otherwise changes only the file's
  *   `status:` line, saved through the file viewer's own path
- *   (`POST /api/workspace-file`).
+ *   (`POST /api/workspace-file` with `expected_content`, the text it just
+ *   read, so an edit made in between is never overwritten).
  * - Undo of a Reject puts the previous status back the same way, only while
  *   the file still says `rejected`.
  */
@@ -27,14 +28,21 @@ export async function readProposalFile(openPath: string): Promise<string> {
   return resp.text()
 }
 
-async function saveProposalFile(openPath: string, content: string): Promise<void> {
+/**
+ * Save `content` only over the text this page read (`expected`): the engine
+ * answers 409 when the file changed in between, and nothing is written.
+ * Resolves false then; throws on any other refusal.
+ */
+async function saveProposalFile(openPath: string, content: string, expected: string): Promise<boolean> {
   const resp = await fetch('/api/workspace-file', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path: openPath, content }),
+    body: JSON.stringify({ path: openPath, content, expected_content: expected }),
   })
+  if (resp.status === 409) return false
   if (!resp.ok) throw new Error(`Could not save the file (HTTP ${resp.status}).`)
+  return true
 }
 
 /** Open the attended chat that makes the change; null when it could not be opened (a toast says why). */
@@ -51,7 +59,7 @@ export function approveProposal(
 }
 
 export type RejectOutcome =
-  | { kind: 'rejected'; previous: string }
+  | { kind: 'rejected' }
   /** The engine or the file now says it was decided, or it changed: nothing was written. */
   | { kind: 'decided'; fresh: Proposal }
   /** The file is no longer in the proposal format: nothing was written. */
@@ -70,13 +78,14 @@ export async function rejectProposal(openPath: string, engineStillOpen: () => Pr
   if (!stillOpen || !proposalIsOpen(fresh.status)) return { kind: 'decided', fresh }
   const next = withProposalStatus(current, 'rejected')
   if (next === null) throw new Error('This file is not in the proposal format, so it was left as it is.')
-  await saveProposalFile(openPath, next)
-  return { kind: 'rejected', previous: fresh.status }
+  if (!(await saveProposalFile(openPath, next, current))) return { kind: 'decided', fresh }
+  return { kind: 'rejected' }
 }
 
 /**
- * Undo a Reject: put `previous` back, only while the file still says
- * `rejected`. Resolves '' when written, else a sentence for the person.
+ * Undo a Reject: put `previous` back (the status the engine listed, `draft`
+ * or `ready`), only while the file still says `rejected` and has not changed
+ * since this read. Resolves '' when written, else a sentence for the person.
  */
 export async function unrejectProposal(openPath: string, previous: string): Promise<string> {
   const status = previous === 'ready' ? 'ready' : 'draft'
@@ -85,6 +94,6 @@ export async function unrejectProposal(openPath: string, previous: string): Prom
   if (!fresh || fresh.status !== 'rejected') return 'The proposal file changed since, so nothing was undone.'
   const next = withProposalStatus(current, status)
   if (next === null) return 'The proposal file changed since, so nothing was undone.'
-  await saveProposalFile(openPath, next)
+  if (!(await saveProposalFile(openPath, next, current))) return 'The proposal file changed since, so nothing was undone.'
   return ''
 }

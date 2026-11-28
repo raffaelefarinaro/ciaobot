@@ -119,6 +119,8 @@ describe('proposal files', () => {
 
   it('finds the vault folder from the proposal path and can put an open status back', () => {
     expect(proposalVaultRoot('memory-vault/work/Workspace/Proposals/a.md')).toBe('memory-vault/work')
+    expect(proposalVaultRoot('Workspace/Proposals/a.md')).toBe('')
+    expect(proposalVaultRoot('/Users/me/vault/Workspace/Proposals/a.md')).toBe('/Users/me/vault')
     expect(withProposalStatus(FILE, 'draft')).toBe(FILE.replace('status: ready  # set by care', 'status: draft'))
   })
 })

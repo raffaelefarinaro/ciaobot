@@ -11,7 +11,7 @@ import type { SkillProposalItem } from '../../src/lib/skillProposals'
  * status line, Undo, the sidebar count and the phone card are checked in a
  * real layout.
  */
-type State = { items: SkillProposalItem[]; statuses: Record<string, string>; saves: Array<{ path: string; content: string }> }
+type State = { items: SkillProposalItem[]; statuses: Record<string, string>; saves: Array<{ path: string; content: string; expected_content?: string }> }
 
 const ITEMS = skillFixtureItems('alpha')
 const [FIRST, SECOND] = ITEMS
@@ -31,7 +31,13 @@ async function answer(page: Page, items: SkillProposalItem[] = ITEMS): Promise<S
   await page.route(/\/api\/workspace-file(\?.*)?$/, async (route: Route) => {
     const request = route.request()
     if (request.method() === 'POST') {
-      const body = request.postDataJSON() as { path: string; content: string }
+      const body = request.postDataJSON() as { path: string; content: string; expected_content?: string }
+      const item = state.items.find(i => i.open_path === body.path)!
+      // The engine's conditional save: only over the text the page read.
+      if (body.expected_content !== fileText(item, state.statuses[body.path])) {
+        await route.fulfill({ status: 409, contentType: 'application/json', body: '{"code":"file_changed"}' })
+        return
+      }
       state.saves.push(body)
       state.statuses[body.path] = /^status: (\w+)$/m.exec(body.content)![1]
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })

@@ -473,6 +473,8 @@ describe('MemoryCarePanel', () => {
     expect(saved).toHaveLength(1)
     expect(saved[0].path).toBe(`memory-vault/storybook-alpha/${CARE_PROPOSAL_PATH}`)
     expect(saved[0].content).toBe(PROPOSAL_FILE.replace('status: draft', 'status: rejected'))
+    // The save is conditional on the text the review just read.
+    expect((saved[0] as { expected_content?: string }).expected_content).toBe(PROPOSAL_FILE)
     expect(startFileDiscussion).not.toHaveBeenCalled()
     expect(wrapper.get('.cpr-status').text()).toBe('Rejected.')
     expect(wrapper.text()).toContain('This proposal was rejected. Nothing else was changed.')

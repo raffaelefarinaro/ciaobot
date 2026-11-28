@@ -101,6 +101,25 @@ def test_credential_shaped_text_is_withheld(tmp_path: Path) -> None:
     assert any("credential-shaped" in problem for problem in item["problems"])
 
 
+@pytest.mark.parametrize("change", [
+    # A token behind a label redact_text does not know.
+    "'Use the key ghp_" + "a" * 40 + " when calling the API'",
+    # The same token spelled with YAML escapes: the raw line carries no token.
+    '"Use the key \\x67hp_' + "a" * 40 + '"',
+])
+def test_a_token_in_a_decoded_field_is_withheld(tmp_path: Path, change: str) -> None:
+    _write(tmp_path, "leaky.md", proposal(change=change))
+    [item] = sp.read_skill_proposals(tmp_path)["items"]
+    assert item["withheld"] is True
+    assert "a" * 40 not in repr(item)
+
+
+def test_ordinary_prose_is_not_withheld(tmp_path: Path) -> None:
+    _write(tmp_path, "plain.md", proposal(change="'Add a step: ask which dates to cover, then collect notes (see Workspace/Care-Report.md).'"))
+    [item] = sp.read_skill_proposals(tmp_path)["items"]
+    assert item["withheld"] is False
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
 def test_links_are_never_followed(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
@@ -126,8 +145,23 @@ def test_an_oversized_file_is_skipped(tmp_path: Path) -> None:
     assert body["items"] == [] and body["skipped"] == 1
 
 
-def test_only_the_first_files_are_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sp, "MAX_FILES", 2)
+def test_only_open_skill_edits_count_toward_the_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sp, "MAX_ITEMS", 2)
+    # Decided and other-kind files sort first and must not use up the cap.
+    for n in range(3):
+        _write(tmp_path, f"a-done-{n}.md", proposal(status="rejected"))
+        _write(tmp_path, f"b-guide-{n}.md", proposal(kind="guide-edit"))
+    _write(tmp_path, "c-open.md", proposal(title="Open one"))
+    body = sp.read_skill_proposals(tmp_path)
+    assert [i["title"] for i in body["items"]] == ["Open one"] and body["truncated"] is False
+    for n in range(2):
+        _write(tmp_path, f"d-open-{n}.md", proposal(title=f"More {n}"))
+    body = sp.read_skill_proposals(tmp_path)
+    assert len(body["items"]) == 2 and body["truncated"] is True
+
+
+def test_reads_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sp, "MAX_READS", 2)
     for n in range(3):
         _write(tmp_path, f"p-{n}.md", proposal(title=f"P{n}"))
     body = sp.read_skill_proposals(tmp_path)
@@ -172,3 +206,28 @@ def test_route_requires_a_session_and_a_known_workspace(setup: SimpleNamespace) 
     body = setup.client.get("/api/memory/skill-proposals?workspace=personal&path=/etc").json()
     assert body["items"] == [] and body["found"] is False
     assert setup.client.post("/api/memory/skill-proposals", json={}).status_code == 405
+
+
+def test_a_conditional_save_writes_only_over_the_text_it_read(setup: SimpleNamespace) -> None:
+    setup.app.state.project_chat_manager = SimpleNamespace(get_chat=lambda _chat_id: None)
+    path = _write(setup.root / "memory-vault" / "personal", "ask-dates.md", proposal())
+    rel = "memory-vault/personal/Workspace/Proposals/ask-dates.md"
+    read = path.read_text(encoding="utf-8")
+    rejected = read.replace("status: draft", "status: rejected")
+    # Someone edited the file after the page read it: nothing is written.
+    edited = read.replace("More detail.", "Edited meanwhile.")
+    path.write_text(edited, encoding="utf-8")
+    stale = setup.client.post("/api/workspace-file", json={"path": rel, "content": rejected, "expected_content": read})
+    assert stale.status_code == 409 and stale.json()["code"] == "file_changed"
+    assert path.read_text(encoding="utf-8") == edited
+    # The text it read is still there: the save goes through.
+    path.write_text(read, encoding="utf-8")
+    ok = setup.client.post("/api/workspace-file", json={"path": rel, "content": rejected, "expected_content": read})
+    assert ok.status_code == 200
+    assert path.read_text(encoding="utf-8") == rejected
+    # A missing file never matches, and a non-text expectation is refused.
+    gone = "memory-vault/personal/Workspace/Proposals/gone.md"
+    assert setup.client.post("/api/workspace-file", json={"path": gone, "content": "x", "expected_content": ""}).status_code == 409
+    assert setup.client.post("/api/workspace-file", json={"path": rel, "content": "x", "expected_content": 1}).status_code == 400
+    # Without the field the save is unconditional, as before.
+    assert setup.client.post("/api/workspace-file", json={"path": rel, "content": read}).status_code == 200
