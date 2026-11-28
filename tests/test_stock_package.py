@@ -958,7 +958,7 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
     sample = _reference("curation-report-example.md")
     rewritten = (
         "1. Your always-loaded memory is nearly full (112% and 104%) and everything in it still matters. Decide what to trim. (path: AGENTS.md)",
-        "2. 17 suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
+        "2. Suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
         "3. A proposal would remove repeated lines from your guide. Choose Review proposal, then Approve or Reject. (path: Workspace/Proposals/agents-md-trim-duplicates.md)",
     )
     for item in rewritten:
@@ -994,6 +994,8 @@ def test_the_self_check_prints_the_real_runs_items_and_passes_the_standard(tmp_p
         "1. The closed-tasks pass read three tasks. (path: AGENTS.md)",
         "1. " + "word " * 60 + "(path: AGENTS.md)",
         "1. Choose Optimize to trim it together.",
+        # A count is a snapshot of the last run: the app shows the live one on the button.
+        "1. 17 suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
         "1. 5 files have no header. Decide whether to ignore their folder. (path: Workspace/Care-Report.md)",
         "1. Links point outside this vault. Decide what to keep. (Path: Workspace/Care-Report.md) ",
         "1. Links point outside this vault. Decide what to keep. (path: Workspace/Care-Report.md; section: Hygiene)",
@@ -1020,12 +1022,14 @@ def test_the_care_prompt_makes_the_orchestrator_run_the_self_check() -> None:
     assert "read its What needs you section; rewrite a line that breaks it" in prompt
     assert "Run the preamble's self-check, rewrite each item it prints, and run it once more" in prompt
     preamble = _reference("step-preamble.md")
+    assert "no number" in preamble and "shows the live count on the Open Unsure button" in preamble
+    assert "N suggestions" not in preamble and "N suggestions" not in _reference("curation-report-example.md")
     for rule in (
         "Copy a step's `needs you:` text without that lead when it follows the rules above, and rewrite it when it does not",
         "Rewrite each item it prints, add a missing item, and run it once more",
         "never rename or move a file to pass the check",
         "No backticks or other Markdown",
-        "N suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
+        "Suggestions are waiting for your decision. Open Memory > Unsure and approve or reject them. (path: Workspace/Unsure.md)",
     ):
         assert rule in preamble, rule
     # Each step that emits an item gives it with its path.

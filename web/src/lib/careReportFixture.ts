@@ -69,7 +69,7 @@ export const careReports = {
     needs_you: [
       need('A proposal would trim your guide: it removes an outdated status section and a repeated folder path.', 'Choose Review proposal, then Approve or Reject.', CARE_PROPOSAL_PATH, 'draft'),
       need('Your always-loaded memory is nearly full (112% and 104%) and everything in it still matters.', 'Decide what to trim.', 'AGENTS.md'),
-      need('13 suggestions are waiting in Unsure, such as which brief template to keep, a project\'s status and a new People page.', 'Open Memory > Unsure and approve or reject them.', 'Workspace/Unsure.md'),
+      need('Suggestions are waiting for your decision.', 'Open Memory > Unsure and approve or reject them.', 'Workspace/Unsure.md'),
       need('Links in People/User.md and 3 other notes point outside this vault.', 'Decide whether each should stay or be removed.', 'People/User.md', '', 'Hygiene'),
     ],
     notes: [
@@ -120,7 +120,7 @@ export const careReports = {
       step('hygiene', 'blocked', 'vault index and audit', 'cannot write INDEX.md'),
     ],
     needs_you: [
-      need('13 suggestions are waiting in Unsure.', 'Open Memory > Unsure and approve or reject them.', 'Workspace/Unsure.md'),
+      need('Suggestions are waiting for your decision.', 'Open Memory > Unsure and approve or reject them.', 'Workspace/Unsure.md'),
     ],
     notes: ['Re-checking older notes did not finish.'],
     running: { since: '2026-11-27T17:52:00Z', step: '', index: 0, total: 0 },
