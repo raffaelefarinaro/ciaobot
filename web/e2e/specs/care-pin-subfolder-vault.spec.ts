@@ -99,14 +99,14 @@ test.describe('chats that pin a file, on a subfolder vault', () => {
     await page.setViewportSize({ width: 1280, height: 900 })
   })
 
-  const fixes = [
-    ['the report item', 3, `${INSTALL}/${VAULT}/Workspace/Care-Report.md`, 'Care: 4 notes need a decision the'],
+  const decisions = [
+    ['the note item', 3, `${INSTALL}/${VAULT}/People/User.md`, 'Care: Links in People/User.md and 3'],
   ] as const
-  for (const [label, index, pin, title] of fixes) {
-    test(`Fix with a chat on ${label} pins the file, with a plain title`, async ({ page }) => {
+  for (const [label, index, pin, title] of decisions) {
+    test(`Decide in a chat on ${label} pins the note, with a plain title`, async ({ page }) => {
       const seen = await engine(page)
       await boot(page, '/memory/care', '.mc-need')
-      await page.locator('.mc-need').nth(index).locator('.mc-fix').click()
+      await page.locator('.mc-need').nth(index).getByRole('button', { name: /^Decide in a chat: / }).click()
       await settled(page, seen, pin)
       expect(seen.creates).toHaveLength(1)
       expect(seen.creates[0].title.startsWith(title.replace(/[:,]$/, ''))).toBe(true)
