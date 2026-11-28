@@ -325,6 +325,10 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       .filter(n => n.stale && activeCats.has(catKeyFor(n)))
       .sort((a, b) => (b.ageDays ?? 0) - (a.ageDays ?? 0)),
   )
+  // The button that turns the filter off only exists while some note is
+  // unchecked; with none left (categories removed, another workspace loaded)
+  // an on filter would hide every note with nothing on screen to clear it.
+  watch(() => staleNotes.value.length, (n) => { if (n === 0) staleFilter.value = false }, { flush: 'sync' })
   /**
    * Notes holding at least one *fact* nobody has re-checked, which is not the
    * same list and is the reason this view cannot stop at `staleNotes`.
@@ -565,6 +569,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   function resetCategories() {
     activeCats.clear()
     categoryList.value.forEach(c => activeCats.add(c.key))
+    staleFilter.value = false
   }
   function selectNode(id: string | null) {
     selectedId.value = id

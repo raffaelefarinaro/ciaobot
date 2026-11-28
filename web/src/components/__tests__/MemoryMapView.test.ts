@@ -17,6 +17,7 @@ import { nextTick } from 'vue'
 import MemoryMapView from '../MemoryMapView.vue'
 import { useMemoryMapStore } from '../../stores/memoryMap'
 import { useProjectStore } from '../../stores/projects'
+import { fitCameraFor } from '../../lib/graphLayout'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -24,6 +25,13 @@ const apiPost = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/api', () => ({
   api: { get: apiGet, post: apiPost, patch: vi.fn(), del: vi.fn() },
 }))
+
+// Real layout maths, but observable: the camera tests below read what the
+// view asked it to frame.
+vi.mock('../../lib/graphLayout', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/graphLayout')>()
+  return { ...actual, fitCameraFor: vi.fn(actual.fitCameraFor) }
+})
 
 const Stub = { template: '<div />' }
 // The note tile is the pinned-file panel, which fetches and renders the file;
@@ -211,12 +219,18 @@ describe('MemoryMapView keyboard and touch access', () => {
     expect(wrapper.find('.page-rail').exists()).toBe(false)
     const stats = wrapper.get('.mm-toolbar-stats').text()
     expect(stats).toContain('2 notes')
-    expect(stats).toContain('1 links')
+    expect(stats).toContain('1 link')
+    expect(stats).not.toContain('1 links')
     // One orphan menu replaces the two toggle buttons.
     const filter = wrapper.get<HTMLSelectElement>('#mm-orphan-filter')
     expect(filter.findAll('option').map(o => o.text())).toEqual(['All notes', 'Linked only', 'Orphans only'])
     await filter.setValue('only')
     expect(useMemoryMapStore().orphanFilter).toBe('only')
+    // The notes figure follows the filter; links and unlinked stay the vault's
+    // own totals, so "Orphans only" does not claim the vault has no links.
+    const filtered = wrapper.get('.mm-toolbar-stats').text()
+    expect(filtered).toContain('0 notes')
+    expect(filtered).toContain('1 link')
     wrapper.unmount()
   })
 
@@ -770,16 +784,61 @@ describe('MemoryMapView stale notes', () => {
     const button = wrapper.get('button.mm-toolbar-stale')
     expect(button.text()).toContain('2')
     expect(button.attributes('aria-pressed')).toBe('false')
-    expect(button.attributes('title')).toBe('Notes not checked for a long time: show them')
+    // The accessible name starts with the visible words (label in name).
+    expect(button.attributes('aria-label')).toBe('2 unchecked: show only these notes')
+    expect(button.attributes('title')).toBe('Notes not checked for a long time: show only these')
 
     await button.trigger('click')
     expect(mm.staleFilter).toBe(true)
     expect(button.attributes('aria-pressed')).toBe('true')
+    expect(button.attributes('aria-label')).toBe('2 unchecked: show all notes')
+    // Two notes of the vault's three are on screen: the notes figure follows
+    // the filter, the unchecked figure keeps saying how many there are.
+    expect(wrapper.get('.mm-toolbar-stats').text()).toContain('2 notes')
+    expect(button.text()).toContain('2')
     expect(mm.visibleNodes.map(n => n.id).sort()).toEqual(['old', 'untouched'])
 
     await button.trigger('click')
     expect(mm.staleFilter).toBe(false)
     expect(mm.visibleNodes).toHaveLength(3)
+    wrapper.unmount()
+  })
+
+  it('re-frames the camera on the unchecked notes when the filter turns on and off', async () => {
+    const wrapper = await mountView('/memory/map')
+    await flushPromises()
+    await nextTick()
+    const fit = vi.mocked(fitCameraFor)
+    const framed = () => fit.mock.calls.at(-1)![0].map(n => n.id).sort()
+    expect(framed()).toEqual(['fresh', 'old', 'untouched'])
+
+    fit.mockClear()
+    await wrapper.get('button.mm-toolbar-stale').trigger('click')
+    await flushPromises()
+    expect(framed()).toEqual(['old', 'untouched'])
+
+    fit.mockClear()
+    await wrapper.get('button.mm-toolbar-stale').trigger('click')
+    await flushPromises()
+    expect(framed()).toEqual(['fresh', 'old', 'untouched'])
+    wrapper.unmount()
+  })
+
+  it('keeps the button while the filter is on and drops the filter with the last unchecked note', async () => {
+    const wrapper = await mountView('/memory/map')
+    await flushPromises()
+    await nextTick()
+    const mm = useMemoryMapStore()
+    await wrapper.get('button.mm-toolbar-stale').trigger('click')
+    expect(mm.staleFilter).toBe(true)
+
+    // Every unchecked note is a plain note: leaving that category out leaves
+    // no unchecked note, so nothing could turn the filter off by hand.
+    mm.toggleCategory('note')
+    await nextTick()
+    expect(mm.staleNotes).toHaveLength(0)
+    expect(mm.staleFilter).toBe(false)
+    expect(wrapper.find('button.mm-toolbar-stale').exists()).toBe(false)
     wrapper.unmount()
   })
 })

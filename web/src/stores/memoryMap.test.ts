@@ -205,6 +205,38 @@ describe('staleness', () => {
     expect(mm.visibleNodes).toHaveLength(3)
   })
 
+  test('the unchecked filter cannot outlive the notes it filters to', () => {
+    const mm = useMemoryMapStore()
+    mm.nodes = [
+      node('old', 1, { stale: true, ageDays: 400, type: 'project' }),
+      node('mid', 1, { stale: true, ageDays: 100, type: 'note' }),
+      node('fresh', 0, { type: 'note' }),
+    ]
+    mm.edges = []
+    mm.resetCategories()
+    mm.toggleStaleFilter()
+    expect(mm.staleFilter).toBe(true)
+
+    // One unchecked note left in view: the filter stays on.
+    mm.toggleCategory('project')
+    expect(mm.staleNotes.map(n => n.id)).toEqual(['mid'])
+    expect(mm.staleFilter).toBe(true)
+
+    // None left: the filter is off, so the notes come back rather than an empty map.
+    mm.toggleCategory('note')
+    expect(mm.staleNotes).toHaveLength(0)
+    expect(mm.staleFilter).toBe(false)
+    mm.resetCategories()
+    expect(mm.visibleNodes).toHaveLength(3)
+
+    // Reset puts the filter away too, with unchecked notes still present.
+    mm.toggleStaleFilter()
+    expect(mm.staleFilter).toBe(true)
+    mm.resetCategories()
+    expect(mm.staleFilter).toBe(false)
+    expect(mm.visibleNodes).toHaveLength(3)
+  })
+
   test('ageLabelOf stays quiet about notes with no usable date', () => {
     const mm = useMemoryMapStore()
     expect(mm.ageLabelOf(node('a', 0, { ageDays: 400 }))).toBe('1.1y')

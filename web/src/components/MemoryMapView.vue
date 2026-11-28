@@ -78,9 +78,9 @@
             <option value="only">Orphans only</option>
           </select>
           <p class="mm-toolbar-stats" aria-label="Vault">
-            <span><strong>{{ mm.visibleNodes.length.toLocaleString() }}</strong> notes</span>
-            <span><strong>{{ mm.visibleEdgeCount.toLocaleString() }}</strong> links</span>
-            <span><strong>{{ mm.orphanCount.toLocaleString() }}</strong> unlinked</span>
+            <span><strong>{{ mm.visibleNodes.length.toLocaleString() }}</strong> {{ mm.visibleNodes.length === 1 ? 'note' : 'notes' }}</span>
+            <span><strong>{{ mm.edges.length.toLocaleString() }}</strong> {{ mm.edges.length === 1 ? 'link' : 'links' }}</span>
+            <span><strong>{{ mm.orphanNotes.length.toLocaleString() }}</strong> unlinked</span>
             <!-- The number is the one figure worth acting on: pressing it
                  narrows the map and the list to those notes, pressing it again
                  brings the rest back. -->
@@ -90,8 +90,8 @@
               class="mm-toolbar-stale mm-stat-btn"
               :class="{ active: mm.staleFilter }"
               :aria-pressed="mm.staleFilter"
-              :aria-label="`${mm.staleNotes.length} notes not checked for a long time: ${mm.staleFilter ? 'show all notes' : 'show them'}`"
-              :title="mm.staleFilter ? 'Notes not checked for a long time: show all notes' : 'Notes not checked for a long time: show them'"
+              :aria-label="`${mm.staleNotes.length.toLocaleString()} unchecked: ${mm.staleFilter ? 'show all notes' : 'show only these notes'}`"
+              :title="mm.staleFilter ? 'Notes not checked for a long time: show all notes' : 'Notes not checked for a long time: show only these'"
               @click="mm.toggleStaleFilter()"
             ><strong>{{ mm.staleNotes.length.toLocaleString() }}</strong> unchecked</button>
             <!-- A second, separate figure, and it is not a subset of the first.
@@ -725,10 +725,10 @@ watch(() => mm.visibleIds, () => {
 // change doesn't need physics, just one more frame; waking the existing loop
 // is simpler than adding a second, physics-free redraw path.
 watch(() => mm.selectedId, () => wakeSimulation())
-// Hiding orphans or showing only orphans changes *which* nodes exist in the
-// layout, so the graph has to be re-framed as well as re-settled — otherwise
+// Hiding orphans, showing only orphans or showing only unchecked notes
+// changes *which* nodes exist in the layout, so the graph has to be re-framed as well as re-settled — otherwise
 // filtering leaves the camera zoomed into empty space.
-watch(() => mm.orphanFilter, async () => {
+watch([() => mm.orphanFilter, () => mm.staleFilter], async () => {
   await nextTick()
   refreshSimNodes()
   fitCamera()
@@ -1901,9 +1901,6 @@ onBeforeUnmount(() => {
 .mm-stat-btn:hover { color: var(--fg2); border-color: var(--border-strong); background: var(--bg3); }
 .mm-stat-btn.active { color: var(--fg); background: var(--bg3); border-color: var(--accent); }
 .mm-stat-btn.active strong { color: inherit; }
-@media (pointer: coarse) {
-  .mm-stat-btn { min-height: var(--touch); padding-inline: var(--space-3); }
-}
 
 /* Facts unchecked inside notes, in the toolbar. Quieter than the note-level
    figure on purpose: it is the more speculative of the two (a bullet with no
@@ -1916,9 +1913,6 @@ onBeforeUnmount(() => {
    numbers take a line of their own and keep the controls' left edge. */
 @container chat-pane (max-width: 860px) {
   .mm-toolbar-stats { margin-left: 0; flex-basis: 100%; }
-}
-@container chat-pane (max-width: 640px) {
-  .mm-stat-btn { min-height: var(--touch); padding-inline: var(--space-3); }
 }
 
 .mm-filter {
@@ -1934,5 +1928,6 @@ onBeforeUnmount(() => {
   min-height: 30px; }
 @media (pointer: coarse), (max-width: 700px) {
   .mm-seg--sm button, .mm-filter { min-height: var(--touch); }
+  .mm-stat-btn { min-height: var(--touch); padding-inline: var(--space-3); }
 }
 </style>
