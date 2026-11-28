@@ -30,6 +30,12 @@
         </div>
       </div>
 
+      <!-- What the run changed, counted from the undo log and the skill suggestions of its day. -->
+      <p v-if="runChanges !== null" class="mc-changes" data-care-changes>
+        <span>{{ runChanges }}</span>
+        <RouterLink class="mc-link mc-changes-link" :to="memorySectionPath('changes')">See changes <span aria-hidden="true">→</span></RouterLink>
+      </p>
+
       <p class="mc-status" role="status">{{ status }}</p>
       <!-- The run replaces the report in its first step: until it has, the file is the previous run's and none of it is shown as current. -->
       <p v-if="stale && lastRun" class="mc-note mc-last-run">{{ lastRun }}</p>
@@ -155,7 +161,9 @@ import {
 } from '../lib/careReport'
 import { startFileDiscussion } from '../lib/fileDiscussion'
 import { startMemoryOptimizeChat } from '../lib/memoryOptimize'
+import { careRunWords } from '../lib/changesFeed'
 import { useCareReportStore } from '../stores/careReport'
+import { useChangesStore } from '../stores/changes'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { memorySectionPath } from '../stores/memoryMap'
 import { useProjectStore } from '../stores/projects'
@@ -173,12 +181,14 @@ const fileViewer = useFileViewerStore()
 const route = useRoute()
 const router = useRouter()
 
-watch(() => store.activeWorkspace, ws => care.show(ws), { immediate: true })
+const changes = useChangesStore()
+watch(() => store.activeWorkspace, ws => { care.show(ws); changes.show(ws) }, { immediate: true })
 let release: () => void = () => {}
 onMounted(() => {
   release = care.attach()
   // Opening the page re-reads it: the run may have moved since Home read it.
   void care.refresh()
+  void changes.refresh()
 })
 onBeforeUnmount(() => release())
 
@@ -202,6 +212,17 @@ const calmWords = computed(() => {
     case 'interrupted': return 'Nothing needs your decision. The run stopped early; the steps below show where.'
     default: return ''
   }
+})
+/**
+ * The run's changes in one line, only for the report this page shows (the feed
+ * read the same file) and only once the run has rewritten it; null hides it.
+ */
+const runChanges = computed(() => {
+  const r = report.value
+  const feed = changes.feed && changes.feed.workspace === store.activeWorkspace ? changes.feed : null
+  const run = feed?.care_run
+  if (!r || stale.value || !run || run.at !== r.modified_at) return null
+  return careRunWords(run) || 'No lines replaced or removed'
 })
 const stepsCount = computed(() => (report.value ? stepsCountWords(report.value) : ''))
 
@@ -411,6 +432,17 @@ button.mc-back { padding: 0; border: 0; background: none; cursor: pointer; font:
 .mc-seg--wait { background: repeating-linear-gradient(90deg, var(--fg3) 0 4px, transparent 4px 8px); opacity: 0.6; }
 
 .mc-status { margin: 0; color: var(--fg2); font-size: var(--text-sm); }
+.mc-changes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-base);
+}
+.mc-changes-link { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--accent); font-weight: 600; text-decoration: none; }
 .mc-status:empty { display: none; }
 
 .mc-section { display: flex; flex-direction: column; gap: var(--space-2); padding-top: var(--space-3); }

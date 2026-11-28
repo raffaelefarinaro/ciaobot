@@ -10,6 +10,8 @@ import { api } from '../../lib/api'
 import type { CareReport } from '../../lib/careReport'
 import { CARE_PROPOSAL_PATH, careReports, need, CARE_WORKSPACE, CARE_WRITTEN_AT } from '../../lib/careReportFixture'
 import { useCareReportStore } from '../../stores/careReport'
+import { changesFeed } from '../../lib/changesFeedFixture'
+import type { ChangesFeed } from '../../lib/changesFeed'
 import { useFileViewerStore } from '../../stores/fileViewer'
 import { useProjectStore } from '../../stores/projects'
 
@@ -26,6 +28,7 @@ function serve(...reports: CareReport[]) {
   const queue = [...reports]
   vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
     if (path.startsWith('/api/care-report')) return (queue.length > 1 ? queue.shift() : queue[0]) as never
+    if (path.startsWith('/api/memory/changes')) return feedServed as never
     if (path === '/api/schedules') return [] as never
     throw new Error(`unexpected GET ${path}`)
   })
@@ -79,6 +82,9 @@ function serveFile(text: string | string[] = PROPOSAL_FILE, saveStatus = 200) {
   return { fetchMock, saved }
 }
 
+/** What `GET /api/memory/changes` answers; a test that needs another feed sets it. */
+let feedServed: ChangesFeed = { ...changesFeed, care_run: null }
+
 describe('MemoryCarePanel', () => {
   let open: ReturnType<typeof vi.fn>
 
@@ -88,6 +94,31 @@ describe('MemoryCarePanel', () => {
     open = vi.fn()
     vi.spyOn(useFileViewerStore(), 'open').mockImplementation(open as never)
     startFileDiscussion.mockClear()
+    feedServed = { ...changesFeed, care_run: null }
+  })
+
+  it('ends the card with what the run changed and a link to the Changes page', async () => {
+    feedServed = changesFeed
+    serve(careReports.complete)
+    const wrapper = await mountPanel()
+    const line = wrapper.get('[data-care-changes]')
+    expect(line.text()).toBe('Changed 2 lines · 1 skill suggestionSee changes →')
+    expect(line.get('a').attributes('href')).toBe('/memory/changes')
+  })
+
+  it('shows no changes line for another run, a run still starting or a feed with no care run', async () => {
+    feedServed = { ...changesFeed, care_run: { ...changesFeed.care_run!, at: '2026-11-20T07:00:00Z' } }
+    serve(careReports.complete)
+    expect((await mountPanel()).find('[data-care-changes]').exists()).toBe(false)
+    feedServed = { ...changesFeed, care_run: null }
+    serve(careReports.complete)
+    expect((await mountPanel()).find('[data-care-changes]').exists()).toBe(false)
+  })
+
+  it('says plainly when the run replaced or removed nothing', async () => {
+    feedServed = { ...changesFeed, care_run: { ...changesFeed.care_run!, lines_changed: 0, skill_suggestions: 0 } }
+    serve(careReports.complete)
+    expect((await mountPanel()).get('[data-care-changes]').text()).toBe('No lines replaced or removedSee changes →')
   })
 
   afterEach(() => {

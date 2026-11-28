@@ -130,8 +130,9 @@ describe('sections', () => {
     expect(isMemorySection('categories')).toBe(true)
   })
 
-  test('the sections are the map, categories, the Unsure list and Workspace care', () => {
-    expect(MEMORY_SECTIONS).toEqual(['map', 'categories', 'unsure', 'care'])
+  test('the sections are the map, categories, the Unsure list, Changes and Workspace care', () => {
+    expect(MEMORY_SECTIONS).toEqual(['map', 'categories', 'unsure', 'changes', 'care'])
+    expect(memorySectionPath('changes')).toBe('/memory/changes')
     expect(memorySectionPath('care')).toBe('/memory/care')
     expect(memorySectionPath('unsure')).toBe('/memory/unsure')
     // The queues and ledgers that used to sit beside them are gone.

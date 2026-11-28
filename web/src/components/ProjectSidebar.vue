@@ -1091,6 +1091,8 @@ const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
     // The list of what Ciaobot could not settle; its count is the lines still
     // waiting (not the approved ones the next care run applies).
     { section: 'unsure', label: 'Unsure' },
+    // What Ciaobot changed on its own: a record to read, not a queue, so no count.
+    { section: 'changes', label: 'Changes' },
     // The last daily care run, read from its report file: no count either.
     { section: 'care', label: 'Workspace care' },
   ] },
@@ -1109,6 +1111,7 @@ function memoryNavCount(section: MemorySection): number | null {
     // says how much of the vault there is.
     case 'categories': return null
     case 'unsure': return unsureWaiting.value || null
+    case 'changes': return null
     case 'care': return null
   }
 }

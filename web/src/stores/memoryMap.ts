@@ -185,7 +185,7 @@ function matchesSearch(n: MemoryGraphNode, term: string): boolean {
  * component triggered it.
  */
 /** The memory page's sections, in sidebar order. */
-export const MEMORY_SECTIONS = ['map', 'categories', 'unsure', 'care'] as const
+export const MEMORY_SECTIONS = ['map', 'categories', 'unsure', 'changes', 'care'] as const
 export type MemorySection = typeof MEMORY_SECTIONS[number]
 export function isMemorySection(value: unknown): value is MemorySection {
   return typeof value === 'string' && (MEMORY_SECTIONS as readonly string[]).includes(value)

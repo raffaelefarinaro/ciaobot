@@ -93,6 +93,7 @@ from ciao.care_report import (
     UNSURE_RELATIVE_PATH as CARE_UNSURE_PATH,
     read_care_report,
 )
+from ciao.changes_feed import UNDO_LOG_RELATIVE, read_changes
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
 from ciao.schedule_command import normalize_schedule_command
@@ -4498,6 +4499,61 @@ async def unsure_list(request: Request) -> JSONResponse:
     payload["workspace"] = workspace
     payload["path"] = _care_display_path(config, vault / CARE_UNSURE_PATH)
     return JSONResponse(payload)
+
+
+def _finished_memory_passes(request: Request, workspace: str) -> list[dict[str, str]]:
+    """The workspace's memory passes that finished, for the Changes feed.
+
+    A pass is a chat in the workspace's Memory project whose helper says
+    `memory_pass` and `done`; it finished at its last activity.
+    """
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return []
+    passes: list[dict[str, str]] = []
+    for chat in pcm.list_chats():
+        helper = chat.helper if isinstance(chat.helper, dict) else {}
+        if helper.get("kind") != "memory_pass" or helper.get("state") != "done":
+            continue
+        project = pcm.get_project(chat.project_id)
+        if project is None or project.workspace != workspace:
+            continue
+        passes.append({
+            "chat_id": chat.chat_id,
+            "source_chat_id": str(helper.get("source_chat_id") or ""),
+            "source_title": str(helper.get("source_title") or ""),
+            "finished_at": chat.last_activity_at or chat.created_at,
+        })
+    return passes
+
+
+async def memory_changes(request: Request) -> JSONResponse:
+    """GET what Ciaobot changed on its own in one workspace (read-only).
+
+    `?workspace=<name>`. The feed is :func:`ciao.changes_feed.read_changes`:
+    the undo log, the last care report's finished steps, skill-edit proposals
+    and the memory passes that finished. Each entry with a vault path gets the
+    file viewer's `open_path`. Undo is not a write here: the page opens a chat
+    with the earlier text, and the person decides there.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace or config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        vault = Path(config.workspace_vault_root(workspace)).resolve()
+    except (AttributeError, ValueError, OSError) as exc:
+        logger.warning("memory changes: vault for %s unavailable: %s", workspace, type(exc).__name__)
+        return JSONResponse({"error": "vault unavailable"}, status_code=409)
+    passes = _finished_memory_passes(request, workspace)
+    body: dict[str, Any] = await asyncio.to_thread(read_changes, vault, passes)
+    for group in body["groups"]:
+        for entry in group["entries"]:
+            path = entry.get("path") or ""
+            entry["open_path"] = _care_display_path(config, vault / path) if path else ""
+    body["workspace"] = workspace
+    body["undo_log_path"] = _care_display_path(config, vault / UNDO_LOG_RELATIVE)
+    return JSONResponse(body)
 
 
 async def vault_delete_note(request: Request) -> JSONResponse:

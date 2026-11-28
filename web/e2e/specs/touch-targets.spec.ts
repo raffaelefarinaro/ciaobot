@@ -37,6 +37,7 @@ const MAIN_SURFACES: Array<[string, string]> = [
   ['/memory/map', '.mm-toolbar-stale'],
   ['/memory/categories', '.cat-h'],
   ['/memory/unsure', '.mu-link'],
+  ['/memory/changes', '.mch-empty'],
   ['/project/alpha-general', '.text-action'],
   ['/schedules/alpha-daily-brief', '.text-link'],
   ['/tasks/0123456789abcdef0123456789abcdef', '.task-status-opt'],
