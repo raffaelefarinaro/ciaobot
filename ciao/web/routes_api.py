@@ -25,7 +25,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from stat import S_ISREG
+from stat import S_ISDIR, S_ISREG
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 # Imported lazily inside the handlers (see `_housekeeping_context`); only
@@ -1661,8 +1661,40 @@ def _clear_desktop_drop_staging(
         pass
 
 
-def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
-    """Consume a native-app grant and return only its explicitly dropped paths."""
+def _tidy_desktop_drop_grants(grant_dir: Path) -> None:
+    """Keep the grant folder owner-only and drop grant files past their TTL.
+
+    Runs on every consume, so a grant that was never used (a page that never
+    asked, an app that quit) does not keep its paths on disk. Only plain files
+    are swept; the old shell's ``staged/`` folder is left to its own cleanup.
+    """
+    try:
+        grant_dir.chmod(0o700)
+    except OSError:
+        return
+    cutoff = time.time() - _DESKTOP_DROP_GRANT_TTL_SECONDS - 60
+    try:
+        entries = list(grant_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.endswith((".json", ".writing", ".consuming")):
+            continue
+        try:
+            if entry.is_file() and not entry.is_symlink() and entry.stat().st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _consume_desktop_drop_grant(
+    request: Request, grant_id: str, *, cap_total_bytes: bool = True
+) -> list[Path]:
+    """Consume a native-app grant and return only its explicitly dropped paths.
+
+    ``cap_total_bytes`` bounds what an import will copy; a drop used in place
+    copies nothing, so it skips the byte cap (the path count still applies).
+    """
     try:
         canonical_id = str(UUID(grant_id))
     except (ValueError, AttributeError) as exc:
@@ -1672,6 +1704,7 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
 
     config = request.app.state.config
     grant_dir = config.state_path.parent / "desktop-drop-grants"
+    _tidy_desktop_drop_grants(grant_dir)
     source = grant_dir / f"{grant_id}.json"
     consuming = grant_dir / f".{grant_id}.consuming"
     try:
@@ -1745,9 +1778,125 @@ def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
         except OSError as exc:
             raise ValueError("a dropped file is no longer available") from exc
         total_bytes += size
-        if total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
+        if cap_total_bytes and total_bytes > _DESKTOP_DROP_MAX_TOTAL_BYTES:
             raise ValueError("desktop drop is too large")
     return paths
+
+
+#: Characters that could leave the backtick-quoted path in the prompt's
+#: ``Attached files:`` line: controls (newlines included), Unicode line
+#: separators and the backtick itself. A path carrying one is refused rather
+#: than escaped, so a filename can never write a line of its own into the prompt.
+_IN_PLACE_UNSAFE_PATH = re.compile("[\\x00-\\x1f\\x7f\\x85\\u2028\\u2029`]")
+_IN_PLACE_UNQUOTABLE = (
+    "its path has characters that cannot be quoted safely in a message. "
+    "Attach a copy instead."
+)
+
+
+def _in_place_path(raw: Path) -> tuple[Path, bool]:
+    """Validate one dropped path for use where it is: its real path, and whether it is a folder.
+
+    The path came from a native grant, never from the page. It must be
+    absolute and free of ``..`` parts, and both the dropped spelling and its
+    real path (symlinks followed, so the agent is handed what it will actually
+    read) must quote safely. Only regular files and folders this process can
+    read qualify; a device, socket or pipe does not.
+    """
+    if not raw.is_absolute() or ".." in raw.parts or _IN_PLACE_UNSAFE_PATH.search(str(raw)):
+        raise ValueError(_IN_PLACE_UNQUOTABLE)
+    real = Path(os.path.realpath(raw))
+    if _IN_PLACE_UNSAFE_PATH.search(str(real)):
+        raise ValueError(_IN_PLACE_UNQUOTABLE)
+    try:
+        mode = real.stat().st_mode
+    except OSError as exc:
+        raise ValueError("it is no longer available") from exc
+    if S_ISDIR(mode):
+        readable = os.access(real, os.R_OK | os.X_OK)
+    elif S_ISREG(mode):
+        readable = os.access(real, os.R_OK)
+    else:
+        raise ValueError("only files and folders can be used where they are")
+    if not readable:
+        raise ValueError("Ciaobot cannot read it. Check its permissions, or attach a copy instead.")
+    return real, S_ISDIR(mode)
+
+
+#: Folders under the home folder that hold credentials. A path in one is still
+#: handed over when the user drops it (Ciaobot sets no file policy), but the
+#: reference says so and the PWA warns before the message is sent.
+_SECRET_HOME_FOLDERS = (".ssh", ".aws", ".gnupg", "Library/Keychains")
+
+
+def _under(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _secret_folder_path(path: Path) -> bool:
+    try:
+        home = Path(os.path.realpath(Path.home()))
+    except (OSError, RuntimeError):
+        return False
+    return any(_under(path, Path(os.path.realpath(home / name))) for name in _SECRET_HOME_FOLDERS)
+
+
+def _inside_chat_roots(config, pcm, chat, path: Path) -> bool:
+    """Whether ``path`` lies in one of the chat's own folders (workspace, vault, linked repo).
+
+    Display only: Ciaobot sets no file policy of its own, so a path outside
+    these folders is still handed over, and the agent CLI's permission mode
+    decides whether it may read it.
+    """
+    try:
+        candidates = _chat_dir_root_candidates(config, pcm, chat)
+    except (OSError, ValueError, AttributeError):
+        return False
+    for _name, root in candidates:
+        try:
+            resolved = Path(os.path.realpath(root))
+        except (OSError, ValueError):
+            continue
+        if path == resolved or resolved in path.parents:
+            return True
+    return False
+
+
+def _desktop_drop_in_place(request: Request, pcm, chat, paths: list[Path]) -> JSONResponse:
+    """Reference each dropped path where it is: no bytes are read or copied.
+
+    Folders are allowed. The response carries opaque references and display
+    names only; the absolute path is expanded server-side into the provider
+    prompt, as for any other drop.
+    """
+    config = request.app.state.config
+    runtime_root = Path(os.path.realpath(config.state_path.parent))
+    file_refs: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for raw in paths:
+        try:
+            real, is_dir = _in_place_path(raw)
+            if _under(real, runtime_root):
+                raise ValueError(
+                    "it is in Ciaobot's own runtime folder, which holds its secrets"
+                )
+        except ValueError as exc:
+            errors.append({"filename": _drop_display_name(raw), "error": str(exc)})
+            continue
+        name = _drop_display_name(raw)
+        sensitive = _secret_folder_path(real)
+        file_refs.append({
+            "ref": pcm.register_file_ref(chat.chat_id, real, allow_dir=is_dir),
+            "name": f"{name}/" if is_dir else name,
+            "kind": "folder" if is_dir else "file",
+            # The validated real path, for the chip to send as it is: an opaque
+            # ref expires (10 min, or an engine restart) while a chip waits.
+            # Only a loopback peer reaches this branch.
+            "path": str(real),
+            "outside": sensitive or not _inside_chat_roots(config, pcm, chat, real),
+            "sensitive": sensitive,
+        })
+    return JSONResponse({"file_refs": file_refs, "image_refs": [], "errors": errors, "notices": []})
 
 
 async def desktop_drop_import(request: Request) -> JSONResponse:
@@ -1764,12 +1913,38 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         grant_id = str(body.get("grant_id") or "")
         project_id = str(body.get("project_id") or "")
         chat_id = str(body.get("chat_id") or "")
+        # "import" (the default) copies documents and images into the project;
+        # "in_place" hands the agent each dropped path as it is. Checked before
+        # the grant is consumed, so a bad request does not burn the drop.
+        mode = body.get("mode", "import")
+        if mode not in ("import", "in_place"):
+            grant_id = ""
+            return JSONResponse({"error": "invalid desktop drop mode"}, status_code=400)
+        if mode == "in_place" and not is_loopback_client(request):
+            # Defence in depth: the grant can only be written on this machine,
+            # and the reply carries real paths, so only a local peer may use it.
+            grant_id = ""
+            return JSONResponse(
+                {"error": "use in place works only on the engine's own machine"},
+                status_code=403,
+            )
         try:
-            paths = _consume_desktop_drop_grant(request, grant_id)
+            paths = _consume_desktop_drop_grant(
+                request, grant_id, cap_total_bytes=mode == "import"
+            )
         except LookupError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+
+        if mode == "in_place":
+            pcm = getattr(request.app.state, "project_chat_manager", None)
+            if pcm is None:
+                return JSONResponse({"error": "project chat manager unavailable"}, status_code=503)
+            chat = pcm.get_chat(chat_id)
+            if chat is None:
+                return JSONResponse({"error": "chat not found"}, status_code=404)
+            return _desktop_drop_in_place(request, pcm, chat, paths)
 
         image_paths = [
             path

@@ -1,5 +1,5 @@
 <template>
-  <div class="guidance">
+  <div class="settings-form-panel guidance">
     <p class="hint">{{ note || DEFAULT_NOTE }}</p>
     <code>{{ command }}</code>
     <div class="guidance-actions">
@@ -58,8 +58,8 @@ async function openTerminal() {
 
 <style scoped src="./settingsPanels.css"></style>
 <style scoped>
-.guidance { padding: var(--space-3) 0; min-width: 0; }
-.guidance-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.guidance { margin: 0 0 var(--space-3); min-width: 0; }
+.guidance .hint { max-width: 70ch; }
+.guidance-actions { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); }
 code { user-select: text; overflow-wrap: anywhere; }
-@media (pointer: coarse) { button { min-height: 44px; min-width: 44px; } }
 </style>

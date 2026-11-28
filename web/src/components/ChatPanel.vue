@@ -1,6 +1,25 @@
 <template>
-  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown, 'chat-rise': riseOwned }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
-    <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
+  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown, 'chat-rise': riseOwned }" @dragover.prevent="onPanelDragOver" @dragleave="onPanelDragLeave" @drop.prevent="onPanelDrop" @click="handlePanelClick">
+    <!-- The drop overlay. On the Mac app's own engine it offers two zones:
+         attach a copy (today's upload) or use the file where it is (its path,
+         granted natively). A browser tab on the engine's machine says plainly
+         why it can only attach a copy; anywhere else the overlay is one line.
+         The overlay takes no pointer events: the zone is read from the drop's
+         coordinates, and a drop outside both zones attaches a copy. -->
+    <div v-if="dragOver" class="drop-overlay" :class="{ 'drop-overlay--zones': dropHostKind !== 'remote' }">
+      <template v-if="dropHostKind === 'remote'">Drop files to attach a copy to the project</template>
+      <div v-else class="drop-zones">
+        <div ref="copyZoneEl" class="drop-zone" :class="{ 'drop-zone--active': hoverZone !== 'in-place' }">
+          <span class="drop-zone__title">Attach a copy</span>
+          <span class="drop-zone__text">Copies the file into the project and attaches it. Images go in as images.</span>
+        </div>
+        <div v-if="dropHostKind === 'native'" ref="inPlaceZoneEl" class="drop-zone" :class="{ 'drop-zone--active': hoverZone === 'in-place' }">
+          <span class="drop-zone__title">Use in place</span>
+          <span class="drop-zone__text">Nothing is copied. The agent gets the path of the file or folder on this Mac and reads it there.</span>
+        </div>
+        <p v-else class="drop-zone__note">To use a file where it is, drop it in the Ciaobot app. A browser tab cannot see where a file lives, so it can only attach a copy.</p>
+      </div>
+    </div>
 
     <!-- Header. No page tag: the project context control below and the chat
          title already name this surface, so a "chat" marker beside them would
@@ -1071,9 +1090,15 @@
               ><span class="comment-chip-note">Image {{ i + 1 }}</span></button>
               <button type="button" class="comment-chip-remove image-preview-remove" :aria-label="`Remove image ${i + 1}`" title="Remove" @click="removePendingImage(i)">&times;</button>
             </span>
-            <span v-for="(f, i) in view.pendingFiles" :key="`file-${f.ref}`" class="comment-chip file-chip" :title="f.name">
+            <span
+              v-for="(f, i) in view.pendingFiles"
+              :key="`file-${f.ref}`"
+              class="comment-chip file-chip"
+              :title="f.inPlace ? `${f.name}: used in place, nothing copied${f.outside ? ' (outside this chat\'s folders)' : ''}` : f.name"
+            >
               <AppIcon class="comment-chip-icon" name="doc" :size="14" />
               <span class="file-chip-name">{{ f.name }}</span>
+              <span v-if="f.inPlace" class="file-chip-tag">in place</span>
               <button type="button" class="comment-chip-remove" :aria-label="`Remove ${f.name}`" title="Remove" @click="removePendingFile(i)">&times;</button>
             </span>
             <span
@@ -1233,10 +1258,22 @@
                  and a menu to open it in Automations or stop it. Renders nothing
                  when the chat has no loop. -->
             <ChatLoopChip :chat-id="chat.chat_id" :archived="chat.archived" />
-            <label class="image-btn" title="Attach files" aria-label="Attach files">
+            <label class="image-btn" :title="dropHostKind === 'native' ? 'Attach a copy of files' : 'Attach files'" :aria-label="dropHostKind === 'native' ? 'Attach a copy of files' : 'Attach files'">
               <input type="file" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
+            <!-- The keyboard path to "Use in place": only the Mac app on its own
+                 engine can hand over a path, so only there is it shown. -->
+            <button
+              v-if="dropHostKind === 'native'"
+              type="button"
+              class="image-btn in-place-btn"
+              title="Use a file or folder in place: the agent gets its path, nothing is copied"
+              aria-label="Use a file or folder in place (path only, nothing copied)"
+              @click="pickInPlace"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M10 14h6"/><path d="M13.5 11.5 16 14l-2.5 2.5"/></svg>
+            </button>
             <span class="composer-spacer" aria-hidden="true"></span>
             <ComposerActivity
               :chat-id="chatId"
@@ -1448,6 +1485,7 @@ import { withoutProviderCatalogs } from '../lib/modelCatalogs'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
+import { dragHasFiles, dropZoneAt, type DropZone } from '../lib/nativeDrop'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
 import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage } from '../lib/types'
@@ -1657,6 +1695,30 @@ const inputText = composer.draft
 const inputEl = composer.input
 const dragOver = composer.dragOver
 const uploads = composer.uploads
+const dropHostKind = composer.dropHost
+const hoverZone = composer.hoverZone
+const copyZoneEl = ref<HTMLElement | null>(null)
+const inPlaceZoneEl = ref<HTMLElement | null>(null)
+function dropZoneUnder(e: DragEvent): DropZone | null {
+  return dropZoneAt(e.clientX, e.clientY, [
+    { zone: 'in-place', rect: inPlaceZoneEl.value?.getBoundingClientRect() },
+    { zone: 'copy', rect: copyZoneEl.value?.getBoundingClientRect() },
+  ])
+}
+function onPanelDragOver(e: DragEvent): void {
+  // Only a drag that carries files shows the zones; a dragged chat row or
+  // text selection does not.
+  if (!dragHasFiles(e.dataTransfer?.types)) return
+  dragOver.value = true
+  hoverZone.value = dropZoneUnder(e)
+}
+function onPanelDragLeave(): void {
+  dragOver.value = false
+  hoverZone.value = null
+}
+function onPanelDrop(e: DragEvent): void {
+  void handleDrop(e, dropZoneUnder(e))
+}
 const starterPrompts = [
   'Review the latest project notes and flag what needs a decision',
   'Turn the current research into a concise briefing',
@@ -1678,6 +1740,7 @@ const {
   handleNativeFileDrop,
   handlePaste,
   handlePromptHistoryKey,
+  pickInPlace,
   removePendingImage,
   removePendingFile,
 } = composer
@@ -5782,7 +5845,7 @@ onMounted(() => {
 .drop-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(233, 69, 96, 0.1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
   border: 2px dashed var(--accent);
   display: flex;
   align-items: center;
@@ -5791,6 +5854,64 @@ onMounted(() => {
   font-size: 18px;
   z-index: 10;
   pointer-events: none;
+}
+/* With zones, the overlay lays them over the composer area at the bottom. */
+.drop-overlay--zones {
+  align-items: flex-end;
+  padding: 16px 16px 24px;
+  font-size: inherit;
+}
+.drop-zones {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  width: 100%;
+  max-width: 760px;
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.drop-zone {
+  flex: 1 1 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 88px;
+  padding: 14px 16px;
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg2);
+}
+.drop-zone--active {
+  border: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg2));
+  color: var(--fg);
+}
+.drop-zone__title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.drop-zone__text,
+.drop-zone__note {
+  font-size: 13px;
+  line-height: 1.4;
+}
+.drop-zone__note {
+  flex: 1 1 240px;
+  margin: 0;
+  align-self: center;
+  color: var(--fg2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .drop-zone { transition: background 120ms var(--ease), border-color 120ms var(--ease); }
+}
+.file-chip-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--fg3);
 }
 
 /* Scroll-to-bottom float button — centered inside .chat-with-sidebar

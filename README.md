@@ -37,7 +37,6 @@ Ciaobot does not run a model of its own. It drives the Claude Code, OpenCode or 
 ### Existing installs
 
 - **Moving from 1.x to 2.0:** see [Moving from 1.x to 2.0](https://www.raffaelefarinaro.com/ciaobot/migrate.html) for the Mac, Linux and Windows paths and what changed.
-- **Upgrading from the retired macOS app:** follow the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app) to keep your workspace, password, chats, and schedules.
 - **Updates:** on macOS, Ciaobot for Mac updates itself (Sparkle). On Linux, see [Linux hosting](docs/LINUX.md).
 - **Stop or start the engine:** run `ciao service stop` or `ciao service start`. Your workspace is kept.
 

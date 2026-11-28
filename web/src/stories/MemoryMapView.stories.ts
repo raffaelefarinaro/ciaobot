@@ -75,7 +75,11 @@ function renderState(state: MapState) {
         h('p', `Synthetic ${state} fixture: production MemoryMapView with ${stateDescription[state]}.`),
         // The phone story's host is the pane the app gives the page: 390px and the
         // `chat-pane` container its grid answers to, so the rail drops below.
-        h('div', state === 'unsure-phone' || state === 'skills-phone' ? { ref: host, style: 'max-width: 390px; container: chat-pane / inline-size' } : { ref: host }),
+        // Every other state gets the same container without the width cap: the
+        // map toolbar's own narrow-pane rule reads that container.
+        h('div', state === 'unsure-phone' || state === 'skills-phone'
+          ? { ref: host, style: 'max-width: 390px; container: chat-pane / inline-size' }
+          : { ref: host, style: 'container: chat-pane / inline-size' }),
         h('p', { role: 'status' }, `Fixture requests: ${fixture.value?.boundary.requests.length ?? 0}. Violations: ${fixture.value?.boundary.violations.length ?? 0}.`),
         error.value ? h('p', { role: 'alert' }, error.value) : null,
         ...(fixture.value?.boundary.violations ?? []).map((message) => h('p', { role: 'alert' }, message)),

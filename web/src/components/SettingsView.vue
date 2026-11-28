@@ -440,7 +440,7 @@
               <div>
                 <p class="section-title">Chat providers</p>
                 <p class="hint">
-                  Each provider CLI manages its own login and credentials. OpenCode configuration does not verify upstream credentials.
+                  Each provider CLI manages its own login and credentials.
                   The defaults below apply to new chats; any chat can override them from the picker.
                   Session insights is the model that reads chats into memory and names them. On Automatic it
                   is the chat's own model: a closed project uses its last-active chat, and a task resolution or
@@ -457,8 +457,17 @@
 
             <p v-if="workspaceModelsError" class="hint hint--warn" role="alert">{{ workspaceModelsError }}</p>
             <button v-if="workspaceModelsError" type="button" class="set-link" @click="fetchWorkspaceModels()">Retry model options</button>
+            <p v-if="providerKeys.connections" id="provider-verify-note" class="hint hint--compact provider-verify-note">
+              Verify re-reads each CLI's status and models. It does not test upstream credentials.
+            </p>
             <div v-if="providerKeys.connections" class="provider-connections set-list">
-              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
+              <CollapsibleRoot
+                v-for="(conn, connKey) in providerKeys.connections"
+                :key="connKey"
+                as="div"
+                class="credential-row set-row"
+                :unmount-on-hide="false"
+              >
                 <div class="set-row-head provider-row-head">
                   <div class="routine-info set-row-main">
                     <span class="routine-name set-row-title">{{ conn.label || connKey }}</span>
@@ -468,23 +477,22 @@
                       <span v-if="connKey === 'claude' && conn.auth === 'oauth' && conn.account">{{ conn.account }}</span>
                       <span v-if="connKey !== 'opencode' && !conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
-                    <ProviderInstallBlock :conn-key="String(connKey)" :conn="conn" />
-                    <p
-                      v-if="!isMissingInstall(conn.state) && conn.path_command"
-                      class="set-row-sub"
-                    >
-                      Your terminal cannot find this CLI yet — put it on your PATH with
-                      <code>{{ conn.path_command }}</code>
-                    </p>
                   </div>
                   <div class="set-row-actions provider-connection-actions">
                     <ProviderStateBadge :conn-key="String(connKey)" :state="conn.state" />
                     <button
                       type="button"
-                      class="set-link"
+                      class="set-link set-link--quiet provider-action"
+                      aria-describedby="provider-verify-note"
                       :disabled="providerConnectionPending === connKey"
                       @click="providerConnectionAction(String(connKey), 'verify')"
                     >Verify</button>
+                    <!-- Not for a missing CLI: its payload command is the install line, not a sign-in. -->
+                    <CollapsibleTrigger
+                      v-if="connKey !== 'opencode' && !isMissingInstall(conn.state)"
+                      class="set-link set-link--quiet provider-action provider-disclosure"
+                      :aria-label="`${conn.ok ? 'Reconnect' : 'Connect'} ${conn.label || connKey}`"
+                    >{{ conn.ok ? 'Reconnect' : 'Connect' }}</CollapsibleTrigger>
                     <DropdownMenuRoot
                       v-if="conn.ok"
                       :open="settingsMenu === `provider:${connKey}`"
@@ -494,10 +502,16 @@
                       <DropdownMenuTrigger as-child>
                         <button
                           type="button"
-                          class="set-menu-btn"
+                          class="set-menu-btn provider-overflow"
                           :aria-label="`More actions for ${conn.label || connKey}`"
                           :disabled="providerConnectionPending === connKey"
-                        >&middot;&middot;&middot;</button>
+                        >
+                          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                            <circle cx="3" cy="8" r="1.25" />
+                            <circle cx="8" cy="8" r="1.25" />
+                            <circle cx="13" cy="8" r="1.25" />
+                          </svg>
+                        </button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
                         <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
@@ -509,12 +523,15 @@
                     </DropdownMenuRoot>
                   </div>
                 </div>
+                <ProviderInstallBlock :conn-key="String(connKey)" :conn="conn" />
+                <p v-if="!isMissingInstall(conn.state) && conn.path_command" class="set-row-sub">
+                  Your terminal cannot find this CLI yet — put it on your PATH with
+                  <code>{{ conn.path_command }}</code>
+                </p>
                 <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :command="conn.command" :workspace="projectStore.activeWorkspace" />
-                <!-- Not for a missing CLI: its payload command is the install line, not a sign-in. -->
-                <details v-if="connKey !== 'opencode' && !isMissingInstall(conn.state)" class="provider-sign-in">
-                  <summary>{{ conn.ok ? `Reconnect ${conn.label || connKey}` : `Connect ${conn.label || connKey}` }}</summary>
+                <CollapsibleContent v-if="connKey !== 'opencode' && !isMissingInstall(conn.state)">
                   <ProviderSignInGuidance :command="conn.command" :context="conn.label || String(connKey)" :workspace="projectStore.activeWorkspace" />
-                </details>
+                </CollapsibleContent>
                 <!-- Full width, after the head: inside .set-row-main it shares a line with Connected / Verify and clips at phone width. -->
                 <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">
                   <p class="provider-release-note">Older than {{ conn.release_check.tested }}, the version this Ciaobot release was tested with. Update with:</p>
@@ -678,7 +695,7 @@
                       </div>
                     </template>
                 </details>
-              </div>
+              </CollapsibleRoot>
               <ProviderInventory v-if="!providerKeys.connections.opencode" :workspace="projectStore.activeWorkspace" />
             </div>
             <ProviderInventory v-else :workspace="projectStore.activeWorkspace" />
@@ -1207,6 +1224,9 @@ import { useTaskStore } from '../stores/tasks'
 import { invalidateProviderReads, providerGeneration, providerMutation, providerMutationIsCurrent, providerRead, providerReadIsCurrent, subscribeProviderRefresh, waitForProviderMutation } from '../lib/providerOperations'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import {
+  CollapsibleContent,
+  CollapsibleRoot,
+  CollapsibleTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuRoot,
@@ -3445,9 +3465,26 @@ a.btn-secondary {
   display: flex;
   flex-direction: column;
 }
+.provider-connections > .credential-row {
+  padding-block: var(--space-4);
+  border-top: 0;
+  overflow-wrap: anywhere;
+}
+.provider-row-head { flex-wrap: wrap; justify-content: space-between; padding-block: 0; }
+.provider-row-head > .set-row-main { flex: 1 1 12rem; }
+/* Actions stay right-aligned in the head. On a narrow pane they drop to a line
+   of their own, status at the start and the buttons at the end, never loose. */
 .provider-connection-actions {
-  justify-content: flex-start;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: var(--space-2);
+  margin-inline-start: auto;
+}
+.provider-overflow { width: var(--touch); height: var(--touch); }
+.provider-verify-note { max-width: 70ch; color: var(--fg3); margin: 0 0 var(--space-2); }
+@container (max-width: 480px) {
+  .provider-connection-actions { flex: 1 1 100%; }
+  .provider-connection-actions > .provider-state { margin-inline-end: auto; }
 }
 .provider-release-check { display: flex; flex-direction: column; gap: var(--space-2); }
 .provider-release-note { margin: 0; }
@@ -3467,11 +3504,13 @@ a.btn-secondary {
 .provider-connection-detail {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 10px;
+  gap: var(--space-1) var(--space-2);
+  font-size: var(--text-sm);
 }
+.provider-connection-detail:empty { display: none; }
 .provider-connection-detail > span + span::before {
   content: '·';
-  margin-right: 10px;
+  margin-right: var(--space-2);
   color: var(--fg3);
 }
 .tier-provider-section {
@@ -3870,13 +3909,6 @@ a.btn-secondary {
 /* "What this CLI brings": the per-provider MCP and skill chip lists, folded
    away by default so the providers tab stays scannable. The summary is the whole
    touch target, so it keeps the 44px minimum. */
-@media (pointer: coarse) {
-  .provider-sign-in > summary {
-    min-height: var(--touch);
-    min-width: var(--touch);
-    align-content: center;
-  }
-}
 .provider-brings > summary {
   display: inline-flex;
   align-items: center;

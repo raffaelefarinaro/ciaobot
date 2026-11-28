@@ -602,7 +602,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `composables/useChatComposer.ts` owns the composer — the draft and its
   synchronous persistence, prompt-history recall, textarea auto-sizing, caret
   insertion, and every attachment path (paste, drop, the native desktop drop
-  grant, the file picker). It deliberately imports no store and registers no
+  grant, the file picker, and *Use in place*: `lib/nativeDrop.ts` reads the
+  host from the Mac app's `ciaobotNativeDrop` handler, asks it for a grant
+  and picks the drop zone from the drop's coordinates). It deliberately imports no store and registers no
   lifecycle hook: ids arrive as getters, the store arrives as the
   `ComposerAttachmentStore` interface, and `fetch` is injectable, so
   `composables/useChatComposer.test.ts` exercises all of it without mounting
@@ -780,7 +782,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   and it is abandoned when the session ends or the wait reaches 8 s with no output.
   It falls back to a copy of the launch command when the terminal is not ready. *Ask Ciao to add one* still starts a chat titled "Add an MCP server".
   Changes apply to new chats; a running chat loads them after `ciao chat reload`.
-  The page does not read MCP servers or turn them on or off. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability. While Verify or logout is pending, and after an ambiguous result, that provider's choices and default are removed from model pickers and an uncertainty message remains until a later provider action and model refresh complete; other providers stay available. A canceled logout confirmation changes nothing.
+  The page does not read MCP servers or turn them on or off. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information, and a short line above the provider cards says so (each Verify button is described by it); OpenCode configuration is not credential verification and completed model reads do not prove catalog availability. While Verify or logout is pending, and after an ambiguous result, that provider's choices and default are removed from model pickers and an uncertainty message remains until a later provider action and model refresh complete; other providers stay available. A canceled logout confirmation changes nothing.
   Chat details has no MCP control: its Skills and MCP list shows what the chat
   used (tool use, not health), and there is no health observer, connection
   marker on the details trigger or the ⋯ menu, or sign-in card. A composer draft

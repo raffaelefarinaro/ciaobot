@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
-import { expect } from 'storybook/test'
+import { expect, userEvent, within } from 'storybook/test'
 import { createApp, defineComponent, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import { createPinia } from 'pinia'
 import ProviderInventory from '../components/settings/ProviderInventory.vue'
@@ -9,6 +9,17 @@ import type { ProviderInventoryData } from '../components/settings/ProviderInven
 // The inventory reads the terminal store for its browser-terminal action, so
 // each story mounts the owner in its own app with Pinia, as WorkspaceTile does.
 type InventorySeed = { inventory?: ProviderInventoryData }
+
+// The status dot is a real signal: its painted colour is the state's token.
+const dotColour = (el: Element) => getComputedStyle(el, '::before').backgroundColor
+function tokenColour(name: string) {
+  const probe = document.createElement('span')
+  probe.style.backgroundColor = `var(${name})`
+  document.body.append(probe)
+  const colour = getComputedStyle(probe).backgroundColor
+  probe.remove()
+  return colour
+}
 
 function renderInventory(seed: InventorySeed) {
   return defineComponent({
@@ -61,10 +72,23 @@ export const Configured: Story = {
   }),
   play: async ({ canvasElement }) => {
     const text = canvasElement.textContent ?? ''
-    expect(text).toContain('OpenCode reports which providers are configured. It does not check that their credentials work.')
+    expect(text).toContain('OpenCode lists configured providers without checking their credentials.')
     expect(text).toContain('OAuth, API key · Configured')
     expect(text).toContain('Environment · Configured')
     expect(text).not.toContain('verification unknown')
+    const canvas = within(canvasElement)
+    for (const status of canvasElement.querySelectorAll('.inventory-status')) {
+      expect(dotColour(status)).toBe(tokenColour('--success'))
+    }
+    const reconnect = canvas.getByRole('button', { name: 'Reconnect Storybook One (storybook-one)' })
+    await expect(reconnect).toHaveTextContent('Reconnect')
+    await expect(reconnect).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(reconnect)
+    await expect(reconnect).toHaveAttribute('aria-expanded', 'true')
+    await expect(reconnect).toHaveAttribute('data-state', 'open')
+    await expect(canvas.getByRole('button', { name: 'Copy sign-in command for Storybook One (storybook-one)' })).toBeVisible()
+    await userEvent.click(reconnect)
+    await expect(reconnect).toHaveAttribute('aria-expanded', 'false')
   },
 }
 
@@ -79,6 +103,7 @@ export const PartiallyReported: Story = {
   render: () => renderInventory({ inventory: { status: 'partial', providers: [] } }),
   play: async ({ canvasElement }) => {
     expect(canvasElement.textContent).toContain('Some providers may be missing from this inventory.')
+    expect(dotColour(canvasElement.querySelector('.inventory-notice')!)).toBe(tokenColour('--warning'))
   },
 }
 

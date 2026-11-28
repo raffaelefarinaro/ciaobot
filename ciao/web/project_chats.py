@@ -1448,7 +1448,7 @@ class ProjectChatManager:
         self._path = path
         self._projects: dict[str, ProjectInfo] = {}
         self._chats: dict[str, ChatInfo] = {}
-        self._file_refs: dict[str, tuple[str, str, float]] = {}
+        self._file_refs: dict[str, tuple[str, str, float, bool]] = {}
         # Canonical-doc frontmatter memo, keyed by path -> ((mtime_ns, size),
         # (name, context)). Vault discovery re-reads every project doc on each
         # list_projects() call, so without this the sidebar would parse the
@@ -11402,16 +11402,26 @@ class ProjectChatManager:
 
     def _prune_file_refs(self) -> None:
         now = time.time()
-        expired = [ref for ref, (_, _, expires_at) in self._file_refs.items() if expires_at <= now]
+        expired = [ref for ref, (_, _, expires_at, _) in self._file_refs.items() if expires_at <= now]
         for ref in expired:
             self._file_refs.pop(ref, None)
         while len(self._file_refs) > _FILE_REF_MAX_ENTRIES:
             self._file_refs.pop(next(iter(self._file_refs)))
 
-    def register_file_ref(self, chat_id: str, path: Path) -> str:
+    def register_file_ref(self, chat_id: str, path: Path, *, allow_dir: bool = False) -> str:
+        """An opaque, chat-scoped reference to ``path``, expanded only in the provider prompt.
+
+        ``allow_dir`` lets the reference name a folder: a desktop drop used in
+        place hands the agent a folder's path, never its contents.
+        """
         self._prune_file_refs()
         ref = f"drop_{uuid.uuid4().hex}"
-        self._file_refs[ref] = (chat_id, str(Path(path).resolve()), time.time() + _FILE_REF_TTL_SECONDS)
+        self._file_refs[ref] = (
+            chat_id,
+            str(Path(path).resolve()),
+            time.time() + _FILE_REF_TTL_SECONDS,
+            allow_dir,
+        )
         return ref
 
     def remove_file_refs(self, refs: list[str] | tuple[str, ...]) -> None:
@@ -11427,7 +11437,7 @@ class ProjectChatManager:
             if record is None or record[0] != chat_id:
                 return match.group(0)
             path = Path(record[1])
-            if not path.is_file():
+            if not (path.is_file() or (record[3] and path.is_dir())):
                 self._file_refs.pop(ref, None)
                 return match.group(0)
             return str(path)

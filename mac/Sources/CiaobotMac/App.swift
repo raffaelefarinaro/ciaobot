@@ -705,7 +705,12 @@ struct ConnectionView: View {
                             ) else { return }
                             self.session?.attachWebView(view, for: origin)
                         },
-                        appSettings: appSettings
+                        appSettings: appSettings,
+                        // Only the app's own engine reads grants written on
+                        // this Mac; an external host gets "Attach a copy" only.
+                        nativeDrop: engineMode == .local && activeLocalTLSIdentity != nil
+                            ? supervisor.map { NativeDropBridge(writer: NativeDropGrantWriter(pointer: $0.home.pointer)) }
+                            : nil
                     )
                     .id(engineMode == .local
                         ? activeLocalTLSIdentity.map { "local-\($0.pid)-\($0.startupID)-\($0.sha256)" } ?? "local-unpinned"

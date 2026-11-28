@@ -168,7 +168,7 @@ It is the Linux installer; on macOS it refuses and names the app. Install paths:
 
 **Engine updates** no longer run through the engine. On macOS, Ciaobot for Mac updates the bundled engine with the app (Sparkle). On Linux, `ciao update` re-runs the latest stamped installer (`linux_service.run_update`; see [Linux hosting](LINUX.md)). `update_package()` (`ciao/package_version.py`) answers the Settings hint for an installer-managed engine that it no longer updates itself, and for a `uv_tool` engine (a Linux one-line install) with `ciao update`. What is left of the transaction is the receiving half that a 1.x install hops through: `ciao update status`, and the hidden `run-apply` and `run-recover` verbs its detached updater job runs (`ciao/engine_update.py`, `update_host.MacUpdateHost` on launchd). `ciao update` on Linux sends everything except those three verbs to the installer. `current_update_host()` raises `UnsupportedPlatformError` on other platforms. `ciao update stage` and `ciao update apply` are gone and exit 2.
 
-Machines still running the retired macOS app are cleaned up by hand (see INTEGRATIONS.md, Upgrading from the macOS app): the `Ciaobot.app` bundle and its LaunchAgents are removed manually. The app's own updater, the native verifier and the signed `.app` feed are not published.
+`ciao setup` deletes the `com.ciao.menubar` LaunchAgent the pre-1.0 macOS app left behind. That app's updater, the native verifier and its signed `.app` feed are not published.
 
 The engine release carries the wheel and the stamped `install.sh` that pins it. The signed manifest (`ciaobot-engine-manifest.json` and `.sig`) is attached to 2.0.0 only, for 1.x engines. `python -m ciao.release_manifest verify` checks the manifest against the embedded minisign key; see Publish under Branching and releases. The server host archive is not built or attached.
 
@@ -390,9 +390,6 @@ The macOS app is retired and its source tree is gone (`#656`): the release is th
 engine, and the one-line installer installs that. Nothing under `desktop/` is
 built, so there is no Rust or native-shell step to run here.
 
-A `Ciaobot.app` an older install left behind is removed by hand, as INTEGRATIONS.md
-describes; no command does it.
-
 After PWA changes, rebuild and either restart the service or use the **Deploy** button in PWA Settings. **Never restart the ciao service from inside a PWA chat** (you'd sever your own session); ask the operator to deploy.
 
 Restart requests made through the running server enter a drain phase: existing chats finish before shutdown, and new turns are not admitted during that window. Directly killing the process bypasses this protection. A drain that is cancelled (an update whose drain timed out) replays the background-run and CLI-task wakes it deferred instead of losing them, since no restart follows to deliver them.
@@ -537,7 +534,11 @@ For composer drag-and-drop changes, test the desktop-drop grant path end to
 end. Drops preserve the source file and add Markdown companions, and return
 bounded opaque file references rather than absolute paths; the server expands a
 reference only when building the provider prompt. The generic ProjectView
-upload remains unchanged.
+upload remains unchanged. *Use in place* needs the Mac app on its own engine
+(a browser never sees a path): run `ciao-dev-install`, drag a file and a folder
+from Finder onto the chat's **Use in place** zone, check the chips say *in place*,
+nothing lands in the project folder, and the sent message names the real paths;
+then drop on **Attach a copy** and check the old upload still runs.
 
 For security changes, the boundary is one origin and one session: every
 `/api/*` route needs the signed cookie (minus the small public allowlist in
