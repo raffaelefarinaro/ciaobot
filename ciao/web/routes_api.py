@@ -6990,7 +6990,7 @@ def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
     The source checkout setting (Settings → Advanced → Developer) wins over the
-    module path for developer-mode deploys. A
+    module path for source-checkout deploys. A
     packaged app does not resolve a checkout for production updates.
     """
     configured = getattr(config, "app_repo", None)
