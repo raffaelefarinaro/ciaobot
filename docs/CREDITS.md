@@ -6,10 +6,15 @@ Ciaobot is glue around a lot of excellent open tools.
 
 - [Claude Code](https://github.com/anthropics/claude-code) and the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python)
 - [OpenCode](https://opencode.ai)
-- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/)
+
+## Historical / retired integrations
+
+- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) — historical Ciaobot runtime integration; no longer supported.
 
 ## Integrations and CLIs
 
+- [NotebookLM CLI (`notebooklm-py`)](https://pypi.org/project/notebooklm-py/) — optional workspace integration
+- [opencli](https://www.npmjs.com/package/@jackwener/opencli)
 - [LibreOffice](https://www.libreoffice.org) — `.pptx` slide rendering
 
 ## Frameworks and libraries

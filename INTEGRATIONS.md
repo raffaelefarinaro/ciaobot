@@ -25,7 +25,13 @@ a world-writable folder), Ciaobot uses it. Otherwise it installs the adapter onc
 into a private folder (`~/Library/Application Support/Ciaobot/adapters` on
 macOS, the engine's state folder on Linux) with the machine's `npm` and a
 lockfile shipped in `ciao/stock/adapters/<name>/` (`npm ci --omit=optional
---ignore-scripts`). The install starts in the background at engine startup when
+--ignore-scripts`). npm gets an allowlisted environment: the PATH, home, temp
+and locale, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their
+lowercase forms), `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and any `npm_config_*`
+variable pass through; provider keys, tokens and `NODE_OPTIONS` are dropped. The
+prefix and each adapter folder must be owned by the current user with mode 0700,
+or the adapter is not used. `--omit=optional` skips the optional native Claude
+package (about 340 MB), because the user's own `claude` does the work. The install starts in the background at engine startup when
 `claude` is present; a failure shows on the Settings card, whose Install button
 runs the same command:
 
@@ -97,7 +103,7 @@ the code references to appear here or in that test's internal allowlist.
 | `CIAO_RUNTIME_ROOT` | Runtime-state folder, default `<workspace>/.runtime`. Read from the process environment only (the LaunchAgent sets it); a value in `.env` is ignored. |
 | `CIAO_PORT` | Set by the LaunchAgent. CLI commands and the macOS service manager use it to find the running server when `.env` has no `PWA_PORT`. |
 | `CIAO_VAULT_ROOT` | Notes (vault) root, default `<workspace>/memory-vault`. Also set per chat for the agent (see below). |
-| `CIAO_MEMORY_DIR` | Overrides the folder of the search index (default: the runtime root). Test harnesses outside pytest must set it. |
+| `CIAO_MEMORY_DIR` | Overrides the folder of the search index (default: the runtime root) and of the legacy `~/.ciao` memory files (`ciao/memory_tool.py`); a Mac takeover also carries it over from an old service definition. Test harnesses outside pytest must set it. |
 | `CIAO_BOOTSTRAP_WORKSPACE` | Temporary workspace for first-run mode, used while no workspace is set up. Default `~/.ciao/bootstrap`. |
 | `CIAO_NO_BROWSER` | Any value stops a first-run `ciao run` from opening the setup page in a browser. The systemd unit sets it. |
 | `CIAO_OPENCODE_BIN` | Absolute path to an OpenCode CLI outside the PATH. |
@@ -105,12 +111,16 @@ the code references to appear here or in that test's internal allowlist.
 | `CIAO_ALLOW_LAUNCH_AGENT_REPOINT` | `1`/`true`/`yes` lets `ciao setup` repoint the LaunchAgent to another workspace without `--yes`. |
 | `CIAO_PYTHON` | Python binary for `scripts/dev.sh` (via `scripts/ensure-deps.sh`). |
 
-Retired variables the engine still recognises only to import or warn:
-`CIAO_WORKSPACES` (imported once into `.runtime/workspaces.json`),
-`CIAO_LOG_LEVEL` and `CIAO_APP_REPO` (imported once into Settings),
-`CIAO_DEV_MODE` (ignored), and `CIAO_VAULT_DIR` (recognised in an old service
-definition during a Mac takeover). The `legacy-env-ignored` tile asks you to
-remove the first four from `.env`.
+Retired variables: when one of these is still in `.env`, the `legacy-env-ignored`
+tile asks you to remove it.
+
+- `PWA_HOST`: imported once into Settings → Access & devices → Network access.
+- `CIAO_LOG_LEVEL` and `CIAO_APP_REPO`: imported once into Settings → Advanced → Developer.
+- `CIAO_WORKSPACES`: its workspaces were imported once into `.runtime/workspaces.json`; workspaces are managed in Settings.
+- `PWA_AUTH_REQUIRED`: ignored; password protection is always on (the `true` that setup used to write raises no tile).
+- `CIAO_DEV_MODE`: ignored; developer mode no longer exists.
+
+`CIAO_VAULT_DIR` is read only from an old service definition during a Mac takeover.
 
 ### Set by Ciaobot for agent processes
 
