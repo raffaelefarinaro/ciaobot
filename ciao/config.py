@@ -834,10 +834,9 @@ class CiaoConfig:
     workspace_root: Path
     state_path: Path
     media_root: Path
-    # Developer controls and the source checkout for developer-only
-    # deploy/restart workflows. Both are Settings (`app_settings.json`), read at
-    # startup and overlaid live by `AppSettingsStore.apply_to_config`.
-    dev_mode: bool = False
+    # The source checkout Restart redeploys from on a source install. A Setting
+    # (`app_settings.json`), read at startup and overlaid live by
+    # `AppSettingsStore.apply_to_config`.
     app_repo: Path | None = None
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
@@ -1858,7 +1857,6 @@ class CiaoConfig:
             workspace_root=workspace_root,
             state_path=state_path,
             media_root=media_root,
-            dev_mode=stored.dev_mode,
             app_repo=app_repo,
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,

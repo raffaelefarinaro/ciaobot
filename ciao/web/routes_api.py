@@ -5834,7 +5834,6 @@ _ROUTINES_SETTINGS_KEYS = frozenset({
     "provider_insights_models",
     "pwa_host",
     "log_level",
-    "dev_mode",
     "app_repo",
     "resume_after_restart",
 })
@@ -5861,11 +5860,10 @@ def _routines_payload(config, app_settings) -> dict:
         "provider_insights_models": s.provider_insights_models or {},
         # Server settings that used to be workspace `.env` variables, as
         # stored ("" = default). The bind address and the log level are read
-        # at startup, so a change takes effect after a restart; developer mode
-        # and the source checkout apply at once.
+        # at startup, so a change takes effect after a restart; the source
+        # checkout applies at once.
         "pwa_host": s.pwa_host,
         "log_level": s.log_level,
-        "dev_mode": s.dev_mode,
         "app_repo": s.app_repo,
         # Settings → General: resume a chat whose turn a restart cut off (#2128).
         "resume_after_restart": s.resume_after_restart,
@@ -6988,7 +6986,7 @@ def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
     The source checkout setting (Settings → Advanced → Developer) wins over the
-    module path for developer-mode deploys. A
+    module path for source-checkout deploys. A
     packaged app does not resolve a checkout for production updates.
     """
     configured = getattr(config, "app_repo", None)
@@ -7023,23 +7021,24 @@ def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
     return run_step(args, cwd=str(codebase_root), timeout=180)
 
 
-def _restart_only(config, *, dev_mode: bool) -> bool:
+def _restart_only(config) -> bool:
     """Whether Settings' Restart must only restart, never redeploy from source.
 
     Redeploy (``admin_deploy``) pulls, pip-installs, and rebuilds a source
     checkout, so it only makes sense for a developer running from one. A
     packaged Ciaobot.app never qualifies: its embedded runtime is not a
-    checkout, and ``pip install -e`` cannot replace it even when
-    the developer source checkout setting names one. Linux hosts outside dev mode are
-    administrator-managed and restart only. Everywhere else, including Linux
-    dev mode, anything that is not a deployable checkout (a plain package
-    install) restarts only too, since deploy would stop at "locate checkout".
+    checkout, and ``pip install -e`` cannot replace it even when the source
+    checkout setting names one. Linux hosts are administrator-managed (the
+    service account owns neither the checkout nor the virtualenv, docs/LINUX.md)
+    and restart only. Everywhere else, anything that is not a deployable
+    checkout (a plain package install) restarts only too, since deploy would
+    stop at "locate checkout".
     """
     from ciao.package_version import detect_install_mode
 
     if detect_install_mode() in ("bundled_app", "installer"):
         return True
-    if sys.platform.startswith("linux") and not dev_mode:
+    if sys.platform.startswith("linux"):
         return True
     if config is None:
         return False
@@ -7642,10 +7641,7 @@ async def local_status(request: Request) -> JSONResponse:
         )
     status = dict(mgr.status())
     config = getattr(request.app.state, "config", None)
-    # Developer mode is a Settings toggle, so it is read live from the config
-    # the settings store overlays rather than captured at startup.
-    status["dev_mode"] = bool(getattr(config, "dev_mode", False))
-    status["restart_only"] = _restart_only(config, dev_mode=status["dev_mode"])
+    status["restart_only"] = _restart_only(config)
     return JSONResponse(status)
 
 
@@ -7917,32 +7913,6 @@ async def handover_merge(request: Request) -> JSONResponse:
         )
     merge = _open_merge_chat(request, branch)
     return JSONResponse(merge, status_code=200 if merge.get("ok") else 500)
-
-
-
-async def debug_issues(request: Request) -> JSONResponse:
-    """Runtime issue report (server errors + failed job runs) for self-fix.
-
-    Only available in developer mode (Settings); hidden (404) otherwise so
-    the endpoint does not advertise itself on production instances.
-    """
-    config = request.app.state.config
-    if not getattr(config, "dev_mode", False):
-        return JSONResponse(
-            {"error": "debug endpoints require developer mode"}, status_code=404
-        )
-    from ciao.debug_report import DEFAULT_LOG_RECORDS, build_issue_report
-
-    # ``lines`` caps the error-log tail in records (see build_issue_report).
-    try:
-        records = int(request.query_params.get("lines", DEFAULT_LOG_RECORDS))
-    except ValueError:
-        records = DEFAULT_LOG_RECORDS
-    records = max(1, min(records, 2000))
-    report = await asyncio.to_thread(
-        build_issue_report, config.workspace_root, log_records=records
-    )
-    return JSONResponse(report)
 
 
 async def usage_stats_endpoint(request: Request) -> JSONResponse:

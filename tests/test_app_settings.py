@@ -130,15 +130,31 @@ def test_load_corrupt_file_gives_defaults(tmp_path):
 def test_update_persists_and_roundtrips(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)
-    store.update({"dev_mode": True, "ignored": "x"})
+    store.update({"log_level": "debug", "ignored": "x"})
     assert json.loads(path.read_text()) == {
-        "dev_mode": True,
+        "log_level": "debug",
         "backup_enabled": True,
         "backup_paused": False,
         "resume_after_restart": True,
     }
     # Fresh instance sees the persisted value.
-    assert AppSettingsStore(path).settings.dev_mode is True
+    assert AppSettingsStore(path).settings.log_level == "debug"
+
+
+def test_a_persisted_dev_mode_key_is_ignored_and_dropped_on_next_save(tmp_path):
+    # Developer mode is gone; a settings file written before that still loads,
+    # and the key disappears the next time the store saves.
+    path = tmp_path / "app_settings.json"
+    path.write_text('{"dev_mode": true, "log_level": "debug"}')
+
+    store = AppSettingsStore(path)
+
+    assert not hasattr(store.settings, "dev_mode")
+    assert store.settings.log_level == "debug"
+    store.update({"dev_mode": True, "theme": "dark"})
+    saved = json.loads(path.read_text())
+    assert "dev_mode" not in saved
+    assert saved["log_level"] == "debug"
 
 
 def test_resume_after_restart_defaults_on_and_round_trips(tmp_path):
@@ -211,7 +227,7 @@ def test_a_persisted_insights_enabled_key_is_ignored_and_dropped_on_next_save(tm
 
     assert not hasattr(store.settings, "insights_enabled")
     assert path.read_text() == '{"insights_enabled": false}'
-    store.update({"dev_mode": True})
+    store.update({"theme": "dark"})
     assert "insights_enabled" not in json.loads(path.read_text())
 
 
@@ -226,13 +242,13 @@ def test_legacy_auto_update_keys_load_and_are_dropped_on_next_save(tmp_path):
         "auto_update_outcome": "applied",
         "auto_update_snooze_until": "",
     }
-    path.write_text(json.dumps({**legacy, "dev_mode": True}))
+    path.write_text(json.dumps({**legacy, "theme": "dark"}))
 
     store = AppSettingsStore(path)
 
-    assert store.settings.dev_mode is True
+    assert store.settings.theme == "dark"
     assert not any(hasattr(store.settings, key) for key in legacy)
-    store.update({"dev_mode": False})
+    store.update({"theme": "light"})
     saved = json.loads(path.read_text())
     assert not any(key.startswith("auto_update") for key in saved)
 
@@ -362,14 +378,13 @@ def test_server_settings_default_and_apply(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     config = FakeConfig()
     store.apply_to_config(config)
-    assert (config.pwa_host, config.log_level, config.dev_mode, config.app_repo) == (
-        "0.0.0.0", "info", False, None,
+    assert (config.pwa_host, config.log_level, config.app_repo) == (
+        "0.0.0.0", "info", None,
     )
 
     store.update({
         "pwa_host": "127.0.0.1",
         "log_level": "DEBUG",
-        "dev_mode": True,
         "app_repo": str(tmp_path / "checkout"),
     })
     store.apply_to_config(config)
@@ -380,7 +395,6 @@ def test_server_settings_default_and_apply(tmp_path):
     restarted = FakeConfig()
     AppSettingsStore(tmp_path / "app_settings.json").apply_to_config(restarted)
     assert (restarted.pwa_host, restarted.log_level) == ("127.0.0.1", "debug")
-    assert config.dev_mode is True
     assert config.app_repo == Path(tmp_path / "checkout").resolve()
     stored = json.loads((tmp_path / "app_settings.json").read_text())
     assert stored["pwa_host"] == "127.0.0.1" and stored["log_level"] == "debug"
@@ -392,7 +406,7 @@ def test_server_settings_default_and_apply(tmp_path):
         {"pwa_host": "not a host!"},
         {"log_level": "chatty"},
         {"app_repo": "relative/checkout"},
-        {"dev_mode": "yes"},
+        {"resume_after_restart": "yes"},
     ],
 )
 def test_server_settings_reject_bad_values(tmp_path, change):
@@ -414,23 +428,22 @@ def test_legacy_env_values_are_imported_once(tmp_path):
     imported = store.import_legacy_env({
         "PWA_HOST": "127.0.0.1",
         "CIAO_LOG_LEVEL": "10",
-        "CIAO_DEV_MODE": "true",
         "CIAO_APP_REPO": "/src/ciaobot",
     })
 
-    assert imported == ["PWA_HOST", "CIAO_LOG_LEVEL", "CIAO_DEV_MODE", "CIAO_APP_REPO"]
+    assert imported == ["PWA_HOST", "CIAO_LOG_LEVEL", "CIAO_APP_REPO"]
     s = AppSettingsStore(path).settings
-    assert (s.pwa_host, s.log_level, s.dev_mode, s.app_repo) == (
-        "127.0.0.1", "debug", True, str(Path("/src/ciaobot").resolve()),
+    assert (s.pwa_host, s.log_level, s.app_repo) == (
+        "127.0.0.1", "debug", str(Path("/src/ciaobot").resolve()),
     )
     assert s.legacy_env_imported is True
 
     # A value cleared in Settings stays cleared while `.env` still says it.
     again = AppSettingsStore(path)
-    again.update({"pwa_host": "", "dev_mode": False})
-    assert again.import_legacy_env({"PWA_HOST": "127.0.0.1", "CIAO_DEV_MODE": "true"}) == []
+    again.update({"pwa_host": "", "log_level": ""})
+    assert again.import_legacy_env({"PWA_HOST": "127.0.0.1", "CIAO_LOG_LEVEL": "debug"}) == []
     assert AppSettingsStore(path).settings.pwa_host == ""
-    assert AppSettingsStore(path).settings.dev_mode is False
+    assert AppSettingsStore(path).settings.log_level == ""
 
 
 def test_a_relative_legacy_app_repo_is_imported_absolute(tmp_path, monkeypatch):
@@ -445,11 +458,11 @@ def test_a_rejected_patch_applies_none_of_its_keys(tmp_path):
     store = AppSettingsStore(path)
 
     with pytest.raises(ValueError):
-        store.update({"dev_mode": True, "pwa_host": "bad host"})
+        store.update({"resume_after_restart": False, "pwa_host": "bad host"})
 
-    assert store.settings.dev_mode is False
+    assert store.settings.resume_after_restart is True
     store.update({"log_level": "debug"})
-    assert AppSettingsStore(path).settings.dev_mode is False
+    assert AppSettingsStore(path).settings.resume_after_restart is True
 
 
 def test_the_import_runs_once_even_when_there_is_nothing_to_import(tmp_path):
@@ -689,5 +702,5 @@ def test_a_persisted_verify_vault_answers_key_is_ignored_and_dropped_on_next_sav
     store = AppSettingsStore(path)
 
     assert not hasattr(store.settings, "verify_vault_answers")
-    store.update({"dev_mode": True})
+    store.update({"theme": "dark"})
     assert "verify_vault_answers" not in json.loads(path.read_text())

@@ -434,8 +434,8 @@ def test_recent_job_failures_filters_before_limit() -> None:
 
 
 def test_error_count_is_the_main_error_log_and_nothing_else(tmp_path: Path) -> None:
-    # The Settings summary ("N error-log line(s)") and "Fix issues in chat" both
-    # read the main server_errors.log tail. Rotated and other logs must not
+    # Startup triage and the {{ISSUE_REPORT}} placeholder both read the main
+    # server_errors.log tail. Rotated and other logs must not
     # leak into the count when the main file is empty.
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True)

@@ -416,23 +416,6 @@
           :routines-saving="routinesSaving"
           :save-routines="saveRoutines"
         />
-
-        <!-- Debug (dev mode only) -->
-        <div v-if="localStatus?.dev_mode" class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">Debug</p>
-              <p class="hint">Runtime issue log: server errors and failed background jobs. Send it to a chat so the agent can self-fix.</p>
-            </div>
-            <div class="settings-card-header-actions">
-              <button class="btn-primary btn-small" @click="fixIssuesInChat" :disabled="debugPending">
-                {{ debugPending ? 'Collecting issues...' : 'Fix issues in chat' }}
-              </button>
-              <button class="btn-small" @click="refreshDebugIssues" :disabled="debugPending">Refresh</button>
-            </div>
-          </div>
-          <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
-        </div>
       </template>
 
       <!-- PROVIDERS TAB: chat providers. The old models tab was renamed;
@@ -1198,7 +1181,6 @@ import type {
   CommandAsset,
   CommandsResponse,
   CreatedAgentAssetResponse,
-  DebugIssueReport,
   DeployResult,
   LocalStatus,
   ModelsResponse,
@@ -1788,11 +1770,11 @@ watch(
   { immediate: true },
 )
 
-/** Sync with the program's repository is for a developer's checkout: dev mode,
- *  or an install that is an editable deployable checkout. A packaged install
- *  (the Mac app, the installer, a plain package) only restarts. Fails closed
- *  while the host state is unknown. */
-const canSyncProgram = computed(() => localStatus.value?.dev_mode === true || localStatus.value?.restart_only === false)
+/** Sync with the program's repository is for a developer's checkout: an
+ *  install that is an editable deployable checkout. A packaged install (the
+ *  Mac app, the installer, a plain package) and a Linux host only restart.
+ *  Fails closed while the host state is unknown. */
+const canSyncProgram = computed(() => localStatus.value?.restart_only === false)
 
 /** Summary line for the collapsed "What this CLI brings" disclosure. */
 function providerBringsCounts(conn: ProviderConnection): string {
@@ -2554,9 +2536,7 @@ function loadSettingsTab(tab: string): Promise<void> {
       // The health card waits on the agent assets, so this tab has to read
       // them: without this it stays on its loader until another tab happens
       // to fetch the same data.
-      reads = [fetchLocalStatus().then(() => {
-        if (localStatus.value?.dev_mode) return refreshDebugIssues()
-      }), fetchRoutines(), fetchWorkspaceMove(), fetchAgentAssets()]
+      reads = [fetchLocalStatus(), fetchRoutines(), fetchWorkspaceMove(), fetchAgentAssets()]
       break
     case 'providers':
       reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), fetchWorkspaceModels()]
@@ -2782,65 +2762,8 @@ async function fixDeployErrorInChat() {
   }
 }
 
-// ── Debug: runtime issue log → self-fix chat (dev mode only) ─────────────
-const debugPending = ref(false)
-const debugIssues = ref<DebugIssueReport | null>(null)
-const debugSummary = computed(() => {
-  const r = debugIssues.value
-  if (!r) return ''
-  if (!r.has_issues) return 'No runtime issues logged.'
-  return `${r.failed_jobs.length} failed job run(s), ${r.error_log_records} error record(s).`
-})
-
-async function refreshDebugIssues() {
-  try {
-    debugIssues.value = await api.get<DebugIssueReport>('/api/debug/issues')
-  } catch {
-    /* endpoint is 404 unless dev mode; leave null */
-  }
-}
-
-async function fixIssuesInChat() {
-  debugPending.value = true
-  try {
-    await refreshDebugIssues()
-    const report = debugIssues.value
-    if (!report?.has_issues) return
-
-    const defaultWorkspace = projectStore.workspaceOptions[0]?.name || 'personal'
-    if (projectStore.activeWorkspace !== defaultWorkspace) {
-      if ((await projectStore.switchWorkspace(defaultWorkspace)) === false) return
-    }
-    let project = projectStore.projects.find(p => p.workspace === defaultWorkspace)
-    if (!project) {
-      project = await projectStore.createProject('General')
-    }
-    const chat = await projectStore.createChat(project.project_id, 'Issue Triage')
-    if (chat) {
-      const prompt = `Here is the current runtime issue report from this Ciaobot instance (server error log tail plus failed background jobs):\n\n${report.report_text}\n\nPlease triage these issues: group them by root cause, note frequency and impact, investigate the top causes in the app and workspace, and apply low-risk fixes directly. Report anything riskier that needs my approval.`
-      projectStore.sendMessage(chat.chat_id, prompt)
-      const { router } = await import('../router')
-      router.push(`/chat/${chat.chat_id}`)
-    }
-  } catch (e) {
-    notifyFailed('Could not start the issue-triage chat', errorMessage(e))
-  } finally {
-    debugPending.value = false
-  }
-}
-
-
 // ── Workspace git sync (current branch) ──────────────────────────────────
 const localStatus = ref<LocalStatus | null>(null)
-
-// Developer mode is a setting now; the Debug card reads it from the local
-// status, so a toggle refreshes that rather than waiting for a reload.
-watch(
-  () => routines.value?.dev_mode,
-  (current, previous) => {
-    if (previous !== undefined && current !== previous) void fetchLocalStatus()
-  },
-)
 
 async function fetchLocalStatus() {
   try {

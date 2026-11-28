@@ -34,9 +34,9 @@ small browser fixture; asset readiness alone does not measure Home's data wait.
 
 ## Server install
 
-Linux production and every installer-managed macOS install restart the engine
-from Settings through `POST /api/admin/restart`; developer mode (Settings →
-Advanced → Developer, with the source checkout set there) on a source checkout
+Every Linux host and every installer-managed macOS install restart the engine
+from Settings through `POST /api/admin/restart`; a deployable macOS source
+checkout (the running one, or the one set in Settings → Advanced → Developer)
 retains the source deploy workflow.
 
 ```bash

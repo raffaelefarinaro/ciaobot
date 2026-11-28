@@ -137,7 +137,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/webhooks/{trigger_id}/rotate` | Rotate a trigger's secret; returns the trigger plus the new one-time secret |
 | DELETE | `/api/webhooks/{trigger_id}` | Delete a trigger and its verifier (`?expected_revision=`, revision-checked) |
 | POST | `/hooks/v1/{trigger_id}` | Webhook receiver (machine surface, bearer + `Idempotency-Key`, not the session cookie): records a durable receipt for one event and answers `202 accepted` — recorded, not dispatched; the background launch turns it into an ordinary chat in the trigger's own project. See `docs/WEBHOOK_TRIGGER_STORE.md` |
-| GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless developer mode is on (Settings → Advanced → Developer) |
 | GET | `/api/commands` | List slash commands; `?workspace=<name>` scopes them to that workspace's agent root |
 | GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings; `?workspace=<name>` scopes the subagent and command lists to that workspace's agent root |
 | GET | `/api/agent-assets/audit` | Full AI OS audit report; `status` is `healthy`, `needs_attention`, or `error` |
@@ -197,7 +196,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | GET | `/api/addresses` | Where other devices can open this engine: the Tailscale Serve HTTPS URL first when one exists (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
-| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code (source checkout in dev mode only) |
+| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code (source checkout; refused on a bundled-app or installer install. Settings offers it only where the host is not restart-only, i.e. `/api/local/status` reports `restart_only: false`) |
 | POST | `/api/admin/restart` | Drain active chat work and restart the installed engine without pulling or rebuilding code (authenticated) |
 | POST | `/api/admin/drain` | Close admission for new turns ahead of an engine update or workspace move. The body `{"owner": "<operation id>"}` is required (400 `drain owner required` without it; an ownerless client must upgrade) and a drain belongs to one owner (409 for another while it is held). Returns `{draining, active_chat_ids, schedule_work_count}`; a client treats a missing `schedule_work_count` as "not idle" and refuses (loopback-only, no session; used by `ciao update apply` and the workspace move job) |
 | POST | `/api/admin/drain/cancel` | Reopen admission after a drain timed out; the same `owner` body is required and only the owner reopens its drain (409 otherwise); returns `{draining: false}` (loopback-only, no session; used by `ciao update apply` and the workspace move job; if the job that owns a drain died without cancelling, send the cancel with the owner recorded in its operation file, or restart the engine) |
@@ -261,9 +260,10 @@ alone does not prove termination.
 
 `POST /api/admin/restart` uses the backend's existing chat-drain lifecycle and
 does not run git, pip, npm, or frontend builds. Settings chooses this action when
-`/api/local/status` reports `restart_only: true`: Linux production, a legacy
-bundled-app install (whatever the dev mode), and any install that is not a
-deployable source checkout. Development deploys from a checkout retain
+`/api/local/status` reports `restart_only: true`: every Linux host (source
+installs there are updated by the administrator), a legacy bundled-app or
+installer install, and any install that is not a deployable source checkout.
+A deployable macOS source checkout retains
 `/api/admin/deploy`, which returns 400 up front on an installed (non-checkout)
 engine.
 
@@ -988,7 +988,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/
 # thinking / Session insights maps. provider_insights_models is keyed by the chat's provider; a missing
 # entry means that provider's default chat model reads the session.
 # Also the server settings that used to be .env variables, as stored ("" =
-# default): pwa_host (bind address), log_level, dev_mode, app_repo (source
+# default): pwa_host (bind address), log_level, app_repo (source
 # checkout), with server_defaults and server_running (what the running engine
 # bound and logs at; pwa_host and log_level change only at the next start).
 # resume_after_restart (boolean, default true: at startup a chat whose turn a
@@ -997,7 +997,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 
 # PATCH accepts only provider_default_models, provider_default_modes,
 # provider_default_thinking, provider_insights_models, pwa_host, log_level,
-# dev_mode, app_repo and resume_after_restart (a
+# app_repo and resume_after_restart (a
 # non-boolean value is a 400).
 # The retired insights_enabled and verify_vault_answers keys are still accepted but
 # ignored; any other key (including response-only fields) returns 400. Updates
@@ -1090,7 +1090,7 @@ waits rather than interleaving. Non-git workspaces (or detached HEAD) get
 through the package install/upgrade path.
 
 ```bash
-# Current workspace git state: {git_repo, branch (null when not a repo / detached), dirty, dev_mode}.
+# Current workspace git state: {git_repo, branch (null when not a repo / detached), dirty, restart_only}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/status"
 
 # Sync with remote — commit pending work, pull from origin, push the current branch.

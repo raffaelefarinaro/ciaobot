@@ -938,7 +938,6 @@ export interface RoutineSettings {
   // ("" = default). The bind address and log level apply at the next start.
   pwa_host?: string
   log_level?: string
-  dev_mode?: boolean
   app_repo?: string
   // Settings → General: a chat whose turn a restart or crash cut off gets one
   // "Continue after restart" turn at the next start. Missing = on.
@@ -1069,22 +1068,12 @@ export interface LocalStatus {
   git_repo: boolean
   branch: string | null
   dirty: boolean
-  dev_mode?: boolean
   restart_only?: boolean
 }
 
 export interface DeployResult {
   ok: boolean
   steps: { step: string; ok: boolean; output?: string }[]
-}
-
-export interface DebugIssueReport {
-  error_log: string
-  error_log_records: number
-  error_log_path: string
-  failed_jobs: { job: string; label: string; ended_at: string; error: string }[]
-  has_issues: boolean
-  report_text: string
 }
 
 // ── Settings skill inventory ───────────────────────────────────────────

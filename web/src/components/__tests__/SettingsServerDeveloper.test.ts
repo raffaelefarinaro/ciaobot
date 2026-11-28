@@ -8,7 +8,6 @@ import type { RoutineSettings } from '../../lib/types'
 
 function mountDeveloper(saveRoutines = vi.fn(async () => {})) {
   const routines = {
-    dev_mode: false,
     app_repo: '',
     log_level: '',
     server_defaults: { pwa_host: '0.0.0.0', log_level: 'info', log_levels: ['debug', 'info', 'warning', 'error'] },
@@ -34,14 +33,14 @@ describe('Settings → Advanced → Developer', () => {
     wrapper.unmount()
   })
 
-  it('reveals Developer mode, Source checkout and Log level when expanded', async () => {
+  it('reveals Source checkout and Log level when expanded', async () => {
     const { wrapper } = mountDeveloper()
     const toggle = wrapper.get('button.developer-toggle')
     await toggle.trigger('click')
     expect(toggle.attributes('aria-expanded')).toBe('true')
     expect(toggle.attributes('aria-controls')).toBe('developer-panel')
     expect(wrapper.find('#developer-panel').exists()).toBe(true)
-    expect(wrapper.get('[role="switch"]').attributes('aria-label')).toBe('Developer mode')
+    expect(wrapper.find('[role="switch"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('Source checkout')
     expect(wrapper.text()).toContain('Log level')
     wrapper.unmount()
@@ -70,8 +69,6 @@ describe('Settings → Advanced → Developer', () => {
   it('saves from the expanded fields exactly as before', async () => {
     const { wrapper, saveRoutines } = mountDeveloper()
     await wrapper.get('button.developer-toggle').trigger('click')
-    await wrapper.get('[role="switch"]').trigger('click')
-    expect(saveRoutines).toHaveBeenCalledWith({ dev_mode: true })
     await wrapper.get('input').setValue('/Users/me/ciaobot')
     await nextTick()
     await wrapper.get('.checkout-row button').trigger('click')

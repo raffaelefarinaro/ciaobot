@@ -46,26 +46,11 @@
         </button>
       </h2>
       <p class="hint">
-        For working on Ciaobot itself. Developer mode shows the Debug card and lets Restart
-        deploy from a source checkout.
+        For working on Ciaobot itself. On a macOS source checkout, Restart deploys from the
+        checkout set here.
       </p>
     </div>
     <div v-if="developerOpen" id="developer-panel" class="developer-panel">
-      <div class="settings-switch-row">
-        <span class="hint">Developer mode</span>
-        <button
-          class="settings-switch"
-          type="button"
-          role="switch"
-          :aria-checked="devMode"
-          aria-label="Developer mode"
-          :disabled="!routines || routinesSaving"
-          @click="saveRoutines({ dev_mode: !devMode })"
-        >
-          <span class="switch-word">{{ devMode ? 'On' : 'Off' }}</span>
-          <span class="switch-track" aria-hidden="true"></span>
-        </button>
-      </div>
       <div class="checkout-row">
         <label class="settings-field checkout-field">
           <span class="ws-label">Source checkout</span>
@@ -154,8 +139,6 @@ const logLevelPending = computed(
 /** Closed on every visit; nothing here is worth remembering open. */
 const developerOpen = ref(false)
 
-const devMode = computed(() => props.routines?.dev_mode === true)
-
 const appRepoDraft = ref('')
 watch(
   () => props.routines?.app_repo,
@@ -225,9 +208,5 @@ function saveAppRepo() {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-}
-
-.settings-switch-row .hint {
-  color: var(--fg2);
 }
 </style>

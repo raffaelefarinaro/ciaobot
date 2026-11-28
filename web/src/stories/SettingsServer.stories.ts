@@ -7,16 +7,13 @@ import type { RoutineSettings } from '../lib/types'
  * SettingsServer (the `components-settings-settings-server` inventory row,
  * #3307): the Network access and Developer cards, selected by `section`. It
  * takes props only, so these stories render the production component with
- * synthetic routine settings and a spy in place of persistence. The Developer
- * switch stays the component's own native switch (the shared-switch migration
- * is a later slice).
+ * synthetic routine settings and a spy in place of persistence.
  */
 
 const baseRoutines: RoutineSettings = {
   model_options: { anthropic: [] },
   pwa_host: '',
   log_level: '',
-  dev_mode: false,
   app_repo: '',
   server_defaults: {
     pwa_host: '0.0.0.0',
@@ -116,13 +113,13 @@ export const DeveloperOpen: Story = {
   args: { section: 'developer', saveRoutines: fn() },
   play: async ({ args, canvasElement, userEvent }) => {
     await userEvent.click(developerToggle(canvasElement))
-    const modeSwitch = canvasElement.querySelector('[role="switch"]') as HTMLButtonElement
-    expect(modeSwitch.getAttribute('aria-label')).toBe('Developer mode')
-    expect(modeSwitch.getAttribute('aria-checked')).toBe('false')
+    expect(canvasElement.querySelector('[role="switch"]')).toBeNull()
     const save = [...canvasElement.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Save') as HTMLButtonElement
     expect(save.disabled).toBe(true)
-    await userEvent.click(modeSwitch)
-    expect(args.saveRoutines).toHaveBeenCalledWith({ dev_mode: true })
+    const checkout = canvasElement.querySelector('#developer-panel input[type="text"]') as HTMLInputElement
+    await userEvent.type(checkout, '/src/ciaobot')
+    await userEvent.click(save)
+    expect(args.saveRoutines).toHaveBeenCalledWith({ app_repo: '/src/ciaobot' })
   },
 }
 
@@ -147,10 +144,11 @@ export const DeveloperSaving: Story = {
     const panelToggle = developerToggle(canvasElement)
     panelToggle.click()
     await waitFor(() => expect(canvasElement.querySelector('#developer-panel')).toBeTruthy())
-    const modeSwitch = canvasElement.querySelector('[role="switch"]') as HTMLButtonElement
-    expect(modeSwitch.disabled).toBe(true)
-    expect(cardSelect(canvasElement).disabled).toBe(true)
-    modeSwitch.click()
+    const select = cardSelect(canvasElement)
+    expect(select.disabled).toBe(true)
+    const save = [...canvasElement.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Save') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    save.click()
     expect(args.saveRoutines).not.toHaveBeenCalled()
   },
 }

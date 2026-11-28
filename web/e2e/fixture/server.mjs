@@ -794,7 +794,6 @@ const GET_ROUTES = {
     provider_insights_models: {},
     pwa_host: '',
     log_level: '',
-    dev_mode: false,
     app_repo: '',
     server_defaults: { pwa_host: '0.0.0.0', log_level: 'info', log_levels: ['debug', 'info', 'warning', 'error'] },
     server_running: { pwa_host: '0.0.0.0', log_level: 'info' },

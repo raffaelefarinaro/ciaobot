@@ -92,7 +92,6 @@ from ciao.web.routes_api import (
     create_project,
     create_project_chat,
     create_schedule,
-    debug_issues,
     desktop_drop_import,
     handover_merge,
     image_blob,
@@ -530,8 +529,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/tasks/{task_id}", task_get, methods=["GET"]),
         Route("/api/tasks/{task_id}", task_update, methods=["PATCH"]),
         Route("/api/tasks/{task_id}", task_delete, methods=["DELETE"]),
-        # Runtime issue report (dev mode only) — Settings → Debug card
-        Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
         Route("/api/commands", list_commands_endpoint, methods=["GET"]),
         # Agent-facing instruction, subagent, and command assets.
