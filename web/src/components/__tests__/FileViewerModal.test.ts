@@ -128,7 +128,10 @@ describe('FileViewerModal', () => {
     expect(document.activeElement).toBe(dialog.element)
   })
 
-it('opens a note at a named heading: scrolls to it once and marks it briefly', async () => {
+it('opens a note at a named heading: scrolls to it once, marks it, and tints it briefly', async () => {
+    vi.useFakeTimers()
+    // Zero-delay timers and ticks only: the tint's own timer waits for the clock below.
+    const flush = async () => { await nextTick(); await nextTick(); await vi.advanceTimersByTimeAsync(0); await nextTick() }
     const calls: ScrollToOptions[] = []
     const proto = Element.prototype as unknown as { scrollTo?: unknown }
     const original = proto.scrollTo
@@ -138,19 +141,57 @@ it('opens a note at a named heading: scrolls to it once and marks it briefly', a
       const store = openViewer()
       store.path = 'Workspace/Care-Report.md'
       store.heading = 'hygiene'
+      // The text arrives after the viewer has opened, as a fetch would.
+      store.content = ''
+      await flush()
+      expect(calls).toEqual([])
       store.content = '# Care report\n\nHygiene ran.\n\n## What needs you\n\n1. Item\n\n## Hygiene\n\n- a finding\n'
-      await settle()
-      await settle()
-      const target = wrapper!.findAll('.fv-md h2').find(h => h.text() === 'Hygiene')!
-      expect(target.classes()).toContain('fv-heading-target')
-      expect(wrapper!.findAll('.fv-heading-target')).toHaveLength(1)
+      await flush()
+      await flush()
+      const target = () => wrapper!.findAll('.fv-md h2').find(h => h.text() === 'Hygiene')!
+      expect(target().attributes('data-fv-target')).toBe('')
+      expect(wrapper!.findAll('[data-fv-target]')).toHaveLength(1)
+      expect(target().classes()).toContain('fv-heading-tint')
       // Reduced motion: the jump is instant.
       expect(calls).toHaveLength(1)
       expect(calls[0].behavior).toBe('auto')
-      // A later render of the same open does not pull the reader back.
+      // The tint is brief; the mark stays.
+      vi.advanceTimersByTime(1599)
+      expect(target().classes()).toContain('fv-heading-tint')
+      vi.advanceTimersByTime(1)
+      expect(target().classes()).not.toContain('fv-heading-tint')
+      expect(target().attributes('data-fv-target')).toBe('')
+      // A later render of the same open keeps the mark and does not pull the reader back.
       store.content += '\n- another finding\n'
+      await flush()
+      expect(calls).toHaveLength(1)
+      expect(target().attributes('data-fv-target')).toBe('')
+    } finally {
+      proto.scrollTo = original
+      vi.useRealTimers()
+    }
+  })
+
+  it('lands on the heading when the note body mounts after its text arrived', async () => {
+    const calls: unknown[] = []
+    const proto = Element.prototype as unknown as { scrollTo?: unknown }
+    const original = proto.scrollTo
+    proto.scrollTo = function scrollTo(options: unknown) { calls.push(options) }
+    try {
+      const store = openViewer()
+      store.path = 'Workspace/Care-Report.md'
+      store.heading = 'Hygiene'
+      // The text lands while the viewer still shows its loading state.
+      store.loading = true
+      await settle()
+      store.content = '# Care report\n\n## Hygiene\n\n- a finding\n'
+      await settle()
+      expect(calls).toEqual([])
+      store.loading = false
+      await settle()
       await settle()
       expect(calls).toHaveLength(1)
+      expect(wrapper!.get('[data-fv-target]').text()).toBe('Hygiene')
     } finally {
       proto.scrollTo = original
     }
@@ -169,7 +210,7 @@ it('opens a note at a named heading: scrolls to it once and marks it briefly', a
       await settle()
       await settle()
       expect(calls).toEqual([])
-      expect(wrapper!.find('.fv-heading-target').exists()).toBe(false)
+      expect(wrapper!.find('[data-fv-target]').exists()).toBe(false)
     } finally {
       proto.scrollTo = original
     }

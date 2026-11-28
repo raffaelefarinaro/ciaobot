@@ -172,7 +172,8 @@ test.describe('Workspace care', () => {
     const dialog = page.getByRole('dialog')
     await expect(dialog).toBeVisible()
     const heading = dialog.getByRole('heading', { name: 'Hygiene', exact: true })
-    await expect(heading).toHaveClass(/fv-heading-target/)
+    // The mark stays for the open; the tint is brief and is covered by the viewer's unit test.
+    await expect(heading).toHaveAttribute('data-fv-target', '')
     await expect(heading).toBeInViewport()
     await expect(dialog.getByRole('heading', { name: /^Care report/ })).not.toBeInViewport()
     await page.screenshot({ path: 'test-results/workspace-care-see-details.png' })
