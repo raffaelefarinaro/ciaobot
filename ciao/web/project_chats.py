@@ -377,6 +377,7 @@ from ciao.web.memory_pass import (
 from ciao.web.schedule_dispatch import ScheduleDispatcher
 from ciao.web.heif_images import (
     HEIF_EXTENSIONS,
+    HEIF_TOO_LARGE,
     HeifConversionError,
     HeifNotConverted,
     convert_heif_to_jpeg,
@@ -5232,6 +5233,12 @@ class ProjectChatManager:
                 duplicate = self.save_image_upload(
                     attachment.path.read_bytes(), attachment.original_filename
                 )
+                if attachment.original_path is not None:
+                    # A converted photo's original goes with it, under the copy's stem.
+                    shutil.copyfile(
+                        attachment.original_path,
+                        duplicate.path.with_suffix(attachment.original_path.suffix),
+                    )
                 copied_refs.append(duplicate.path.name)
             if copied_refs:
                 row["images"] = copied_refs
@@ -11654,12 +11661,13 @@ class ProjectChatManager:
         )
 
     def _save_heif_upload(self, data: bytes, filename: str) -> ImageAttachment:
-        if len(data) > MAX_IMAGE_SIZE_BYTES:
-            raise ValueError("Image too large")
         stem = f"web_{chat_service._uuid8()}"
         self._config.media_root.mkdir(parents=True, exist_ok=True)
         original = (self._config.media_root / f"{stem}{heif_extension(filename)}").resolve()
         original.write_bytes(data)
+        if len(data) > MAX_IMAGE_SIZE_BYTES:
+            # Before HEIC was an image it went up as a plain file: keep that.
+            raise HeifNotConverted(original, HEIF_TOO_LARGE)
         target = original.with_name(f"{stem}.jpg")
         try:
             convert_heif_to_jpeg(original, target)
@@ -11675,6 +11683,22 @@ class ProjectChatManager:
             original_filename=filename,
             original_path=original,
         )
+
+    def _unconverted_dir(self, chat_id: str) -> Path | None:
+        if not chat_id or Path(chat_id).name != chat_id or chat_id.startswith("."):
+            return None
+        return self._config.media_root / "unconverted" / chat_id
+
+    def keep_unconverted_upload(self, chat_id: str, original: Path) -> Path:
+        """Move a HEIF upload kept as a plain file under its chat, so deleting
+        or archiving the chat removes it with the chat's images."""
+        folder = self._unconverted_dir(chat_id)
+        if folder is None:
+            raise ValueError("invalid chat id")
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / original.name
+        os.replace(original, target)
+        return target.resolve()
 
     def _unlink_chat_images(self, chat: ChatInfo) -> None:
         """Delete on-disk image files recorded for this chat and clear the map.
@@ -11692,6 +11716,9 @@ class ProjectChatManager:
                             attachment.original_path.unlink(missing_ok=True)
                     except OSError:
                         logger.exception("Failed to unlink image %s", ref)
+        unconverted = self._unconverted_dir(chat.chat_id)
+        if unconverted is not None:
+            shutil.rmtree(unconverted, ignore_errors=True)
         stream = self._broker.get(chat.chat_id)
         lock = stream.publish_lock if stream is not None else nullcontext()
         with lock:

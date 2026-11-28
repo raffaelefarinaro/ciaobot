@@ -4,7 +4,8 @@ Agent image inputs take PNG, JPEG, GIF and WebP, so an iPhone photo (HEIC)
 cannot be sent as an image block. On macOS the system `sips` decodes it; the
 script below draws the photo upright (EXIF orientation applied), no longer
 than ``MAX_EDGE_PX`` on its long edge, into a JPEG that carries no camera
-metadata (location included). Other hosts have no decoder Ciaobot ships, and
+metadata (location included), then matches it to sRGB (iPhone photos are
+Display P3, and a model reading raw pixel values would see shifted colours). Other hosts have no decoder Ciaobot ships, and
 the original then stays attached as a plain file the agent reads by path.
 """
 from __future__ import annotations
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 HEIF_EXTENSIONS = frozenset({".heic", ".heif", ".heics", ".heifs", ".hif"})
@@ -25,9 +27,18 @@ _HEIF_BRANDS = frozenset({
 })
 
 SIPS = Path("/usr/bin/sips")
+SRGB_PROFILE = Path("/System/Library/ColorSync/Profiles/sRGB Profile.icc")
 CONVERT_TIMEOUT_S = 60
 MAX_EDGE_PX = 2048
+# sips decodes the whole photo before drawing it. A 48 MP iPhone photo is far
+# below this; a crafted 1-gigapixel HEIF is refused and attached as a file.
+MAX_SOURCE_PIXELS = 200_000_000
 _OUTPUT_NAME = "converted.jpg"
+_TOO_MANY_PIXELS = "ciao:too-many-pixels"
+# Each conversion holds a decoded photo in memory; a batch of uploads waits here.
+_CONVERSIONS = threading.BoundedSemaphore(2)
+
+HEIF_TOO_LARGE = "the photo is larger than the 10 MB image limit"
 
 # sips' JavaScript mode (`sips -j`, see `sips --man`) draws into an HTML-style
 # canvas. A plain `sips -s format jpeg` keeps the sensor-order pixels and an
@@ -36,6 +47,10 @@ _OUTPUT_NAME = "converted.jpg"
 _SIPS_SCRIPT = f"""
 const MAX_EDGE = {MAX_EDGE_PX}
 const image = sips.images[0]
+if (image.size.width * image.size.height > {MAX_SOURCE_PIXELS}) {{
+  print('{_TOO_MANY_PIXELS}')
+  throw new Error('too many pixels')
+}}
 const o = Number(image.getProperty('Orientation')) || 1
 const scale = Math.min(1, MAX_EDGE / Math.max(image.size.width, image.size.height))
 const w = Math.max(1, Math.round(image.size.width * scale))
@@ -57,10 +72,11 @@ class HeifConversionError(RuntimeError):
 class HeifNotConverted(ValueError):
     """A HEIF upload kept only as its original file.
 
-    ``original`` is the saved upload; ``reason`` is plain text for the user.
+    ``original`` is the saved upload (None when nothing was saved, such as a
+    desktop drop over the image limit); ``reason`` is plain text for the user.
     """
 
-    def __init__(self, original: Path, reason: str) -> None:
+    def __init__(self, original: Path | None, reason: str) -> None:
         super().__init__(reason)
         self.original = original
         self.reason = reason
@@ -94,22 +110,20 @@ def convert_heif_to_jpeg(source: Path, target: Path) -> None:
         script.write_text(_SIPS_SCRIPT, encoding="utf-8", newline="")
         out_dir = Path(tmp) / "out"
         out_dir.mkdir()
-        argv = [str(SIPS), "-j", str(script), "-o", str(out_dir), str(source)]
-        try:
-            result = subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=CONVERT_TIMEOUT_S,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise HeifConversionError(f"converting the photo took longer than {CONVERT_TIMEOUT_S} s") from exc
-        except OSError as exc:
-            raise HeifConversionError("the system image converter (sips) could not be started") from exc
         produced = out_dir / _OUTPUT_NAME
-        if result.returncode != 0 or not produced.is_file():
-            raise HeifConversionError("the system image converter (sips) could not read this photo")
+        srgb = Path(tmp) / "srgb.jpg"
+        with _CONVERSIONS:
+            result = _run_sips([str(SIPS), "-j", str(script), "-o", str(out_dir), str(source)])
+            if _TOO_MANY_PIXELS in result.stdout.decode("utf-8", "replace"):
+                raise HeifConversionError(
+                    f"the photo has more than {MAX_SOURCE_PIXELS // 1_000_000} million pixels"
+                )
+            if result.returncode != 0 or not produced.is_file():
+                raise HeifConversionError("the system image converter (sips) could not read this photo")
+            result = _run_sips([str(SIPS), "-m", str(SRGB_PROFILE), str(produced), "--out", str(srgb)])
+        if result.returncode != 0 or not srgb.is_file():
+            raise HeifConversionError("the system image converter (sips) could not convert this photo to sRGB")
+        produced = srgb
         with produced.open("rb") as handle:
             if handle.read(3) != b"\xff\xd8\xff":
                 raise HeifConversionError("the system image converter (sips) did not produce a JPEG")
@@ -119,3 +133,18 @@ def convert_heif_to_jpeg(source: Path, target: Path) -> None:
             Path(target).unlink(missing_ok=True)
             raise HeifConversionError("the converted photo could not be saved") from exc
     os.chmod(target, 0o644)
+
+
+def _run_sips(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=CONVERT_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HeifConversionError(f"converting the photo took longer than {CONVERT_TIMEOUT_S} s") from exc
+    except OSError as exc:
+        raise HeifConversionError("the system image converter (sips) could not be started") from exc

@@ -622,9 +622,10 @@ a stored image, `{filename, error}` for a refused one. A HEIC/HEIF photo
 (detected by extension in any case, or by its `ftyp` bytes under another name)
 is converted to JPEG on a macOS host, so its `ref` names the JPEG and
 `mime_type` is `image/jpeg`; the original stays beside it. When the host cannot
-convert it, the entry is `{filename, file_ref: {ref, name}, notice}`: the
-original is kept and attached as a file, and `notice` is the sentence to show
-the user. A native drop reports the same case in a `notices` list
+convert it, or the photo is over the 10 MB image limit (a HEIC is read up to
+the 50 MB attachment limit), the entry is `{filename, file_ref: {ref, name},
+notice}`: the original is kept and attached as a file, and `notice` is the
+sentence to show the user. A native drop reports the same case in a `notices` list
 (`{filename, message}`) next to `errors`, with the dropped file in
 `file_refs`.
 

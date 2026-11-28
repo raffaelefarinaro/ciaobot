@@ -107,8 +107,13 @@ def test_conversion_runs_sips_with_an_argument_list_and_a_timeout(
     source.write_bytes(HEIC_HEAD)
     target = tmp_path / "web_1.jpg"
     seen: dict = {}
+    srgb_calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        if argv[1] == "-m":
+            srgb_calls.append(argv)
+            Path(argv[-1]).write_bytes(Path(argv[3]).read_bytes())
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
         seen["argv"] = argv
         seen["kwargs"] = kwargs
         seen["script"] = Path(argv[2]).read_text(encoding="utf-8")
@@ -133,6 +138,11 @@ def test_conversion_runs_sips_with_an_argument_list_and_a_timeout(
     assert "getProperty('Orientation')" in seen["script"]
     assert f"MAX_EDGE = {heif_images.MAX_EDGE_PX}" in seen["script"]
     assert "'public.jpeg'" in seen["script"]
+    assert f"> {heif_images.MAX_SOURCE_PIXELS})" in seen["script"]
+    # Then the JPEG is matched to sRGB, again from an argument list.
+    [srgb] = srgb_calls
+    assert srgb[:3] == [str(tmp_path / "sips"), "-m", str(heif_images.SRGB_PROFILE)]
+    assert srgb[3] == str(Path(argv[4]) / "converted.jpg") and srgb[4] == "--out"
     assert target.read_bytes() == JPEG
     # The scratch directory holding the script and output is gone.
     assert not Path(argv[2]).exists()
@@ -154,15 +164,33 @@ def test_conversion_without_sips_fails_cleanly(tmp_path: Path, monkeypatch: pyte
         convert_heif_to_jpeg(tmp_path / "a.heic", tmp_path / "a.jpg")
 
 
-@pytest.mark.parametrize("outcome", ["timeout", "exit", "not-jpeg"])
+@pytest.mark.parametrize(
+    ("outcome", "message"),
+    [
+        ("timeout", "longer than"),
+        ("exit", "could not read"),
+        ("too-many-pixels", "million pixels"),
+        ("srgb-fails", "sRGB"),
+        ("not-jpeg", "did not produce a JPEG"),
+    ],
+)
 def test_conversion_failures_leave_no_target(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, message: str
 ) -> None:
     def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
         if outcome == "timeout":
             raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-        if outcome == "not-jpeg":
-            (Path(argv[4]) / "converted.jpg").write_bytes(b"\x89PNG")
+        if argv[1] == "-m":
+            if outcome == "srgb-fails":
+                return subprocess.CompletedProcess(argv, 1, b"", b"Error")
+            Path(argv[-1]).write_bytes(Path(argv[3]).read_bytes())
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        if outcome == "too-many-pixels":
+            # The script prints its marker and throws: sips still exits 0.
+            return subprocess.CompletedProcess(argv, 0, b"ciao:too-many-pixels\n", b"JS Error")
+        if outcome in {"not-jpeg", "srgb-fails"}:
+            body = b"\x89PNG" if outcome == "not-jpeg" else JPEG
+            (Path(argv[4]) / "converted.jpg").write_bytes(body)
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         return subprocess.CompletedProcess(argv, 13, b"", b"Error")
 
@@ -171,9 +199,51 @@ def test_conversion_failures_leave_no_target(
     (tmp_path / "sips").write_text("")
     monkeypatch.setattr(heif_images.subprocess, "run", fake_run)
     target = tmp_path / "a.jpg"
-    with pytest.raises(HeifConversionError):
+    with pytest.raises(HeifConversionError, match=message):
         convert_heif_to_jpeg(tmp_path / "a.heic", target)
     assert not target.exists()
+
+
+def test_at_most_two_conversions_run_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    lock = threading.Lock()
+    running = 0
+    peak = 0
+    release = threading.Event()
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal running, peak
+        if argv[1] == "-m":
+            Path(argv[-1]).write_bytes(Path(argv[3]).read_bytes())
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        release.wait(5)
+        (Path(argv[4]) / "converted.jpg").write_bytes(JPEG)
+        with lock:
+            running -= 1
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(heif_images.sys, "platform", "darwin")
+    monkeypatch.setattr(heif_images, "SIPS", tmp_path / "sips")
+    (tmp_path / "sips").write_text("")
+    monkeypatch.setattr(heif_images.subprocess, "run", fake_run)
+    threads = [
+        threading.Thread(target=convert_heif_to_jpeg, args=(tmp_path / f"{i}.heic", tmp_path / f"{i}.jpg"))
+        for i in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.3)
+    with lock:
+        assert running == 2
+    release.set()
+    for thread in threads:
+        thread.join(5)
+    assert peak == 2
+    assert all((tmp_path / f"{i}.jpg").exists() for i in range(4))
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or not Path("/usr/bin/sips").is_file(), reason="needs macOS sips")
@@ -193,6 +263,11 @@ def test_real_sips_turns_a_rotated_heic_into_an_upright_jpeg(tmp_path: Path) -> 
     assert "pixelWidth: 200" in dims and "pixelHeight: 400" in dims
     # No camera metadata survives: in particular no orientation tag to apply twice.
     assert b"GPS" not in target.read_bytes()
+    profile = subprocess.run(
+        ["/usr/bin/sips", "-g", "profile", str(target)],
+        capture_output=True, text=True, timeout=30, check=True,
+    ).stdout
+    assert "sRGB" in profile
 
 
 # ── what the provider receives ─────────────────────────────────────────────
@@ -318,14 +393,50 @@ def test_images_route_attaches_an_unconvertible_photo_as_a_file(
     # The opaque ref expands, for the agent only, to the saved original.
     token = f"ciao-drop:{entry['file_ref']['ref']}"
     expanded = Path(pcm.expand_file_refs(token, chat.chat_id))
-    assert expanded.parent == pcm._config.media_root.resolve()
+    assert expanded.parent == (pcm._config.media_root / "unconverted" / chat.chat_id).resolve()
     assert expanded.read_bytes() == HEIC_HEAD
+    assert not any(pcm._config.media_root.glob("*.heic"))
+    # It is not an image ref, but it goes with the chat all the same.
+    assert pcm.delete_chat(chat.chat_id) is True
+    assert not expanded.exists()
 
 
-def test_images_route_still_bounds_a_heic_by_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_images_route_attaches_a_heic_over_the_image_limit_as_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Before HEIC uploaded as an image it went up as a plain file (up to the
+    # 50 MB attachment limit); one over the 10 MB image limit still does.
     calls: list[tuple[Path, Path]] = []
     monkeypatch.setattr("ciao.web.project_chats.convert_heif_to_jpeg", _fake_converter(calls))
     monkeypatch.setattr("ciao.web.routes_api.MAX_IMAGE_SIZE_BYTES", 64)
+    monkeypatch.setattr("ciao.web.project_chats.MAX_IMAGE_SIZE_BYTES", 64)
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Photos", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="Photo")
+    big = HEIC_HEAD + b"\x00" * 128
+
+    response = _client(pcm).post(
+        f"/api/chats/{chat.chat_id}/images",
+        files=[
+            ("a", ("IMG_1.HEIC", big, "image/heic")),
+            ("b", ("shot.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 128, "image/png")),
+        ],
+    )
+
+    heic, png = response.json()
+    assert calls == []
+    assert heic["notice"].endswith(f"{heif_images.HEIF_TOO_LARGE}.")
+    expanded = Path(pcm.expand_file_refs(f"ciao-drop:{heic['file_ref']['ref']}", chat.chat_id))
+    assert expanded.read_bytes() == big
+    # Other images keep the image limit.
+    assert "error" in png and "ref" not in png
+
+
+def test_images_route_bounds_a_heic_by_the_attachment_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ciao.web.project_chats.convert_heif_to_jpeg", _fake_converter([]))
+    monkeypatch.setattr("ciao.web.chat_service._PROJECT_UPLOAD_MAX_BYTES", 64)
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Photos", workspace="work")
     chat = pcm.create_chat(project.project_id, title="Photo")
@@ -336,8 +447,33 @@ def test_images_route_still_bounds_a_heic_by_size(tmp_path: Path, monkeypatch: p
     )
 
     [entry] = response.json()
-    assert "error" in entry and "ref" not in entry
-    assert calls == []
+    assert "error" in entry and "ref" not in entry and "file_ref" not in entry
+
+
+def test_fork_copies_a_converted_photo_with_its_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ciao.web.project_chats.convert_heif_to_jpeg", _fake_converter([]))
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Photos", workspace="work")
+    source = pcm.create_chat(project.project_id, title="Photo")
+    saved = pcm.save_image_upload(HEIC_HEAD, "IMG_0001.HEIC")
+    source.user_turn_count = 1
+    source.user_turn_images = {"0": [saved.path.name]}
+
+    fork = pcm.fork_chat(
+        source.chat_id,
+        messages=[
+            {"role": "user", "content": "What is this?", "turn_index": 0, "images": [saved.path.name]},
+            {"role": "assistant", "content": "A photo."},
+        ],
+        turn_index=0,
+    )
+
+    copied = pcm.resolve_image_ref(fork.user_turn_images["0"][0])
+    assert copied is not None and copied.path != saved.path
+    assert copied.original_path is not None and copied.original_path.read_bytes() == HEIC_HEAD
+    assert copied.original_path != saved.original_path
 
 
 def _grant(pcm: ProjectChatManager, paths: list[Path]) -> str:
@@ -394,6 +530,30 @@ def test_desktop_drop_hands_over_the_dropped_heic_when_it_cannot_convert(
     # The media copy made for the conversion attempt is not left behind.
     media = pcm._config.media_root
     assert not media.exists() or not any(media.glob("*.heic"))
+
+
+def test_desktop_drop_hands_over_a_heic_over_the_image_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr("ciao.web.project_chats.convert_heif_to_jpeg", _fake_converter(calls))
+    monkeypatch.setattr("ciao.web.routes_api.MAX_IMAGE_SIZE_BYTES", 64)
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Photos", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="Photo")
+    dropped = tmp_path / "Desktop" / "IMG_big.HEIC"
+    dropped.parent.mkdir()
+    dropped.write_bytes(HEIC_HEAD + b"\x00" * 128)
+
+    response = _client(pcm).post("/api/desktop-drop", json={
+        "grant_id": _grant(pcm, [dropped]), "project_id": project.project_id, "chat_id": chat.chat_id,
+    })
+
+    body = response.json()
+    assert calls == [] and body["errors"] == [] and body["image_refs"] == []
+    assert body["notices"][0]["message"].endswith(f"{heif_images.HEIF_TOO_LARGE}.")
+    expanded = pcm.expand_file_refs(f"ciao-drop:{body['file_refs'][0]['ref']}", chat.chat_id)
+    assert expanded == str(dropped.resolve())
 
 
 def test_heif_not_converted_carries_the_original() -> None:

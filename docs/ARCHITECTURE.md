@@ -510,12 +510,18 @@ behavior. A HEIC/HEIF photo (an iPhone picture; the PWA sends one with an empty
 type as an image too) is the exception among images: agents take PNG, JPEG, GIF
 and WebP only, so `heif_images.py` has the system `sips` draw it upright (EXIF
 orientation applied), at most 2048 px on its long edge and without camera
-metadata, into a JPEG beside the kept original in the media folder, under the
-same ref stem. The JPEG is the image block; the prompt's image line names both
-paths. sips runs from an argument list with a 60 s timeout. Where it is missing
-(Linux, Windows) or fails, the original is attached as a plain file reference
-instead, with a notice for the user, and the message is never dropped; a
-desktop drop hands over the dropped path itself. A conversion error is per-file and non-fatal and leaves the original
+metadata, into an sRGB JPEG beside the kept original in the media folder, under
+the same ref stem. The JPEG is the image block; the prompt's image line names
+both paths, and a fork copies both. sips runs from an argument list with a 60 s
+timeout, at most two conversions at a time, and refuses a photo over 200
+million pixels before drawing it. Where it is missing (Linux, Windows) or
+fails, or the photo is over the 10 MB image limit (a HEIC upload may be up to
+the 50 MB attachment limit), the original is attached as a plain file
+reference instead, with a notice for the user, and the message is never
+dropped. Such an upload is kept under `media/unconverted/<chat id>/`, which
+goes with the chat's images on archive or delete; a desktop drop hands over the
+dropped path itself. A comment takes images only, so there the photo is not
+attached and a toast says so. A conversion error is per-file and non-fatal and leaves the original
 in the folder; a PDF is still attached without its copy. Originals the file
 viewers cannot preview (`.doc`, `.rtf`, `.epub` and the rest) are served by
 `/api/workspace-binary` as downloads.

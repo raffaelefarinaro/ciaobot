@@ -6058,8 +6058,18 @@ export const useProjectStore = defineStore('projects', () => {
     return result.refs
   }
 
+  /** Upload images for a comment, which takes image refs only: a HEIC photo
+   *  the engine could not convert is not attached there, and the user is told. */
   async function uploadImageRefs(chatId: string, files: File[], onProgress?: UploadProgressHandler): Promise<string[]> {
-    return (await postImages(chatId, files, onProgress)).refs
+    const result = await postImages(chatId, files, onProgress)
+    for (const notice of result.notices) {
+      pushToast({
+        chat_id: '',
+        title: `${notice.filename} not attached`,
+        body: 'Comments take images only, and this photo could not be converted to one. Attach it to the message instead.',
+      })
+    }
+    return result.refs
   }
 
   async function postImages(chatId: string, files: File[], onProgress?: UploadProgressHandler): Promise<ImageUploadResult> {

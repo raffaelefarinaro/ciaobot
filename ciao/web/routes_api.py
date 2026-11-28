@@ -67,7 +67,7 @@ from ciao.web.auth import (
     is_loopback_client,
 )
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
-from ciao.web.heif_images import HEIF_EXTENSIONS, HeifNotConverted
+from ciao.web.heif_images import HEIF_EXTENSIONS, HEIF_TOO_LARGE, HeifNotConverted
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import CLAUDE_MODELS, MAX_IMAGE_SIZE_BYTES, CiaoConfig, RESTART_EXIT_CODE, WorkspaceConfig
 from ciao.model_tiers import MAX_MODEL_ID_CHARS
@@ -1789,18 +1789,28 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
         project_id = chat.project_id
         image_refs: list[str] = []
         for path in image_paths:
+            heif = path.suffix.lower() in HEIF_EXTENSIONS
             try:
                 if path.stat().st_size > MAX_IMAGE_SIZE_BYTES:
+                    if heif:
+                        raise HeifNotConverted(None, HEIF_TOO_LARGE)
                     raise ValueError("image too large")
-                image_data = await asyncio.to_thread(
-                    _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
-                )
+                try:
+                    image_data = await asyncio.to_thread(
+                        _read_native_file_limited, path, MAX_IMAGE_SIZE_BYTES
+                    )
+                except OSError as exc:
+                    if heif:
+                        # Handed over unread, like any other non-image drop.
+                        raise HeifNotConverted(None, "Ciaobot could not read it to convert it") from exc
+                    raise
                 attachment = await asyncio.to_thread(pcm.save_image_upload, image_data, path.name)
                 image_refs.append(attachment.path.name)
             except HeifNotConverted as exc:
                 # The dropped file is on this host already: hand the agent that
                 # path, as for any other non-image drop, not the media copy.
-                exc.original.unlink(missing_ok=True)
+                if exc.original is not None:
+                    exc.original.unlink(missing_ok=True)
                 file_refs.append(_desktop_drop_ref(pcm, chat_id, path))
                 keep_paths.add(path)
                 notices.append({
@@ -2839,10 +2849,15 @@ async def chat_images(request: Request) -> JSONResponse:
         if not hasattr(upload, "read"):
             continue
         filename = getattr(upload, "filename", "image.jpg") or "image.jpg"
+        # A HEIC over the image limit is still kept, as a file, up to the
+        # chat attachment limit it had when it went up as a plain file.
+        limit = (
+            chat_service._PROJECT_UPLOAD_MAX_BYTES
+            if Path(filename).suffix.lower() in HEIF_EXTENSIONS
+            else MAX_IMAGE_SIZE_BYTES
+        )
         try:
-            data = await _read_upload_limited(
-                upload, MAX_IMAGE_SIZE_BYTES
-            )
+            data = await _read_upload_limited(upload, limit)
             attachment = await asyncio.to_thread(pcm.save_image_upload, data, filename)
             results.append({
                 "ref": attachment.path.name,
@@ -2851,9 +2866,13 @@ async def chat_images(request: Request) -> JSONResponse:
             })
         except HeifNotConverted as exc:
             name = _drop_display_name(Path(filename))
+            if exc.original is None:  # save_image_upload always keeps the upload
+                results.append({"error": exc.reason, "filename": filename})
+                continue
+            kept = await asyncio.to_thread(pcm.keep_unconverted_upload, chat_id, exc.original)
             results.append({
                 "filename": name,
-                "file_ref": _desktop_drop_ref(pcm, chat_id, exc.original) | {"name": name},
+                "file_ref": _desktop_drop_ref(pcm, chat_id, kept) | {"name": name},
                 "notice": _heif_file_notice(exc.reason),
             })
         except ValueError as exc:
