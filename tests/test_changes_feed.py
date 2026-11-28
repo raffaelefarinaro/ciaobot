@@ -241,7 +241,7 @@ def _pass(chat_id: str, finished: str, title: str = "Thailand booking") -> dict[
 
 def test_groups_the_care_run_and_the_days_newest_first() -> None:
     undo = parse_undo_log(LOG)
-    proposals = [{"id": "p-1", "date": "2026-11-28", "kind": "skill-suggestion", "area": "skills", "path": "Workspace/Proposals/x.md"}]
+    proposals = [{"id": "p-1", "date": "2026-11-28", "kind": "skill-suggestion", "area": "skills", "path": "Workspace/Proposals/x.md", "cites_care_report": True}]
     feed = build_feed(undo=undo, report=REPORT, proposals=proposals, passes=[_pass("pass-1", "2026-11-27T12:00:00")], today=date(2026, 11, 28))
     assert [(g["kind"], g["date"]) for g in feed["groups"]] == [
         ("care", "2026-11-28"), ("day", "2026-11-28"), ("day", "2026-11-27"), ("day", "2026-11-26"),
@@ -332,6 +332,8 @@ def setup(tmp_path: Path):
 
 def test_route_answers_the_feed_with_viewer_paths(setup) -> None:
     _log(setup.vault, LOG)
+    (setup.vault / "People").mkdir()
+    (setup.vault / "People" / "Tom.md").write_text("# Tom\n", encoding="utf-8")
     _proposal(setup.vault, "tighten-weekly")
     body = setup.client.get("/api/memory/changes?workspace=personal").json()
     assert body["workspace"] == "personal"
@@ -381,3 +383,129 @@ def test_route_does_not_leak_the_vault_path_when_it_is_unavailable(setup, monkey
     response = setup.client.get("/api/memory/changes?workspace=personal")
     assert response.status_code == 409
     assert str(setup.root) not in response.text
+
+
+# ── Review fixes: bounded parsing, honest credit, strict paths ─────────────
+
+
+ADVERSARIAL = {
+    "whitespace in a bullet": "- a" + " " * 500_000 + "b",
+    "whitespace in a heading": "## x" + " " * 500_000 + "y",
+    "a run of hashes": "#" * 500_000,
+    "hashes after a heading": "## 2026-11-28 " + "#" * 3000 + " " * 3000 + "y",
+    "repeated by:": "- " + " by: " * 100_000,
+    "repeated separators": "- x " + D + " by: " + (D + " ") * 100_000,
+    "repeated quotes and separators": f'- x {D} by: care y {D} "' + (f'" {D} ' * 60_000) + "w",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(ADVERSARIAL))
+def test_a_hostile_line_is_read_quickly(shape: str) -> None:
+    import time
+
+    line = ADVERSARIAL[shape]
+    text = "## 2026-11-28\n" + line + "\n" + f'- People/A.md {D} by: care stale {D} "q" {D} w\n'
+    started = time.perf_counter()
+    entries = parse_undo_log(text)
+    assert time.perf_counter() - started < 0.5, shape
+    assert entries[-1]["target"] == "People/A.md"
+
+
+def test_hostile_lines_under_the_line_cap_are_still_fast() -> None:
+    import time
+
+    cap = changes_feed.MAX_LINE_CHARS - 10
+    shapes = [
+        "- a" + " " * cap + "b",
+        "## x" + " " * cap + "y",
+        "- " + " by: " * (cap // 5),
+        "- x " + D + " by: " + (D + " ") * (cap // 2),
+        f'- x {D} by: care y {D} "' + (f'" {D} ' * (cap // 4)) + "w",
+    ]
+    started = time.perf_counter()
+    for line in shapes * 50:
+        parse_undo_log("## 2026-11-28\n" + line[: changes_feed.MAX_LINE_CHARS] + "\n")
+    assert time.perf_counter() - started < 1.0
+
+
+def test_hostile_proposal_front_matter_is_read_quickly(tmp_path: Path) -> None:
+    import time
+
+    vault = _vault(tmp_path)
+    folder = vault / "Workspace" / "Proposals"
+    folder.mkdir()
+    (folder / "spaces.md").write_text("---\ntype: skill-edit\ntitle: x" + " " * 60_000 + "y\n---\n", encoding="utf-8")
+    (folder / "open.md").write_text("---\ntype: skill-edit\n" + "evidence:\n" + "  - a\n" * 9000, encoding="utf-8")
+    (folder / "anchors.md").write_text("---\ntype: skill-edit\na: &a [x, x]\nb: [*a, *a, *a]\n---\n", encoding="utf-8")
+    started = time.perf_counter()
+    found = read_skill_suggestions(vault)
+    assert time.perf_counter() - started < 0.5
+    # An unclosed front matter is not one; the over-long title line is skipped.
+    assert sorted(p["path"] for p in found) == ["Workspace/Proposals/anchors.md", "Workspace/Proposals/spaces.md"]
+
+
+def test_front_matter_is_read_without_a_yaml_loader(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    folder = vault / "Workspace" / "Proposals"
+    folder.mkdir()
+    (folder / "block.md").write_text(
+        "---\ntype: 'skill-edit'\ntarget: \"weekly-summary\"\ntitle: |\n  Shorten the\n  weekly summary\n"
+        "evidence:\n  - Workspace/Care-Report.md\n  - chat-1\ncreated: 2026-11-28\nstatus: draft\n---\nbody\n",
+        encoding="utf-8",
+    )
+    [found] = read_skill_suggestions(vault)
+    assert (found["target"], found["title"], found["date"], found["status"]) == ("weekly-summary", "Shorten the weekly summary", "2026-11-28", "draft")
+    assert found["cites_care_report"] is True
+
+
+def _suggestion(path: str, day: str, cites: bool = False) -> dict[str, Any]:
+    return {"id": "p-" + path, "date": day, "kind": "skill-suggestion", "area": "skills", "path": path, "cites_care_report": cites}
+
+
+def test_a_care_run_is_credited_only_with_proposals_it_names() -> None:
+    report = {**REPORT, "steps": [*REPORT["steps"], {
+        "id": "learnings", "state": "done", "what": "route learnings",
+        "evidence": "routed 1 entries (Workspace/Proposals/named-by-step.md), merged 0, pruned 0",
+    }]}
+    proposals = [
+        _suggestion("Workspace/Proposals/named-by-step.md", "2026-11-28"),
+        _suggestion("Workspace/Proposals/cites-the-report.md", "2026-11-28", cites=True),
+        # Same day, written by a memory pass or a chat: not the run's.
+        _suggestion("Workspace/Proposals/from-a-chat.md", "2026-11-28"),
+        # Cites the report but from another day: not this run's.
+        _suggestion("Workspace/Proposals/older.md", "2026-11-20", cites=True),
+    ]
+    feed = build_feed(undo=[], report=report, proposals=proposals, passes=[], today=date(2026, 11, 28))
+    care, *days = feed["groups"]
+    assert care["kind"] == "care"
+    assert [e["path"] for e in care["entries"] if e["kind"] == "skill-suggestion"] == [
+        "Workspace/Proposals/named-by-step.md", "Workspace/Proposals/cites-the-report.md",
+    ]
+    assert feed["care_run"]["skill_suggestions"] == 2
+    filed = {g["date"]: [e["path"] for e in g["entries"]] for g in days}
+    assert filed == {"2026-11-28": ["Workspace/Proposals/from-a-chat.md"], "2026-11-20": ["Workspace/Proposals/older.md"]}
+
+
+@pytest.mark.parametrize("target", ["memory region", "the memory region of AGENTS.md", "Profile region"])
+def test_a_region_named_in_words_is_a_region(target: str) -> None:
+    [entry] = parse_undo_log(f'## 2026-11-28\n- {target} {D} by: care regions {D} "x" {D} y\n')
+    assert entry["region"] in ("memory", "profile") and entry["path"] == ""
+
+
+@pytest.mark.parametrize("target", ["Tom said he likes tea", "People/Tom", "removed a line from the note about tea in People"])
+def test_a_sentence_is_never_a_path(target: str) -> None:
+    [entry] = parse_undo_log(f'## 2026-11-28\n- {target} {D} by: care stale {D} "x" {D} y\n')
+    assert entry["path"] == ""
+
+
+def test_a_note_that_is_not_there_gets_no_path(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    (vault / "People").mkdir()
+    (vault / "People" / "Here.md").write_text("x", encoding="utf-8")
+    (vault / "People" / "Linked.md").symlink_to(vault / "People" / "Here.md")
+    _log(vault, "## 2026-11-28\n" + "".join(
+        f'- People/{n}.md {D} by: care stale {D} "q" {D} w\n' for n in ("Here", "Gone", "Linked")
+    ))
+    feed = changes_feed.read_changes(vault, [], today=date(2026, 11, 28))
+    paths = {e["target"]: e["path"] for g in feed["groups"] for e in g["entries"]}
+    assert paths == {"People/Here.md": "People/Here.md", "People/Gone.md": "", "People/Linked.md": ""}

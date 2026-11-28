@@ -87,7 +87,9 @@ describe('MemoryChangesPanel', () => {
     const wrapper = await mountPanel()
     const row = wrapper.findAll('.mch-row').find(r => r.text().includes('Launch planned for May'))!
     const button = row.get('button')
-    expect(button.attributes('aria-label')).toBe('Undo in a chat: Replaced or removed “Launch planned for May” in Projects/Sample-Project.md')
+    const label = button.attributes('aria-label')!
+    expect(label.length).toBeLessThanOrEqual(80)
+    expect(label.startsWith('Undo in a chat: Replaced or removed “Launch planned for May”')).toBe(true)
     await button.trigger('click')
     await flushPromises()
     expect(startFileDiscussion).toHaveBeenCalledTimes(1)
@@ -117,8 +119,9 @@ describe('MemoryChangesPanel', () => {
     const wrapper = await mountPanel()
     await wrapper.get('.mch-undo').trigger('click')
     await flushPromises()
-    const [, options] = startFileDiscussion.mock.calls[0] as unknown as [unknown, { path: string }]
+    const [, options] = startFileDiscussion.mock.calls[0] as unknown as [unknown, { path: string; seed: string }]
     expect(options.path).toBe(changesFeed.undo_log_path)
+    expect(options.seed).toContain('Pinned beside this chat: the undo log itself')
   })
 
   it('opens a skill suggestion in the care page review', async () => {

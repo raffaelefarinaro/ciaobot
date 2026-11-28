@@ -65,7 +65,7 @@
                 type="button"
                 class="btn-small mch-undo"
                 :disabled="opening !== ''"
-                :aria-label="`Undo in a chat: ${entrySentence(entry)}`"
+                :aria-label="clipLabel(`Undo in a chat: ${entrySentence(entry)}`)"
                 @click="undo(entry)"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -77,7 +77,7 @@
                 v-else-if="entry.kind === 'skill-suggestion' && entry.path"
                 type="button"
                 class="mch-link"
-                :aria-label="`Review: ${entrySentence(entry)}`"
+                :aria-label="clipLabel(`Review: ${entrySentence(entry)}`)"
                 @click="review(entry)"
               >Review</button>
             </div>
@@ -92,7 +92,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  CHANGE_FILTERS, entryMark, entrySentence, entrySource, filterGroups, groupMeta, groupTitle, passTitles, undoChatTitle, undoSeed,
+  CHANGE_FILTERS, clipLabel, entryMark, entrySentence, entrySource, filterGroups, groupMeta, groupTitle, passTitles, undoChatTitle, undoSeed,
   type ChangeEntry, type ChangeFilter,
 } from '../lib/changesFeed'
 import { startFileDiscussion } from '../lib/fileDiscussion'

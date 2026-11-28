@@ -5,8 +5,7 @@ import type { ChangesFeed } from '../lib/changesFeed'
 
 /**
  * The active workspace's Changes feed (`GET /api/memory/changes`), shared by
- * Memory · Changes, its This week window, the care card's summary line and
- * Home's At a glance rows. Read-only: Undo opens a chat, it writes nothing here.
+ * Memory · Changes, its This week window and the care card's summary line. Read-only: Undo opens a chat, it writes nothing here.
  * A surface that opens re-reads it, since a care run or a memory pass may have
  * written since.
  */

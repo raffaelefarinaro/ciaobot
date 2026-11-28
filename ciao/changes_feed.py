@@ -33,7 +33,6 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import yaml
 
 from ciao.care_report import list_vault_folder, read_care_report, read_vault_file, vault_relative_path
 from ciao.redact import redact_text
@@ -55,25 +54,31 @@ MAX_TARGET_CHARS = 240
 MAX_ID_CHARS = 80
 WEEK_DAYS = 7
 
-# The separators the guide writes (an em dash) and the stand-ins a model uses.
-_SEP = r"(?:\u2014|--|\u2013)"
+# A real undo-log line is a few hundred characters. A longer line is dropped
+# before anything looks at it, so a model-written wall of text (the log copies
+# note lines verbatim) cannot make the reader slow. Every check below runs on a
+# line already under this cap, flattened to single spaces, with plain string
+# searches or regexes that do not backtrack.
+MAX_LINE_CHARS = 4000
+
+# The separators the guide writes (an em dash) and the stand-ins a model uses,
+# as they read once whitespace is flattened.
+_SEPS = (" \u2014 ", " -- ", " \u2013 ")
+_BY_WORDS = ("by:", "By:", "BY:")
 _OPEN_QUOTES = ('"', "\u201c")
 _CLOSE_QUOTES = ('"', "\u201d")
-_BULLET = re.compile(r"^\s*[-*+]\s+(.*\S)\s*$")
-_HEADING = re.compile(r"^\s*(#{1,6})\s+(.*?)\s*#*\s*$")
+_FENCES = ("```", "~~~")
 _DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
-_FENCE = re.compile(r"^\s*(```|~~~)")
-_BY_SPLIT = re.compile(r"^(?P<target>.+?)\s+" + _SEP + r"\s+by:\s*(?P<rest>.+)$", re.IGNORECASE)
-_BY_TAIL = re.compile(r"^(?P<by>.+?)\s+" + _SEP + r"\s+(?P<tail>.+)$")
-_BY_KIND = re.compile(r"^(memory pass|care|chat)\s+`?([A-Za-z0-9][A-Za-z0-9_.:-]*)`?", re.IGNORECASE)
-_CLOSE_THEN_SEP = re.compile(r"[\"\u201d]\s+" + _SEP + r"\s+")
-_LAST_SEP = re.compile(r"\s+" + _SEP + r"\s+")
-_REGION = re.compile(r"^(?:ciao:)?(memory|profile)(?:\s+region)?$|\bciao:(memory|profile)\b", re.IGNORECASE)
+_BY_KIND = re.compile(r"(memory pass|care|chat) `?([A-Za-z0-9][A-Za-z0-9_.:-]{0,79})", re.IGNORECASE)
+_REGION = re.compile(
+    r"^(?:ciao:)?(memory|profile)(?: region)?$|\bciao:(memory|profile)\b|\b(memory|profile) region\b", re.IGNORECASE
+)
 _MERGE = re.compile(r"\bmerg|\bduplicate", re.IGNORECASE)
-_FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n(.*?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\.md")
 _SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
 _PROPOSAL_STATUSES = ("draft", "ready", "applied", "rejected")
+_CARE_REPORT_REF = "Workspace/Care-Report.md"
+MAX_EVIDENCE_ITEMS = 20
 
 # Which filter a care step's line belongs under; any other step is about notes.
 STEP_AREAS = {"regions": "memory", "unsure": "memory", "closed-tasks": "tasks", "learnings": "skills"}
@@ -88,66 +93,119 @@ def _entry_id(*parts: str) -> str:
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+def _first_sep(text: str, after: tuple[str, ...] = ("",)) -> tuple[int, int]:
+    """`(start, end)` of the earliest separator followed by one of `after`, or `(-1, -1)`."""
+    best = (-1, -1)
+    for sep in _SEPS:
+        for word in after:
+            at = text.find(sep + word)
+            if at >= 0 and (best[0] < 0 or at < best[0]):
+                best = (at, at + len(sep) + len(word))
+    return best
+
+
 def _split_quote(tail: str) -> tuple[str, str]:
-    """The original text and the reason, from what follows `by: …`."""
+    """The original text and the reason, from what follows `by: …`.
+
+    A quoted original runs to the last closing quote that is followed by a
+    separator, so a quote holding a dash keeps it; an unquoted one runs to the
+    last separator.
+    """
     tail = tail.strip()
     if tail[:1] in _OPEN_QUOTES:
-        closes = list(_CLOSE_THEN_SEP.finditer(tail, 1))
-        if closes:
-            last = closes[-1]
-            return tail[1: last.start()], tail[last.end():]
+        cut, cut_end = -1, -1
+        for close in _CLOSE_QUOTES:
+            for sep in _SEPS:
+                at = tail.rfind(close + sep, 1)
+                if at > cut:
+                    cut, cut_end = at, at + len(close) + len(sep)
+        if cut >= 0:
+            return tail[1:cut], tail[cut_end:]
         if tail[-1:] in _CLOSE_QUOTES and len(tail) > 1:
             return tail[1:-1], ""
         return tail[1:], ""
-    seps = list(_LAST_SEP.finditer(tail))
-    if seps:
-        return tail[: seps[-1].start()], tail[seps[-1].end():]
+    cut, cut_end = -1, -1
+    for sep in _SEPS:
+        at = tail.rfind(sep)
+        if at > cut:
+            cut, cut_end = at, at + len(sep)
+    if cut >= 0:
+        return tail[:cut], tail[cut_end:]
     return tail, ""
+
+
+def _heading(line: str) -> tuple[int, str] | None:
+    """`(level, words)` for a Markdown heading line, else None."""
+    text = line.lstrip()
+    level = len(text) - len(text.lstrip("#"))
+    if not 1 <= level <= 6 or len(text) == level or text[level] not in " \t":
+        return None
+    return level, text[level:].strip().rstrip("#").strip()
+
+
+def _bullet(line: str) -> str:
+    """A bullet's text with whitespace flattened, or "" for any other line."""
+    text = line.strip()
+    if len(text) < 3 or text[0] not in "-*+" or text[1] not in " \t":
+        return ""
+    return " ".join(text[2:].split())
+
+
+def _note_path(target: str) -> str:
+    """`target` as a confined vault path to a Markdown note, or "" (never a whole sentence)."""
+    if len(target) > MAX_TARGET_CHARS or not target.lower().endswith(".md"):
+        return ""
+    return vault_relative_path(target)
 
 
 def parse_undo_log(text: str) -> list[dict[str, Any]]:
     """Every entry of the undo log, in file order. Pure: never raises.
 
     A bullet that does not carry `by:` is not an entry; a bullet before any
-    dated `##` heading has an empty `date`. Fenced code is skipped.
+    dated `##` heading has an empty `date`. A line longer than
+    :data:`MAX_LINE_CHARS` is skipped. A line opening with three backticks or
+    tildes toggles fenced code, which is skipped; an unclosed fence hides the
+    rest of the file, as it does when the file is rendered.
     """
     entries: list[dict[str, Any]] = []
     seen: dict[str, int] = {}
     day = ""
     fenced = False
     for line in text.split("\n"):
+        if len(line) > MAX_LINE_CHARS:
+            continue
         line = line.rstrip("\r")
-        if _FENCE.match(line):
+        if line.lstrip().startswith(_FENCES):
             fenced = not fenced
             continue
         if fenced:
             continue
-        heading = _HEADING.match(line)
-        if heading:
+        heading = _heading(line)
+        if heading is not None:
             # A `##` (or deeper) heading starts a day; one with no date ends it.
-            if len(heading.group(1)) >= 2:
-                found = _DATE.search(heading.group(2))
+            if heading[0] >= 2:
+                found = _DATE.search(heading[1])
                 day = found.group(1) if found else ""
             continue
-        bullet = _BULLET.match(line)
-        if not bullet:
+        body = _bullet(line)
+        if not body:
             continue
-        split = _BY_SPLIT.match(bullet.group(1))
-        if not split:
+        start, end = _first_sep(body, _BY_WORDS)
+        if start < 0:
             continue
-        target_raw = split.group("target").strip().strip("`").strip()
-        rest = split.group("rest")
-        by_tail = _BY_TAIL.match(rest)
-        by_raw, tail = (by_tail.group("by"), by_tail.group("tail")) if by_tail else (rest, "")
+        target_raw = body[:start].strip().strip("`").strip()
+        rest = body[end:].strip()
+        by_start, by_end = _first_sep(rest)
+        by_raw, tail = (rest[:by_start], rest[by_end:]) if by_start >= 0 else (rest, "")
         quote, why = _split_quote(tail) if tail else ("", "")
         by_kind, by_id = "other", ""
         by_match = _BY_KIND.match(by_raw.strip().strip("`"))
         if by_match:
             by_kind = by_match.group(1).lower().replace(" ", "_")
-            by_id = by_match.group(2)[:MAX_ID_CHARS]
+            by_id = by_match.group(2)
         region_match = _REGION.search(target_raw)
-        region = (region_match.group(1) or region_match.group(2)).lower() if region_match else ""
-        path = "" if region else vault_relative_path(target_raw)
+        region = next((g for g in region_match.groups() if g), "").lower() if region_match else ""
+        path = "" if region else _note_path(target_raw)
         if region:
             kind, area = "memory-remove", "memory"
         elif _MERGE.search(why):
@@ -204,8 +262,59 @@ def _as_date(value: object) -> str:
     return found.group(1) if found else ""
 
 
+def _front_matter(text: str) -> dict[str, Any]:
+    """The few scalar fields and the evidence list of a proposal's front matter.
+
+    Read line by line with plain string operations, not a YAML loader: the
+    file is model-written, and only `type`, `target`, `title`, `created`,
+    `status` and `evidence` are needed. A block scalar (`|` or `>`) keeps its
+    indented lines; an evidence item is an indented `- item` line.
+    """
+    if not text.startswith("---"):
+        return {}
+    lines = text.split("\n")
+    fields: dict[str, Any] = {"evidence": []}
+    current = ""
+    for raw in lines[1:]:
+        line = raw.rstrip("\r")
+        if line.strip() == "---":
+            return fields
+        if len(line) > MAX_LINE_CHARS:
+            current = ""
+            continue
+        if line[:1] in (" ", "\t"):
+            item = line.strip()
+            if current == "evidence" and item.startswith("- ") and len(fields["evidence"]) < MAX_EVIDENCE_ITEMS:
+                fields["evidence"].append(item[2:].strip().strip("'\""))
+            elif current and current != "evidence" and isinstance(fields.get(current), str):
+                fields[current] = (fields[current] + " " + item).strip()
+            continue
+        key, colon, value = line.partition(":")
+        key = key.strip()
+        if not colon or not key:
+            current = ""
+            continue
+        current = key
+        value = value.strip()
+        if key == "evidence":
+            if value.startswith("[") and value.endswith("]"):
+                items = [v.strip().strip("'\"") for v in value[1:-1].split(",")]
+                fields["evidence"] = [v for v in items if v][:MAX_EVIDENCE_ITEMS]
+            continue
+        if value in ("|", ">", "|-", ">-", "|+", ">+"):
+            value = ""
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        fields[key] = value
+    return {}
+
+
 def read_skill_suggestions(vault_root: Path) -> list[dict[str, Any]]:
-    """Skill-edit proposals in `Workspace/Proposals/`, as entries. Never raises."""
+    """Skill-edit proposals in `Workspace/Proposals/`, as entries. Never raises.
+
+    `cites_care_report` is true when the proposal's evidence lists the care
+    report: the run that wrote it says so there.
+    """
     try:
         names = sorted(name for name in list_vault_folder(vault_root, PROPOSALS_PARTS) if _SLUG.fullmatch(name))
     except (OSError, ValueError, RuntimeError):
@@ -218,26 +327,21 @@ def read_skill_suggestions(vault_root: Path) -> list[dict[str, Any]]:
             continue
         if status != "ok":
             continue
-        front = _FRONT_MATTER.match(raw.decode("utf-8", errors="replace"))
-        if front is None:
-            continue
-        try:
-            fields = yaml.safe_load(front.group(1))
-        except yaml.YAMLError:
-            continue
-        if not isinstance(fields, dict) or fields.get("type") != "skill-edit":
+        fields = _front_matter(raw.decode("utf-8", errors="replace"))
+        if fields.get("type") != "skill-edit":
             continue
         target = str(fields.get("target") or "")
         status_field = fields.get("status")
         found.append({
             "id": f"p-{_entry_id('proposal', name)}",
-            "date": _as_date(fields.get("created")),
+            "date": _as_date(str(fields.get("created") or "")[:MAX_TARGET_CHARS]),
             "kind": "skill-suggestion",
             "area": "skills",
             "target": target if _SKILL_NAME.fullmatch(target) else "",
             "title": _clip(fields.get("title"), 200),
             "status": status_field if status_field in _PROPOSAL_STATUSES else "",
             "path": "/".join((*PROPOSALS_PARTS, name)),
+            "cites_care_report": any(_CARE_REPORT_REF in str(item) for item in fields.get("evidence") or []),
             "undo": False,
         })
     return found
@@ -308,8 +412,17 @@ def build_feed(
     """Group everything by care run and by day, newest first, with the counts. Pure.
 
     The care group is the last report's run: its finished steps, the undo-log
-    entries its steps wrote on its date and the skill suggestions dated that
-    day. Everything else is filed under its day.
+    entries a care step wrote on the run's date, and the skill suggestions the
+    run itself names (a step's evidence names the proposal file, or the
+    proposal's evidence lists the care report and it is dated that day). A
+    proposal a memory pass or a chat wrote is filed under its day.
+
+    Caveats, from what the records hold: the undo log has dates, not times, so
+    two care runs on one day (a re-run) both credit their lines to the last
+    report's run, and a run that crosses midnight files the lines it dated the
+    next day under that day. Within a day, undo-log entries are newest first by
+    their order in the file; the care group comes before the day group of the
+    same date whatever its time.
     """
     care: dict[str, Any] | None = None
     if report and report.get("status") == "ok":
@@ -341,12 +454,17 @@ def build_feed(
             day_group(entry["date"])["entries"].append(entry)
     if care is not None and report is not None:
         care["entries"].extend(_care_entries(report))
+    care_words = " ".join(
+        f"{step.get('evidence') or ''} {step.get('what') or ''}" for step in (report or {}).get("steps") or []
+    ) if care is not None else ""
     for proposal in proposals:
-        if not proposal["date"]:
-            continue
-        if care is not None and proposal["date"] == care["date"]:
+        named = care is not None and (
+            proposal["path"] in care_words
+            or (proposal.get("cites_care_report") and proposal["date"] == care["date"])
+        )
+        if named and care is not None:
             care["entries"].append(proposal)
-        else:
+        elif proposal["date"]:
             day_group(proposal["date"])["entries"].append(proposal)
     for chat in reversed(passes):
         day_group(chat["date"])["entries"].append(chat)
@@ -396,9 +514,25 @@ def build_feed(
     return {"groups": kept, "week": week, "today": today_counts, "care_run": care_run}
 
 
+def _note_exists(vault_root: Path, path: str) -> bool:
+    try:
+        status, _raw, _mtime = read_vault_file(vault_root, tuple(path.split("/")), limit=1, tail=True)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return status in ("ok", "tail")
+
+
 def read_changes(vault_root: Path, passes: Iterable[dict[str, Any]], *, today: date | None = None) -> dict[str, Any]:
-    """The whole feed for one vault. Never raises."""
+    """The whole feed for one vault. Never raises.
+
+    An undo-log entry's path is kept only when that note is there now (a
+    regular file reached without following a link), so Undo never pins a file
+    that does not exist.
+    """
     undo_status, undo = read_undo_log(vault_root)
+    for entry in undo:
+        if entry["path"] and not _note_exists(vault_root, entry["path"]):
+            entry["path"] = ""
     feed = build_feed(
         undo=undo,
         report=read_care_report(vault_root),

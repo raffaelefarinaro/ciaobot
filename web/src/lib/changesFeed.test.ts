@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  careRunWords, changedToday, dayLabel, entryMark, entrySentence, entrySource, filterGroups, groupMeta, groupTitle, passTitles,
+  careRunWords, clipLabel, dayLabel, entryMark, entrySentence, entrySource, filterGroups, groupMeta, groupTitle, passTitles,
   undoChatTitle, undoSeed, weekRows, type ChangeEntry,
 } from './changesFeed'
 import { changesFeed } from './changesFeedFixture'
@@ -74,7 +74,6 @@ describe('counts', () => {
     expect(weekRows(changesFeed.week).map(r => [r.label, r.value])).toEqual([
       ['Lines replaced or removed', 3], ['In always-loaded memory', 1], ['In notes', 2], ['Skill suggestions', 1], ['Chats read for memory', 2],
     ])
-    expect(changedToday(changesFeed)).toBe(3)
   })
 })
 
@@ -91,6 +90,22 @@ describe('undo draft', () => {
     expect(seed).toContain('Pinned beside this chat: memory-vault/x/Projects/Sample-Project.md')
     expect(seed).toContain('change nothing until I agree')
     expect(seed).toContain('by: chat <this chat\'s id>')
+  })
+
+  it('says so when the undo log itself is pinned because no note is there', () => {
+    const seed = undoSeed({ ...byId('u-3'), path: '', open_path: '' }, { pinned: 'log.md', undoLogPath: 'log.md' })
+    expect(seed).toContain('Pinned beside this chat: the undo log itself, log.md')
+    expect(seed).toContain('names no note that is there now. Find where the earlier text belongs first')
+    expect(seed).not.toContain('in the pinned note')
+  })
+
+  it('clips an accessible name at a word, keeping the visible words first', () => {
+    expect(clipLabel('short')).toBe('short')
+    const long = `Undo in a chat: ${'word '.repeat(40)}`
+    const clipped = clipLabel(long)
+    expect(clipped.length).toBeLessThanOrEqual(80)
+    expect(clipped.startsWith('Undo in a chat: word word')).toBe(true)
+    expect(clipped.endsWith('word…')).toBe(true)
   })
 
   it('puts a region line back with ciao memory update', () => {
