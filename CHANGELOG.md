@@ -1,5 +1,92 @@
 # Changelog
 
+## v2.0.0 - unreleased
+
+**Heads up:**
+- **Windows is no longer supported.** Ciaobot 2.0 runs on macOS (the Ciaobot app) and on Linux servers (the one-line installer). Windows installs stay on 1.10 and do not update; move your workspace folder to a Mac or Linux machine to keep using it. **Mac:** Ciaobot is now one app download that includes the engine; after this update, Home shows where to get it. **Linux:** `curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh`; existing source installs keep working (docs/LINUX.md).
+- **OpenCode needs 2.3.2 or newer.** Older versions are refused with a message that says so.
+- **Restarts and updates no longer wait for background work.** Programmatic restarts and updates start without waiting for background agents or shells to finish.
+- **The Mac app updates itself** through Sparkle. Installs that stay on 1.x do not get the 2.0.0 hop after 2.0.1: reinstall them by hand to get later releases.
+- **Messages always queue.** A message sent while a reply runs waits and runs as the next turn. There is no Steer and no "While a reply is running" setting.
+- **No background panel.** Subagents show in the chat's activity trace as their dispatch row, with nested tool lines; on OpenCode only the dispatch row shows for now. There is no running list, no Stop for a background shell, no Move to background, no subagent transcript page and no live agent count. Work interrupted by an upgrade restart is not picked up again.
+- **Schedules are judged on the turn's own reply.** A run whose background agents report later may be archived first.
+- **Ciaobot no longer limits what the agent can touch.** "File access: Workspace only" is gone. Every workspace has the same file access as your user account, within the agent's permission mode, and bypass means full access, including for schedules and webhook runs. The agent CLI's own permission settings (Claude Code `permissions`, OpenCode `permission`) are the only limit. Ciaobot no longer blocks agent file tools from `.env`, `.runtime/` and `secrets/`.
+- **MCP is managed in each agent's CLI.** Settings → MCP servers and Chat details → MCP open `claude mcp` or `opencode mcp`. There are no Ciaobot sign-in cards, on/off toggles or automatic reloads; servers you turned off stay off. A running chat picks up changes after `ciao chat reload` or in a new chat.
+- **Google Workspace is no longer built in.** The Google account card, `ciao gws` and the Google skills are gone. Connect Google through your agent instead: Claude's and Codex's own Google connectors, or the Google Workspace MCP server (see https://www.raffaelefarinaro.com/ciaobot/companions.html#google). Existing `secrets/gws*` folders are left in place.
+- **Question cards are not shown.** When the agent asks a multiple-choice question, it asks in plain text; 2.0 has no question card yet.
+- **Claude trims more by default.** The MCP resource tools (list/read MCP resources), `PublishPlugin`, `ShareOnboardingGuide` and the slides and whiteboard skills are off by default. If your MCP servers serve resources, turn the MCP resource tools back on in Settings.
+- **Mac: install the 2.0 app once by hand.** Download `Ciaobot-<version>.dmg` from this release, open it and drag Ciaobot to Applications. A 1.x install does not update itself to the 2.0 app; after this one manual install, the app updates itself.
+- **The review screens are gone.** To decide, History and Vault Review no longer exist. The agent writes to your notes directly and Git is the undo: open the folder's Git history to see or revert a change. What the agent is unsure of goes on `Workspace/Unsure.md`, and proposed skill or note changes are files you can open.
+- **The Care cycle card is gone.** Workspace care no longer has a card in Automations. It is a scheduled checklist the agent runs, and its report is `Workspace/Care-Report.md`.
+- **Handover and approval settings are gone.** There are no memory handover or approval options in Settings; stored values are ignored.
+- **Moving from 1.x:** https://www.raffaelefarinaro.com/ciaobot/migrate.html
+
+### New features
+- **Ciaobot for Mac:** one app download that includes the engine, with a menu-bar tray, quit confirmation, start at sign-in, and updates through Sparkle. Switch between saved servers and This Mac from the tray, and move your workspace from inside the app. (macOS)
+- **One-line Linux installer:** `install.sh` installs the engine as a service on a Linux server (`ciao service install`), and `ciao update` re-runs the latest installer. (Linux)
+- **Codex, Claude and OpenCode over ACP:** all three agent CLIs run through the Agent Client Protocol using the copies installed on your machine, so Codex is available as a provider and a missing adapter is installed for you. Settings → Providers shows a plain "Not installed" state and refreshes model lists after an account change.
+- **Shared brains:** Settings → Shared brains links a shared notes folder or a Git clone to a workspace and lets you switch each brain on or off. The agent reads it, and a stock instruction tells it how to write to it. There is no review queue: you manage the brain's own history.
+- **Separate notes folder:** setup can place your notes in a cloud-synced folder, and notes stay in place when that folder is briefly unavailable.
+- **Workspace care:** the agent runs a care checklist on a schedule and writes its report to `Workspace/Care-Report.md`. There is no care card.
+- **Memory review by the agent:** the agent writes memory directly, Git is the undo, uncertain items go to `Workspace/Unsure.md`, and proposals are files. There are no review screens.
+- **Conversation import is a skill:** importing past conversations is done by asking the agent, which uses the import skill, instead of a Settings flow.
+- **Loops:** ask a chat to start a loop (`ciao loop start`, `list`, `stop`). Loops live in Automations and show a Stop chip in the composer, stop after two failed runs with one notification, and end with their chat.
+- **Usage page:** a heatmap, projects, memory pipeline, hours and models, plus a Today section on Home (`ciao stats`).
+- **Folder browser:** open any folder pinned or linked in a chat, browse it from Chat details, and see it docked in the pinned tile.
+- **Search chats:** search both active and archived chats in a workspace.
+- **Changes in the chat worktree:** see what a chat changed in its git worktree.
+- **Change permission mode in a running chat** from the chat's picker.
+- **Check answers against your vault:** a Settings switch makes the agent verify claims against vault notes before answering, with a badge and claim list in chat.
+- **Terminal per workspace:** the browser terminal opens in the workspace you pick.
+- **Claude context trimming:** Settings card to choose what Claude loads, including claude.ai connectors and scheduling tools.
+- **Opt-in automatic updates** when the engine is idle, and an Updates card that fits Sparkle in the Mac app.
+
+### Improvements
+- The Mac app remembers the local engine sign-in, no longer shows a system notification when a memory pass finishes, and its Dock icon no longer changes colour with the workspace.
+- Subagent and shell activity is shown as nested cards in the chat; tracked background shells tell the chat when they finish, and Stop on a late reply cancels the agent.
+- Permission approvals from the agent are explicit and one-time, and keep their scope.
+- Needs-you cards are tidier: usage-limit errors share one card, and a tall card keeps its key control in view on a phone.
+- Usage-limit retries are automatic and hourly, Claude five-hour limits are recognised, and scheduled retries run at the provider's reset time.
+- Schedules store no permission mode of their own; chats keep one mode.
+- Memory passes read linked chat snippets and the real note before deciding, recall opens the best-matching note instead of snippets, old learning suggestions are handled automatically, and archiving no longer blocks the engine.
+- Phone and iOS polish: safe-area composer, 16px prose, an opaque iOS status bar, header with menu, tidy composer image chips, and one header row for chats, tasks and projects.
+- Tasks open as pages in the sidebar, and automations get the chat layout with the title rail.
+- Uploads accept any file type; message images open in the in-app viewer.
+- Settings are reworded for the 2.0 app, and a new site page explains moving from 1.x to 2.0.
+- Ciaobot is now MIT licensed.
+
+### Bug fixes
+- A completed reply stays visible across a hidden continuation ([#2753](https://github.com/raffaelefarinaro/ciaobot/issues/2753)).
+- A failed turn shows its error card once ([#3092](https://github.com/raffaelefarinaro/ciaobot/issues/3092)).
+- Opening a chat no longer takes about 10 seconds or flashes the transcript ([#3091](https://github.com/raffaelefarinaro/ciaobot/issues/3091)).
+- The chat title rail no longer sticks halfway or skips several chats on one swipe ([#3090](https://github.com/raffaelefarinaro/ciaobot/issues/3090)).
+- Stop recovers a chat stuck in the working state ([#3034](https://github.com/raffaelefarinaro/ciaobot/issues/3034)).
+- A chat whose registry save failed no longer stays permanently working ([#2938](https://github.com/raffaelefarinaro/ciaobot/issues/2938)), and chat admission recovers cleanly ([#2946](https://github.com/raffaelefarinaro/ciaobot/issues/2946)).
+- A deferred retry that fails no longer stays pending forever, and a memory pass pinned by a retry no longer blocks the workspace queue ([#2647](https://github.com/raffaelefarinaro/ciaobot/issues/2647)), ([#2646](https://github.com/raffaelefarinaro/ciaobot/issues/2646)).
+- Files with a narrow no-break space in the name, such as macOS screenshots, open ([#2787](https://github.com/raffaelefarinaro/ciaobot/issues/2787)).
+- Folder links in chat open the folder browser instead of a blank window ([#2790](https://github.com/raffaelefarinaro/ciaobot/issues/2790)).
+- A turn no longer fails when the context-usage lookup hits a closed OpenCode client ([#2780](https://github.com/raffaelefarinaro/ciaobot/issues/2780)).
+- Chat tables no longer squeeze columns when the first column holds prose ([#2914](https://github.com/raffaelefarinaro/ciaobot/issues/2914)).
+- The chat column no longer flickers on arrow keys in the slash and mention picker ([#2834](https://github.com/raffaelefarinaro/ciaobot/issues/2834)).
+- Renaming a chat in the header no longer clips a wrapped title ([#2758](https://github.com/raffaelefarinaro/ciaobot/issues/2758)).
+- The model picker can be closed on iPhone ([#3093](https://github.com/raffaelefarinaro/ciaobot/issues/3093)).
+- The mobile decision box shows its submit button ([#2601](https://github.com/raffaelefarinaro/ciaobot/issues/2601)).
+- Chat update no longer reports a refused permission escalation as success ([#2824](https://github.com/raffaelefarinaro/ciaobot/issues/2824)).
+- Backup merges no longer overwrite git-ignored live files such as schedules ([#2764](https://github.com/raffaelefarinaro/ciaobot/issues/2764)).
+- File responses no longer freeze the engine after a request replay ([#2890](https://github.com/raffaelefarinaro/ciaobot/issues/2890)).
+- A provider update check no longer calls an unknown version up to date ([#2904](https://github.com/raffaelefarinaro/ciaobot/issues/2904)).
+- A conversation no longer fails on mixed encrypted provider history ([#2602](https://github.com/raffaelefarinaro/ciaobot/issues/2602)).
+- An invalidated provider sign-in names its provider and the fix ([#2648](https://github.com/raffaelefarinaro/ciaobot/issues/2648)).
+- Chat details lists OpenCode skills loaded by ID ([#2863](https://github.com/raffaelefarinaro/ciaobot/issues/2863)).
+- A note left unverified by an unattended run can be re-verified in an attended chat ([#2848](https://github.com/raffaelefarinaro/ciaobot/issues/2848)), ([#2928](https://github.com/raffaelefarinaro/ciaobot/issues/2928)).
+- Existing vaults adopted per root are not offered relocation ([#2845](https://github.com/raffaelefarinaro/ciaobot/issues/2845)), and onboarding into an existing vault repo registers the right vault ([#2619](https://github.com/raffaelefarinaro/ciaobot/issues/2619)).
+- Task delegation refuses an unknown model before creating a chat ([#2509](https://github.com/raffaelefarinaro/ciaobot/issues/2509)).
+- A stored font scale of 1.2 moves to the new default ([#2715](https://github.com/raffaelefarinaro/ciaobot/issues/2715)).
+- A workspace audit reads only that workspace's MEMORY.md ([#2501](https://github.com/raffaelefarinaro/ciaobot/issues/2501)).
+- Concurrent schedule writers no longer overwrite each other's changes ([#3068](https://github.com/raffaelefarinaro/ciaobot/issues/3068)).
+
+[Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.10.0...v2.0.0)
+
 ## v1.10.0 - 2026-11-06
 
 ### New features
