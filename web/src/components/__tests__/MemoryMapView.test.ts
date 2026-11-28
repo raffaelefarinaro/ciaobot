@@ -627,7 +627,7 @@ describe('MemoryMapView sections', () => {
     expect(mm.section).toBe('unsure')
     expect(apiGet).toHaveBeenCalledWith('/api/memory/unsure?workspace=personal')
     const panel = wrapper.get('.mu')
-    expect(panel.findAll('.mu-row-title').map(t => t.text())).toEqual(['Do you prefer tea?', 'Ada is a client.'])
+    expect(panel.findAll('.rq-row-title').map(t => t.text())).toEqual(['Do you prefer tea?', 'Ada is a client.'])
     expect(panel.text()).toContain('Approved, not saved yet')
     // The rail: how it works, with the counts, and the Always loaded window.
     const rail = wrapper.get('.mm-review-rail')
@@ -643,7 +643,28 @@ describe('MemoryMapView sections', () => {
       : base(url)))
     const { wrapper } = await mountSection('unsure')
     expect(wrapper.get('.mu').text()).toContain('Nothing is waiting. Care adds a line here only when it is not sure enough to write something down.')
-    expect(wrapper.find('.mu-row').exists()).toBe(false)
+    expect(wrapper.find('.rq-row').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows the skill suggestions on /memory/skills, read through /api/memory/skill-proposals, with no rail', async () => {
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((url: string) => (url.startsWith('/api/memory/skill-proposals')
+      ? Promise.resolve({
+        workspace: 'personal', found: true, counts: { waiting: 1 }, skipped: 0, truncated: false,
+        items: [{
+          path: 'Workspace/Proposals/ask-dates.md', open_path: 'memory-vault/personal/Workspace/Proposals/ask-dates.md',
+          withheld: false, type: 'skill-edit', target: 'weekly-summary', title: 'Ask for the dates first', summary: '',
+          rationale: '', proposed_change: 'Ask first.', evidence: [], created: '2026-11-26', status: 'draft', body: '', problems: [],
+        }],
+      })
+      : base(url)))
+    const { wrapper, mm } = await mountSection('skills')
+    expect(mm.section).toBe('skills')
+    expect(wrapper.get('.pane-header').text()).toContain('Memory · Skills')
+    expect(apiGet).toHaveBeenCalledWith('/api/memory/skill-proposals?workspace=personal')
+    expect(wrapper.get('.msk').findAll('.rq-row-title').map(t => t.text())).toEqual(['Ask for the dates first'])
+    expect(wrapper.find('.mm-review-rail').exists()).toBe(false)
     wrapper.unmount()
   })
 

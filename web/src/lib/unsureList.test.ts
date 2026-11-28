@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  appliesUnattended, approveEffect, discussSeed, foundDate, keyBelongsElsewhere, kindLabel, needsChatReason, queueKey,
+  appliesUnattended, approveEffect, discussSeed, foundDate, kindLabel, needsChatReason,
   reasonParts, ruleChange, unsureChatCount, unsureMore, unsureSources, vaultFile, type UnsureItem,
 } from './unsureList'
 
@@ -117,41 +117,5 @@ describe('unsureList', () => {
     for (const kind of ['category', 'repo', 'rule'] as const) expect(approveEffect(item({ kind })).chat).toBe(true)
     expect(approveEffect(item({ kind: 'repo', qualifier: '~/repos/app/' })).where).toBe('~/repos/app/AGENTS.md')
     expect(approveEffect(item({ malformed: true })).chat).toBe(true)
-  })
-
-  it('maps the queue keys and ignores chords, IME composition and keys already taken', () => {
-    const key = (init: KeyboardEventInit & { keyCode?: number }) => {
-      const event = new KeyboardEvent('keydown', { cancelable: true, ...init })
-      if (init.keyCode) Object.defineProperty(event, 'keyCode', { value: init.keyCode })
-      return event
-    }
-    expect(queueKey(key({ key: 'a' }))).toBe('approve')
-    expect(queueKey(key({ key: 'A' }))).toBe('approve')
-    expect(queueKey(key({ key: 'd' }))).toBe('dismiss')
-    expect(queueKey(key({ key: 's' }))).toBe('skip')
-    expect(queueKey(key({ key: 'ArrowDown' }))).toBe('next')
-    expect(queueKey(key({ key: 'ArrowUp' }))).toBe('previous')
-    expect(queueKey(key({ key: 'x' }))).toBeNull()
-    for (const mod of ['metaKey', 'ctrlKey', 'altKey', 'shiftKey'] as const) expect(queueKey(key({ key: 'a', [mod]: true }))).toBeNull()
-    expect(queueKey(key({ key: 'a', isComposing: true }))).toBeNull()
-    expect(queueKey(key({ key: 'a', keyCode: 229 }))).toBeNull()
-    const taken = key({ key: 'a' })
-    taken.preventDefault()
-    expect(queueKey(taken)).toBeNull()
-  })
-
-  it('leaves a key to a text field, a menu or a dialog, but not to the queue\'s own list', () => {
-    document.body.innerHTML = '<div class="chat-split-side"><button id="s">s</button></div><div id="q"><ul role="listbox"><li id="o">x</li></ul></div><input id="i"><div role="menu"><button id="m">m</button></div><div contenteditable="true"><span id="c">c</span></div><button id="b">b</button>'
-    const queue = document.getElementById('q')
-    const at = (id: string) => document.getElementById(id)
-    expect(keyBelongsElsewhere(at('i'), queue)).toBe(true)
-    expect(keyBelongsElsewhere(at('m'), queue)).toBe(true)
-    expect(keyBelongsElsewhere(at('c'), queue)).toBe(true)
-    expect(keyBelongsElsewhere(at('o'), queue)).toBe(false)
-    // A chat or terminal in the slot beside the page.
-    expect(keyBelongsElsewhere(at('s'), queue)).toBe(true)
-    expect(keyBelongsElsewhere(at('b'), queue)).toBe(false)
-    expect(keyBelongsElsewhere(document.body, queue)).toBe(false)
-    document.body.innerHTML = ''
   })
 })

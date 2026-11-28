@@ -106,8 +106,8 @@
             class="nav-item"
             :class="{ 'nav-item--active': mode === 'memory' }"
             title="memory"
-            :data-count="unsureWaiting || undefined"
-            :aria-label="unsureWaiting ? `memory — ${unsureWaiting} waiting on Unsure` : 'memory'"
+            :data-count="memoryWaiting || undefined"
+            :aria-label="memoryWaiting ? `memory — ${memoryWaiting} waiting on Unsure and Skills` : 'memory'"
           >
             <!-- Book/tray: rectilinear like the rest of the rail, which the
                  organic-curve brain never was. -->
@@ -1007,6 +1007,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { useUnsureStore } from '../stores/unsure'
+import { useSkillProposalsStore } from '../stores/skillProposals'
 import ChatSignals from './ChatSignals.vue'
 import { useDragSort, type DragCommit } from '../composables/useDragSort'
 import { useMenuFocusReturn } from '../composables/useMenuFocusReturn'
@@ -1079,6 +1080,13 @@ watch(() => store.activeWorkspace, ws => unsure.show(ws), { immediate: true })
 const unsureWaiting = computed(() => (
   unsure.list && unsure.list.workspace === store.activeWorkspace ? unsure.list.counts.waiting : 0
 ))
+const skillProposals = useSkillProposalsStore()
+watch(() => store.activeWorkspace, ws => skillProposals.show(ws), { immediate: true })
+/** Skill suggestions waiting in the selected workspace; 0 while unknown. */
+const skillsWaiting = computed(() => (
+  skillProposals.list && skillProposals.list.workspace === store.activeWorkspace ? skillProposals.list.counts.waiting : 0
+))
+const memoryWaiting = computed(() => unsureWaiting.value + skillsWaiting.value)
 
 // Memory's sections. Scoped counts come from the stores so they use the same
 // workspace rule as each page's list — a count that disagreed with the rows
@@ -1091,6 +1099,8 @@ const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
     // The list of what Ciaobot could not settle; its count is the lines still
     // waiting (not the approved ones the next care run applies).
     { section: 'unsure', label: 'Unsure' },
+    // Skill-edit proposals waiting on the person; counted like Unsure.
+    { section: 'skills', label: 'Skills' },
     // The last daily care run, read from its report file: no count either.
     { section: 'care', label: 'Workspace care' },
   ] },
@@ -1109,6 +1119,7 @@ function memoryNavCount(section: MemorySection): number | null {
     // says how much of the vault there is.
     case 'categories': return null
     case 'unsure': return unsureWaiting.value || null
+    case 'skills': return skillsWaiting.value || null
     case 'care': return null
   }
 }
@@ -1116,7 +1127,7 @@ function memoryNavLabel(item: MemoryNavItem): string {
   const count = memoryNavCount(item.section)
   if (count === null) return item.label
   if (item.section === 'map') return `${item.label}, ${count} notes`
-  if (item.section === 'unsure') return `${item.label}, ${count} waiting`
+  if (item.section === 'unsure' || item.section === 'skills') return `${item.label}, ${count} waiting`
   return `${item.label}, ${count}`
 }
 const hasBlockingHousekeeping = computed(() => housekeeping.actions.some(action => action.blocking))

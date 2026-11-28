@@ -81,6 +81,20 @@ def _blank(value: object) -> bool:
     return False
 
 
+def read_front_matter(text: str) -> tuple[dict[str, Any], str] | None:
+    """The front matter as a mapping and the body after it; None when there is none to read."""
+    match = _FRONT_MATTER.match(text)
+    if match is None:
+        return None
+    try:
+        loaded = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    return loaded, match.group(2)
+
+
 def check(text: str, *, filename: str, parent: str | None = None) -> list[str]:
     """Every problem with one proposal file; an empty list means it is valid."""
     problems: list[str] = []

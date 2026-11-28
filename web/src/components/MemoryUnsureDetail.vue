@@ -27,7 +27,7 @@
 
     <section v-if="sources.length && !compact" class="mud-section" :aria-labelledby="`${titleId}-from`">
       <h4 :id="`${titleId}-from`" class="mud-label">Where it came from</h4>
-      <MemoryUnsureSources :sources="sources" :list-path="listPath" />
+      <ReviewSources :sources="sources" :vault-root="vaultRoot" />
     </section>
 
     <section class="mud-section" :aria-labelledby="`${titleId}-approve`">
@@ -57,7 +57,7 @@
 
     <section v-if="sources.length && compact" class="mud-section mud-section--end" :aria-labelledby="`${titleId}-from`">
       <h4 :id="`${titleId}-from`" class="mud-label">Where it came from</h4>
-      <MemoryUnsureSources :sources="sources" :list-path="listPath" />
+      <ReviewSources :sources="sources" :vault-root="vaultRoot" />
     </section>
   </div>
 </template>
@@ -65,10 +65,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useFileViewerStore } from '../stores/fileViewer'
-import MemoryUnsureSources from './MemoryUnsureSources.vue'
+import ReviewSources from './ReviewSources.vue'
 import {
   approveEffect, foundDate, kindLabel, reasonParts, ruleChange, unsureChatCount, unsureMore, unsureSources,
-  vaultFile, type UnsureItem,
+  unsureVaultRoot, vaultFile, type UnsureItem,
 } from '../lib/unsureList'
 
 /**
@@ -95,6 +95,7 @@ const rule = computed(() => ruleChange(props.item))
 const more = computed(() => unsureMore(props.item))
 const reason = computed(() => reasonParts(props.item.reason, props.listPath))
 const sources = computed(() => unsureSources(props.item))
+const vaultRoot = computed(() => unsureVaultRoot(props.listPath))
 const whereFile = computed(() => (effect.value.whereIsNote ? vaultFile(props.listPath, effect.value.where) : ''))
 const whereLead = computed(() => {
   switch (effect.value.lineRole) {

@@ -320,22 +320,24 @@ describe('ProjectSidebar memory section', () => {
     expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['Explore'])
     const items = nav.findAll('.memory-nav-item')
     expect(items.map(i => i.attributes('href'))).toEqual([
-      '/memory/unsure', '/memory/care', '/memory/map', '/memory/categories',
+      '/memory/unsure', '/memory/skills', '/memory/care', '/memory/map', '/memory/categories',
       'https://www.raffaelefarinaro.com/ciaobot/memory.html',
     ])
     expect(items[0].text()).toContain('Unsure')
-    expect(items[1].text()).toContain('Workspace care')
+    expect(items[1].text()).toContain('Skills')
+    expect(items[2].text()).toContain('Workspace care')
     // Explore holds the map, then the list of what the map is drawing.
-    expect(items[2].text()).toContain('Map')
-    expect(items[3].text()).toContain('Categories')
-    // The Unsure list and the care report are files and the category list is
-    // configuration: no count on any of them.
+    expect(items[3].text()).toContain('Map')
+    expect(items[4].text()).toContain('Categories')
+    // Nothing waiting on Unsure or Skills, the care report and the category
+    // list (configuration): no count on any of them.
     expect(items[0].find('.memory-nav-count').exists()).toBe(false)
     expect(items[1].find('.memory-nav-count').exists()).toBe(false)
-    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
+    expect(items[2].find('.memory-nav-count').exists()).toBe(false)
+    expect(items[4].find('.memory-nav-count').exists()).toBe(false)
     expect(items[0].attributes('aria-label')).toBe('Unsure')
     // How memory works is the last row: a quiet link to the site that opens outside the app.
-    const help = items[4]
+    const help = items[5]
     expect(help.element.tagName).toBe('A')
     expect(help.text()).toContain('How memory works')
     expect(help.attributes('target')).toBe('_blank')
@@ -365,7 +367,7 @@ describe('ProjectSidebar memory section', () => {
     await vi.waitFor(() => expect(wrapper.get('a[href="/memory"]').attributes('data-count')).toBe('3'))
 
     expect(apiGet).toHaveBeenCalledWith('/api/memory/unsure?workspace=personal')
-    expect(wrapper.get('a[href="/memory"]').attributes('aria-label')).toBe('memory — 3 waiting on Unsure')
+    expect(wrapper.get('a[href="/memory"]').attributes('aria-label')).toBe('memory — 3 waiting on Unsure and Skills')
     const row = wrapper.get('a[href="/memory/unsure"]')
     expect(row.get('.memory-nav-count').text()).toBe('3')
     expect(row.attributes('aria-label')).toBe('Unsure, 3 waiting')
@@ -379,6 +381,23 @@ describe('ProjectSidebar memory section', () => {
     apiGet.mockResolvedValue({ rows: [] })
   })
 
+  it('counts the skill suggestions waiting, on the Skills row and in the Memory link\'s total', async () => {
+    const unsure = { workspace: 'personal', path: 'memory-vault/personal/Workspace/Unsure.md', found: true, items: [], counts: { waiting: 2, ticked: 0 } }
+    const skills = { workspace: 'personal', found: true, items: [], counts: { waiting: 3 }, skipped: 0, truncated: false }
+    apiGet.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/memory/unsure')) return unsure
+      if (String(path).startsWith('/api/memory/skill-proposals')) return skills
+      return { rows: [] }
+    })
+    const wrapper = await mountSidebar()
+    await vi.waitFor(() => expect(wrapper.get('a[href="/memory"]').attributes('data-count')).toBe('5'))
+    expect(apiGet).toHaveBeenCalledWith('/api/memory/skill-proposals?workspace=personal')
+    const row = wrapper.get('a[href="/memory/skills"]')
+    expect(row.get('.memory-nav-count').text()).toBe('3')
+    expect(row.attributes('aria-label')).toBe('Skills, 3 waiting')
+    apiGet.mockResolvedValue({ rows: [] })
+  })
+
   it('shows no map count until the selected workspace\'s graph has loaded', async () => {
     // Switching to an uncached workspace leaves the previous graph's nodes in
     // place while the new one loads; its count must not appear under the new
@@ -387,7 +406,7 @@ describe('ProjectSidebar memory section', () => {
     mm.nodes = [{ id: 'n', title: 'n', type: 'note', tags: [], aliases: [], description: '', workspace: 'work', degree: 0, mtime: 0, updated: '', stale: false, ageDays: null, x: 0, y: 0, vx: 0, vy: 0 }] as never
     mm.loadedWorkspace = 'work'
     const wrapper = await mountSidebar()
-    const map = wrapper.findAll('.memory-nav-item')[2]
+    const map = wrapper.findAll('.memory-nav-item')[3]
     expect(map.find('.memory-nav-count').exists()).toBe(false)
 
     mm.loadedWorkspace = 'personal'

@@ -29,6 +29,15 @@
       </div>
     </div>
 
+    <!-- Skills: the open skill-edit proposals, the same queue as Unsure. No
+         rail: the list and the open suggestion take the whole page. -->
+    <div v-else-if="mm.section === 'skills'" class="mm-review-wrap">
+      <div class="page-grid page-grid--single mm-review-grid">
+        <div class="page-main">
+          <MemorySkillsPanel />
+        </div>
+      </div>
+    </div>
 
     <!-- Workspace care: the last daily run, read from its report file. -->
     <div v-else-if="mm.section === 'care'" class="mm-review-wrap">
@@ -303,6 +312,7 @@ import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
 import MemoryUnsurePanel from './MemoryUnsurePanel.vue'
 import MemoryUnsureRail from './MemoryUnsureRail.vue'
 import MemoryCarePanel from './MemoryCarePanel.vue'
+import MemorySkillsPanel from './MemorySkillsPanel.vue'
 import MemoryCareRail from './MemoryCareRail.vue'
 import { useProjectStore } from '../stores/projects'
 import {
@@ -1250,6 +1260,7 @@ const SECTION_LABELS: Record<MemorySection, string> = {
   map: 'Map',
   categories: 'Categories',
   unsure: 'Unsure',
+  skills: 'Skills',
   care: 'Workspace care',
 }
 // The route owns the section. Bare /memory lands on the section last visited

@@ -1,52 +1,53 @@
 <template>
-  <div class="mudk" :style="{ '--mudk-behind': behind }">
+  <div class="rvd" :style="{ '--rvd-behind': behind }">
     <!-- The next two items peek out behind the card: shape only, nothing to read. -->
-    <div v-for="n in behind" :key="n" class="mudk-shadow" :class="`mudk-shadow--${n}`" aria-hidden="true"></div>
+    <div v-for="n in behind" :key="n" class="rvd-shadow" :class="`rvd-shadow--${n}`" aria-hidden="true"></div>
     <article
       ref="card"
-      class="mudk-card"
-      :class="{ 'mudk-card--dragging': dragging, 'mudk-card--flying': flying, 'mudk-card--approve': progress > 0, 'mudk-card--dismiss': progress < 0 }"
+      class="rvd-card"
+      :class="{ 'rvd-card--dragging': dragging, 'rvd-card--flying': flying, 'rvd-card--approve': progress > 0, 'rvd-card--dismiss': progress < 0 }"
       :style="cardStyle"
       :aria-labelledby="titleId"
-      data-unsure-card
+      data-review-card
       @pointerdown="onDown"
       @pointermove="onMove"
       @pointerup="onUp"
       @pointercancel="onCancel"
       @click.capture="onClickCapture"
     >
-      <span class="mudk-stamp mudk-stamp--approve" :style="{ opacity: Math.max(0, progress) }" aria-hidden="true">APPROVE</span>
-      <span class="mudk-stamp mudk-stamp--dismiss" :style="{ opacity: Math.max(0, -progress) }" aria-hidden="true">DISMISS</span>
-      <MemoryUnsureDetail :item="item" :list-path="listPath" :title-id="titleId" compact />
+      <span class="rvd-stamp rvd-stamp--approve" :style="{ opacity: Math.max(0, progress) }" aria-hidden="true">APPROVE</span>
+      <span class="rvd-stamp rvd-stamp--dismiss" :style="{ opacity: Math.max(0, -progress) }" aria-hidden="true">{{ dismissStamp }}</span>
+      <slot />
     </article>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import MemoryUnsureDetail from './MemoryUnsureDetail.vue'
-import type { UnsureItem } from '../lib/unsureList'
 import { swipeAxis, swipeOutcome, swipeProgress, swipeTransform, type SwipeOutcome } from '../lib/unsureSwipe'
 
 /**
- * The phone queue: the current Unsure item as a card, the next ones peeking
- * behind. Dragging the card sideways tilts it (not under reduced motion) and
- * stamps APPROVE or DISMISS; let go past the threshold (lib/unsureSwipe.ts)
+ * The phone queue (Memory · Unsure, Memory · Skills): the current item as a
+ * card (its content is the slot), the next ones peeking behind. Dragging the card sideways tilts it (not under reduced motion) and
+ * stamps APPROVE or the dismiss word (DISMISS, or REJECT); let go past the threshold (lib/unsureSwipe.ts)
  * and it flies off and emits `decide`, short of it and it springs back. A
  * vertical move is left to the browser, so a long card still scrolls; a drag
  * never also clicks a link inside the card. `fling(op)` runs the same exit
  * for the buttons under the card and the keys; `reset()` brings the card back
  * when the write was refused.
  */
-const props = defineProps<{
-  item: UnsureItem
-  listPath: string
+const props = withDefaults(defineProps<{
+  /** The item's identity: a new one brings the card back to rest. */
+  itemKey: string
+  /** The id of the card's title, which names the card. */
   titleId: string
   /** How many cards peek out behind this one (0 to 2). */
   behind: number
   /** No swipe while a write is in flight or care runs. */
   disabled?: boolean
-}>()
+  /** The stamp a leftward drag shows. */
+  dismissStamp?: string
+}>(), { disabled: false, dismissStamp: 'DISMISS' })
 const emit = defineEmits<{ decide: [op: 'approve' | 'dismiss'] }>()
 
 const card = ref<HTMLElement | null>(null)
@@ -137,25 +138,25 @@ function reset(): void {
   start = null
 }
 
-watch(() => props.item.id, reset)
+watch(() => props.itemKey, reset)
 
 defineExpose({ fling, reset })
 </script>
 
 <style scoped>
-.mudk { position: relative; display: grid; padding-bottom: calc(var(--mudk-behind, 0) * 8px); }
-.mudk-shadow,
-.mudk-card { grid-area: 1 / 1; }
-.mudk-shadow {
+.rvd { position: relative; display: grid; padding-bottom: calc(var(--rvd-behind, 0) * 8px); }
+.rvd-shadow,
+.rvd-card { grid-area: 1 / 1; }
+.rvd-shadow {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg2);
   transform-origin: 50% 100%;
 }
-.mudk-shadow--1 { transform: translateY(8px) scale(0.96); opacity: 0.7; }
-.mudk-shadow--2 { transform: translateY(16px) scale(0.92); opacity: 0.45; }
+.rvd-shadow--1 { transform: translateY(8px) scale(0.96); opacity: 0.7; }
+.rvd-shadow--2 { transform: translateY(16px) scale(0.92); opacity: 0.45; }
 
-.mudk-card {
+.rvd-card {
   position: relative;
   z-index: 1;
   display: flex;
@@ -177,12 +178,12 @@ defineExpose({ fling, reset })
   -webkit-user-select: none;
   transition: transform 180ms var(--ease), border-color 120ms var(--ease);
 }
-.mudk-card > :deep(.mud) { flex: 1; }
-.mudk-card--dragging { transition: none; cursor: grabbing; }
-.mudk-card--approve { border-color: var(--success); }
-.mudk-card--dismiss { border-color: var(--error); }
+.rvd-card > :slotted(*) { flex: 1; }
+.rvd-card--dragging { transition: none; cursor: grabbing; }
+.rvd-card--approve { border-color: var(--success); }
+.rvd-card--dismiss { border-color: var(--error); }
 
-.mudk-stamp {
+.rvd-stamp {
   position: absolute;
   top: 14px;
   z-index: 2;
@@ -196,11 +197,11 @@ defineExpose({ fling, reset })
   letter-spacing: 0.04em;
   pointer-events: none;
 }
-.mudk-stamp--approve { right: 14px; color: var(--success); transform: rotate(6deg); }
-.mudk-stamp--dismiss { left: 14px; color: var(--error-text); transform: rotate(-6deg); }
+.rvd-stamp--approve { right: 14px; color: var(--success); transform: rotate(6deg); }
+.rvd-stamp--dismiss { left: 14px; color: var(--error-text); transform: rotate(-6deg); }
 
 @media (prefers-reduced-motion: reduce) {
-  .mudk-card { transition: none; }
-  .mudk-stamp { transform: none; }
+  .rvd-card { transition: none; }
+  .rvd-stamp { transform: none; }
 }
 </style>

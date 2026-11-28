@@ -54,6 +54,7 @@ from ciao.repo_location import resolve_chat_location
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import loads_untrusted, write_private_text
 from ciao.file_kernel import QueueLockError
+from ciao.skill_proposals import read_skill_proposals
 from ciao.unsure_list import UnsureError, change_line, read_list, restore_line, is_line_id as is_unsure_line_id
 from ciao.os_support.child_env import child_env
 from ciao.port_in_use import BIND_PHASE
@@ -4675,6 +4676,31 @@ async def unsure_list(request: Request) -> JSONResponse:
     return JSONResponse(payload)
 
 
+async def skill_proposals(request: Request) -> JSONResponse:
+    """GET one workspace's open skill-edit proposals, for Memory · Skills (read-only).
+
+    `?workspace=<name>` answers :func:`ciao.skill_proposals.read_skill_proposals`
+    plus each item's `open_path` (the file as the file viewer opens it). The
+    client names a workspace, never a path. Approve and Reject are not here:
+    the page opens an attended chat, or saves the file's `status:` line through
+    `POST /api/workspace-file`, exactly as the care page's proposal review does.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace or config.workspace(workspace) is None:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        vault = Path(config.workspace_vault_root(workspace)).resolve()
+    except (AttributeError, ValueError, OSError) as exc:
+        logger.warning("skill proposals: vault for %s unavailable: %s", workspace, type(exc).__name__)
+        return JSONResponse({"error": "the workspace's vault is not available"}, status_code=503)
+    payload: dict[str, Any] = await asyncio.to_thread(read_skill_proposals, vault)
+    for item in payload["items"]:
+        item["open_path"] = _care_display_path(config, vault / item["path"])
+    payload["workspace"] = workspace
+    return JSONResponse(payload)
+
+
 async def vault_delete_note(request: Request) -> JSONResponse:
     """Permanently delete one vault note from the Memory Map.
 
@@ -5351,9 +5377,13 @@ async def workspace_file_write(request: Request) -> Response:
     editor (FileViewerModal edit mode). Snapshots the result so the edit is
     auditable alongside agent edits.
 
-    Body: ``{"chat_id": str, "path": str, "content": str}``. ``chat_id``
-    determines which chat's history the snapshot lands in; if omitted the
-    write still goes through but no snapshot is recorded.
+    Body: ``{"chat_id": str, "path": str, "content": str, "expected_content": str}``.
+    ``chat_id`` determines which chat's history the snapshot lands in; if
+    omitted the write still goes through but no snapshot is recorded.
+    ``expected_content`` (optional) makes the save conditional: the file must
+    exist and hold exactly that text, else 409 ``file_changed`` and nothing is
+    written. A proposal's Reject and its Undo send the text they read, so an
+    edit made in between is never overwritten.
     """
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
@@ -5364,8 +5394,11 @@ async def workspace_file_write(request: Request) -> Response:
     raw_path = str(body.get("path", "")).strip()
     content = body.get("content", "")
     chat_id = str(body.get("chat_id", "")).strip()
+    expected = body.get("expected_content")
     if not raw_path or not isinstance(content, str):
         return JSONResponse({"error": "missing path or content"}, status_code=400)
+    if expected is not None and not isinstance(expected, str):
+        return JSONResponse({"error": "expected_content must be text"}, status_code=400)
     if len(content.encode("utf-8")) > _WORKSPACE_FILE_MAX_BYTES:
         return JSONResponse({"error": "content too large"}, status_code=413)
 
@@ -5384,6 +5417,17 @@ async def workspace_file_write(request: Request) -> Response:
         resolved = result
     if resolved.suffix.lower() not in _WORKSPACE_FILE_EXTS:
         return JSONResponse({"error": "unsupported type"}, status_code=415)
+
+    if expected is not None:
+        try:
+            current = resolved.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            current = None
+        if current != expected:
+            return JSONResponse(
+                {"error": "the file changed since it was read; nothing was written", "code": "file_changed"},
+                status_code=409,
+            )
 
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)

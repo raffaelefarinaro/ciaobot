@@ -130,7 +130,7 @@ test.describe('chats that pin a file, on a subfolder vault', () => {
 
   test('Go through the Unsure list pins Unsure.md', async ({ page }) => {
     const seen = await engine(page)
-    await boot(page, '/memory/unsure', '.mu-row')
+    await boot(page, '/memory/unsure', '.rq-row')
     await page.getByRole('button', { name: 'Go through it with Ciaobot' }).click()
     await settled(page, seen, `${INSTALL}/${VAULT}/Workspace/Unsure.md`)
   })
