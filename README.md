@@ -20,13 +20,19 @@ Ciaobot is your **second brain and personal assistant**: a persistent personal w
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-The first-run setup in your browser lets you use a notes folder you already have: tick **Use a separate existing notes folder** and enter it in **Notes folder on the Ciaobot computer**. Ciaobot's own data stays in the workspace folder.
+On the Mac, to use a notes folder you already have, choose it in the app's first-run setup: tick **Use a separate existing notes folder** and enter it in **Notes folder on the Ciaobot computer**. Ciaobot's own data stays in the workspace folder.
+
+On Linux, to use another folder, such as a notes folder you already have, pass `--workspace`:
+
+```bash
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --workspace ~/MyNotes
+```
 
 Your notes stay yours, in plain Markdown, usable with any other tool. Keep the notes and workspace folders out of iCloud Drive, Dropbox, Google Drive and OneDrive: sync conflicts damage files and Git history. Use Ciaobot's [private Git backup](https://www.raffaelefarinaro.com/ciaobot/memory.html#backup) instead.
 
 The first time you open Ciaobot, Home shows your workspace folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Overview** and the password in **Settings → General**.
 
-Ciaobot does not run a model of its own. It drives the Claude Code, OpenCode or Codex CLI already installed on the computer running Ciaobot, signed in with your own account, so your login and the models you can pick come from that CLI. MCP servers, plugins and skills you set up in a CLI are picked up by its Ciaobot chats, with project-level ones read from the workspace folder; Ciaobot can still hide some of Claude Code's built-in tools per workspace.
+Ciaobot does not run a model of its own. It drives the Claude Code, OpenCode or Codex CLI already installed on the computer running Ciaobot, signed in with your own account, so your login and the models you can pick come from that CLI. MCP servers, plugins and skills you set up in Claude Code or OpenCode are picked up by their Ciaobot chats, with project-level ones read from the workspace folder; Ciaobot can still hide some of Claude Code's built-in tools per workspace. Codex chats use your installed, signed-in `codex` CLI.
 
 ### Existing installs
 
